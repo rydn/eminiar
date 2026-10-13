@@ -41,6 +41,8 @@ export interface ChunkInput {
   startLine?: number | undefined;
   endLine?: number | undefined;
   hash: string;
+  /** Graph node id (`sym:<rel>#<Qualified>`) this chunk is the body of, for code. */
+  symbolId?: string | undefined;
 }
 
 export interface ChunkRow {
@@ -54,6 +56,7 @@ export interface ChunkRow {
   end_line: number | null;
   hash: string;
   embedded: number;
+  symbol_id: string | null;
 }
 
 export interface ChunkWithDoc extends ChunkRow {

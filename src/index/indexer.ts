@@ -2,6 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import fg from "fast-glob";
 import { chunk, hashText, type Kind } from "../chunker/index.js";
+import { finalize, type RawChunk } from "../chunker/types.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { ContentType, Source } from "../storage/types.js";
 
@@ -14,6 +15,10 @@ export interface IndexInput {
   contentType?: ContentType | undefined;
   sessionId?: string | undefined;
   meta?: Record<string, unknown> | undefined;
+  /** Pre-cut chunks (e.g. symbol-aligned code); skips the generic chunker. */
+  chunks?: RawChunk[] | undefined;
+  /** Re-chunk even when the content is unchanged (the chunking itself changed). */
+  force?: boolean | undefined;
 }
 
 export interface IndexResult {
@@ -29,17 +34,22 @@ export function indexContent(db: StorageAdapter, input: IndexInput): IndexResult
   const kind =
     input.kind ??
     (input.contentType === "code" ? "code" : input.contentType === "json" ? "json" : undefined);
-  const { chunks, kind: k } = chunk(input.content, input.title, kind, input.uri);
+  const { chunks, kind: k } = input.chunks
+    ? { chunks: finalize(input.chunks, input.contentType ?? "code"), kind: kind ?? "code" }
+    : chunk(input.content, input.title, kind, input.uri);
   const contentHash = hashText(input.content);
   const existing = input.uri ? db.findDocumentByUri(input.uri) : undefined;
   if (existing && existing.content_hash === contentHash) {
-    return {
-      documentId: existing.id,
-      created: false,
-      chunks: chunks.length,
-      chars: input.content.length,
-      kind: k,
-    };
+    if (!input.force) {
+      return {
+        documentId: existing.id,
+        created: false,
+        chunks: chunks.length,
+        chars: input.content.length,
+        kind: k,
+      };
+    }
+    db.deleteDocument(existing.id);
   }
   const { id, created } = db.upsertDocument(
     {

@@ -78,6 +78,22 @@ export class SqliteAdapter implements StorageAdapter {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
+    // em_regexp(pattern, flags, text) backs chunkRegexSearch; compiled patterns are cached.
+    const compiled = new Map<string, RegExp>();
+    this.db.function("em_regexp", { deterministic: true }, (pattern, flags, text) => {
+      const key = `${String(flags ?? "")}/${String(pattern)}`;
+      let re = compiled.get(key);
+      if (!re) {
+        try {
+          re = new RegExp(String(pattern), String(flags ?? ""));
+        } catch {
+          return 0;
+        }
+        if (compiled.size > 64) compiled.clear();
+        compiled.set(key, re);
+      }
+      return re.test(String(text ?? "")) ? 1 : 0;
+    });
     this.vectors = opts.vectors ?? true;
     if (this.vectors) sqliteVec.load(this.db);
     this.migrate(opts.dims ?? 384);
@@ -136,8 +152,8 @@ export class SqliteAdapter implements StorageAdapter {
         );
       const id = Number(info.lastInsertRowid);
       const ins = this.db.prepare(
-        `INSERT INTO chunks (document_id, ord, title, body, content_type, start_line, end_line, hash)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO chunks (document_id, ord, title, body, content_type, start_line, end_line, hash, symbol_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       for (const c of chunks) {
         ins.run(
@@ -149,6 +165,7 @@ export class SqliteAdapter implements StorageAdapter {
           c.startLine ?? null,
           c.endLine ?? null,
           c.hash,
+          c.symbolId ?? null,
         );
       }
       return { id, created: true };
@@ -225,6 +242,7 @@ export class SqliteAdapter implements StorageAdapter {
         end_line: r.end_line as number | null,
         hash: r.hash as string,
         embedded: r.embedded as number,
+        symbol_id: (r.symbol_id as string | null) ?? null,
         document,
       };
     });
@@ -249,6 +267,32 @@ export class SqliteAdapter implements StorageAdapter {
       .prepare(`${SqliteAdapter.CHUNK_SELECT} WHERE c.document_id = ? ORDER BY c.ord`)
       .all(documentId) as Row[];
     return this.hydrate(rows);
+  }
+
+  chunksForSymbol(symbolId: string): ChunkWithDoc[] {
+    const rows = this.db
+      .prepare(`${SqliteAdapter.CHUNK_SELECT} WHERE c.symbol_id = ? ORDER BY c.document_id, c.ord`)
+      .all(symbolId) as Row[];
+    return this.hydrate(rows);
+  }
+
+  chunkRegexSearch(
+    pattern: string,
+    flags: string,
+    limit: number,
+    filters?: SearchFilters,
+  ): number[] {
+    if (pattern.length > 200) throw new Error("regex pattern is too long (max 200 chars)");
+    new RegExp(pattern, flags); // surfaces a syntax error before the scan
+    const { where, params } = filterSql(filters);
+    const rows = this.db
+      .prepare(
+        `SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id
+         WHERE em_regexp(?, ?, c.body) = 1${where}
+         ORDER BY d.created_at DESC, c.ord LIMIT ?`,
+      )
+      .all(pattern, flags, ...params, limit) as Array<{ id: number }>;
+    return rows.map((r) => r.id);
   }
 
   // --- lexical search ----------------------------------------------------
@@ -681,6 +725,11 @@ export class SqliteAdapter implements StorageAdapter {
           .prepare(`DELETE FROM graph_edges WHERE source = ? AND src IN (${ph})`)
           .run(source, ...slice);
       }
+      // Every symbol of the file shares the `sym:<path>#` prefix, so this also drops
+      // edges whose source node never existed or no longer does (e.g. from a parser bug).
+      this.db
+        .prepare("DELETE FROM graph_edges WHERE source = ? AND src LIKE ? ESCAPE '\\'")
+        .run(source, `sym:${path.replace(/[%_\\]/g, "\\$&")}#%`);
       if (opts.keepFile) {
         this.db
           .prepare("DELETE FROM graph_nodes WHERE source = ? AND path = ? AND kind != 'file'")

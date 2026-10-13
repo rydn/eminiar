@@ -11,5 +11,6 @@ Run `em_search` with the user's query: $ARGUMENTS
 - Split a compound question into several `queries` — one call, one round trip.
 - `--timeline` or "what did we do" style questions → `sort: "timeline"`.
 - Questions about past decisions, constraints or errors → also call `em_recall`.
+- A pattern (`--regex`, or something with `\(`, `\d`, `|`) → `mode: "regex"`.
 
 Summarise the hits briefly and cite `doc N` ids so the user can drill in.

@@ -1,6 +1,6 @@
 {
   "name": "eminiar",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local-first context, memory and knowledge-graph plugin for Claude Code. Sandboxed execution, FTS5 + vector search, session continuity, and a code graph — nothing leaves your machine.",
   "type": "module",
   "license": "MIT",

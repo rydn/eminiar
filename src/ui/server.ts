@@ -53,7 +53,8 @@ export async function serve(opts: { port: number; open: boolean; root?: string }
         const q = url.searchParams.get("q")?.trim();
         if (!q) return json(res, 400, { error: "q required" });
         const mode =
-          (url.searchParams.get("mode") as "hybrid" | "lexical" | "semantic" | null) ?? "hybrid";
+          (url.searchParams.get("mode") as "hybrid" | "lexical" | "semantic" | "regex" | null) ??
+          "hybrid";
         return json(res, 200, await searchPayload(ctx(), q, mode, num("limit", 10)));
       }
       if (url.pathname === "/api/memories") {

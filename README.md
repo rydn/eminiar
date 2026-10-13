@@ -17,7 +17,12 @@ that make it work better:
   `.eminiar/memories/<topic>/<name>.md` (human-editable, committed with the repo), mirrored into
   the search index and the graph. `/em-onboard` writes the onboarding set.
 - **Knowledge graph** — `em_graph_impact`, `em_graph_query`, `em_graph_add`: tree-sitter
-  (TS/JS) symbols, imports and calls + git co-change coupling and hotspots + curated concepts.
+  (TS/JS) symbols, imports, calls and references + git co-change coupling and hotspots +
+  curated concepts and memories.
+- **Symbols** — `em_symbols`: file overview, find by name path (`Class/method`,
+  `src/x.ts#Class.method`) with the body, and references, Serena-style but without language
+  servers. Code search chunks are cut at declarations and titled by symbol. A database built by
+  an older version gets one automatic full code reindex on first use.
 - **Stats** — `em_stats`, a statusline, and a local web dashboard (`eminiar serve`).
 
 ## Install
@@ -49,6 +54,8 @@ The plugin injects short routing guidance at session start. Slash commands: `/em
 | `em_search {queries, sort}` | anything indexed, `sort: "timeline"` after a resume |
 | `em_recall {query}` / `em_remember {content, kind, name?}` | past decisions, constraints, errors |
 | `em_memory {action: list \| read \| edit \| rename \| delete, name}` | the memory files themselves |
+| `em_symbols {mode: overview \| find \| references, file, name_path, include_body}` | navigate code by symbol instead of reading files |
+| `em_search {queries, mode: "regex"}` | grep indexed content with context |
 | `em_graph_impact {node}` | what breaks if a file/symbol changes, and why |
 | `em_graph_query {preset: "hotspots" \| "coupled" \| "orphans"}` | where change concentrates |
 | `em_stats`, `em_doctor`, `em_reindex`, `em_purge` | housekeeping |

@@ -68,11 +68,12 @@ export function statsPayload(ctx: ProjectContext) {
 export async function searchPayload(
   ctx: ProjectContext,
   q: string,
-  mode: "hybrid" | "lexical" | "semantic",
+  mode: "hybrid" | "lexical" | "semantic" | "regex",
   limit: number,
 ) {
   const db = getStorage(ctx);
-  const vectorSearch = mode === "lexical" ? undefined : await vectorRanker(ctx, db);
+  const vectorSearch =
+    mode === "lexical" || mode === "regex" ? undefined : await vectorRanker(ctx, db);
   const r = await search(db, q, { limit, mode, vectorSearch });
   return {
     query: r.query,
@@ -84,6 +85,7 @@ export async function searchPayload(
       doc: h.chunk.document_id,
       chunk: h.chunk.ord,
       lines: h.chunk.start_line ? `${h.chunk.start_line}-${h.chunk.end_line}` : null,
+      symbol: h.chunk.symbol_id,
       created: h.chunk.document.created_at,
       score: h.score,
       snippet: h.snippet,

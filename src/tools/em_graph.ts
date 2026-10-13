@@ -16,7 +16,7 @@ import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
 import { defineTool, errorResult, text } from "./types.js";
 
-async function ensureGraph(ctx: Parameters<typeof getStorage>[0]) {
+export async function ensureGraph(ctx: Parameters<typeof getStorage>[0]) {
   const db = getStorage(ctx);
   if (!db.graphCounts().nodes) {
     await reindexCode(ctx, db);
@@ -259,7 +259,7 @@ export const emReindex = defineTool({
     if (scope === "code" || scope === "all") {
       const s = await reindexCode(ctx, db, { paths: args.paths, full: args.full });
       lines.push(
-        `code: ${s.scanned} scanned, ${s.parsed} parsed, ${s.unchanged} unchanged, ${s.removed} removed${s.errors.length ? `, ${s.errors.length} errors (${s.errors[0]!.path}: ${s.errors[0]!.error})` : ""}`,
+        `code: ${s.scanned} scanned, ${s.parsed} parsed, ${s.unchanged} unchanged, ${s.removed} removed${s.skipped ? `, ${s.skipped} skipped (over 1.5 MB)` : ""}${s.errors.length ? `, ${s.errors.length} errors (${s.errors[0]!.path}: ${s.errors[0]!.error})` : ""}`,
       );
     }
     if (scope === "git" || scope === "all") {

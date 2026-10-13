@@ -21,7 +21,11 @@ export function formatResults(responses: SearchResponse[], maxTokens: number): s
       const d = h.chunk.document;
       const when = new Date(d.created_at).toISOString().slice(0, 16).replace("T", " ");
       const loc = h.chunk.start_line ? ` L${h.chunk.start_line}-${h.chunk.end_line}` : "";
-      const header = `## ${h.chunk.title} (${d.source} · doc ${d.id} · chunk ${h.chunk.ord}${loc} · ${when} · ${h.score.toFixed(3)})`;
+      // A window of a huge symbol is titled "… > Name (L a-b)"; name the symbol so the
+      // reader can jump to it with em_symbols even though the title is a fragment.
+      const sym =
+        h.chunk.symbol_id && /\(L\d+-\d+\)$/.test(h.chunk.title) ? ` · ${h.chunk.symbol_id}` : "";
+      const header = `## ${h.chunk.title} (${d.source} · doc ${d.id} · chunk ${h.chunk.ord}${loc} · ${when} · ${h.score.toFixed(3)}${sym})`;
       const block = `${header}\n${h.snippet}\n`;
       if (used + block.length > perQuery && lines.length > 1) {
         lines.push(

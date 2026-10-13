@@ -89,6 +89,8 @@ export async function parseFile(root: string, rel: string, code: string): Promis
   /** local name → node id it refers to (imports and local declarations). */
   const scope = new Map<string, { id: string; confidence: number }>();
   const localSyms = new Map<string, string>();
+  /** calls/references collected in pass 2, keyed (src, dst, kind) so repeats aggregate. */
+  const refs = new Map<string, Ref>();
 
   const pushEdge = (e: GraphEdge) => edges.push({ confidence: 1, weight: 1, ...e });
 
@@ -98,10 +100,11 @@ export async function parseFile(root: string, rel: string, code: string): Promis
     if (stmt.type === "import_statement") handleImport(stmt);
     else collectDecls(stmt, undefined, stmt.type === "export_statement");
   }
-  // Pass 2: calls and heritage inside declarations.
+  // Pass 2: calls and identifier references inside declarations (heritage was pass 1).
   for (const stmt of tree.rootNode.namedChildren) {
-    if (stmt) walkCalls(stmt, undefined);
+    if (stmt && stmt.type !== "import_statement") walkRefs(stmt);
   }
+  flushRefs();
   return { nodes, edges, exports: exportsList };
 
   function handleImport(stmt: TSNode): void {
@@ -252,7 +255,11 @@ export async function parseFile(root: string, rel: string, code: string): Promis
     }
   }
 
-  /** Find the enclosing declaration's qualified name for a node. */
+  /**
+   * The symbol a node sits in. Nested arrow functions and inner `const`s are not
+   * symbols themselves, so the longest prefix of the declaration chain that is a
+   * known symbol wins (a reference inside `run`'s inner callback belongs to `run`).
+   */
   function enclosing(n: TSNode): string | undefined {
     const parts: string[] = [];
     let cur: TSNode | null = n.parent;
@@ -263,39 +270,139 @@ export async function parseFile(root: string, rel: string, code: string): Promis
       }
       cur = cur.parent;
     }
-    return parts.length ? parts.join(".") : undefined;
+    for (let i = parts.length; i > 0; i--) {
+      const q = parts.slice(0, i).join(".");
+      if (localSyms.has(q)) return q;
+    }
+    return undefined;
   }
 
-  function walkCalls(n: TSNode, _parentName: string | undefined): void {
+  /** Edges are keyed (src, dst, kind); repeated uses aggregate into count + first lines. */
+  function pushRef(src: string, dst: string, kind: string, confidence: number, line: number): void {
+    if (dst === src) return;
+    const key = `${src}\u0000${dst}\u0000${kind}`;
+    const cur = refs.get(key);
+    if (cur) {
+      cur.count++;
+      cur.confidence = Math.max(cur.confidence, confidence);
+      if (cur.lines.length < 5) cur.lines.push(line);
+    } else refs.set(key, { src, dst, kind, confidence, count: 1, lines: [line] });
+  }
+
+  function flushRefs(): void {
+    for (const r of refs.values()) {
+      pushEdge({
+        src: r.src,
+        dst: r.dst,
+        kind: r.kind,
+        source: "tree-sitter",
+        confidence: r.confidence,
+        meta: { count: r.count, lines: r.lines },
+      });
+    }
+  }
+
+  /** `calls`: the callee of a call/new expression resolved through imports and locals. */
+  function callTarget(
+    fn: TSNode,
+    caller: string | undefined,
+  ): { id: string; confidence: number } | undefined {
+    if (fn.type === "identifier" || fn.type === "type_identifier") return scope.get(fn.text);
+    if (fn.type !== "member_expression") return undefined;
+    const obj = fn.childForFieldName("object");
+    const prop = fn.childForFieldName("property")?.text;
+    if (obj?.type === "this" && prop && caller) {
+      return { id: symId(rel, `${caller.split(".")[0]!}.${prop}`), confidence: 0.9 };
+    }
+    if (obj?.type === "identifier" && prop) {
+      const base = scope.get(obj.text);
+      if (base?.id.startsWith("sym:"))
+        return { id: `${base.id.replace(/#.*$/, "")}#${prop}`, confidence: 0.5 };
+      if (base?.id.startsWith("pkg:")) return { id: base.id, confidence: 0.6 };
+    }
+    return undefined;
+  }
+
+  function walkRefs(n: TSNode): void {
     for (const call of n.descendantsOfType(["call_expression", "new_expression"])) {
       const fn = call.childForFieldName("function") ?? call.childForFieldName("constructor");
       if (!fn) continue;
       const caller = enclosing(call);
-      const src = caller ? symId(rel, caller) : fid;
-      let target: { id: string; confidence: number } | undefined;
-      if (fn.type === "identifier" || fn.type === "type_identifier") {
-        target = scope.get(fn.text);
-      } else if (fn.type === "member_expression") {
-        const obj = fn.childForFieldName("object");
-        const prop = fn.childForFieldName("property")?.text;
-        if (obj?.type === "this" && prop && caller) {
-          const cls = caller.split(".")[0]!;
-          target = { id: symId(rel, `${cls}.${prop}`), confidence: 0.9 };
-        } else if (obj?.type === "identifier" && prop) {
-          const base = scope.get(obj.text);
-          if (base?.id.startsWith("sym:"))
-            target = { id: `${base.id.replace(/#.*$/, "")}#${prop}`, confidence: 0.5 };
-          else if (base?.id.startsWith("pkg:")) target = { id: base.id, confidence: 0.6 };
-        }
-      }
-      if (!target || target.id === src) continue;
-      pushEdge({
-        src,
-        dst: target.id,
-        kind: "calls",
-        source: "tree-sitter",
-        confidence: target.confidence,
-      });
+      const target = callTarget(fn, caller);
+      if (!target) continue;
+      pushRef(
+        caller ? symId(rel, caller) : fid,
+        target.id,
+        "calls",
+        target.confidence,
+        call.startPosition.row + 1,
+      );
+    }
+    // `references`: every other use of an imported or top-level name (values and types),
+    // discounted so they never outrank calls/imports in impact scoring.
+    for (const idn of n.descendantsOfType(["identifier", "type_identifier"])) {
+      const p = idn.parent;
+      if (!p || REF_SKIP_PARENT.has(p.type)) continue;
+      if (p.childForFieldName("name")?.id === idn.id) continue; // the thing being declared
+      const fn = p.childForFieldName("function") ?? p.childForFieldName("constructor");
+      if (fn?.id === idn.id) continue; // callee: counted as a call
+      if (p.type === "member_expression" && p.childForFieldName("object")?.id !== idn.id) continue;
+      const target = scope.get(idn.text);
+      if (!target) continue;
+      const caller = enclosing(idn);
+      pushRef(
+        caller ? symId(rel, caller) : fid,
+        target.id,
+        "references",
+        target.confidence * 0.9,
+        idn.startPosition.row + 1,
+      );
+    }
+    // `this.member` reads (not calls) inside a class.
+    for (const me of n.descendantsOfType("member_expression")) {
+      const prop = me.childForFieldName("property")?.text;
+      if (me.childForFieldName("object")?.type !== "this" || !prop) continue;
+      const p = me.parent;
+      const callee = p
+        ? (p.childForFieldName("function") ?? p.childForFieldName("constructor"))
+        : null;
+      if (callee?.id === me.id) continue;
+      const caller = enclosing(me);
+      if (!caller) continue;
+      const member = `${caller.split(".")[0]!}.${prop}`;
+      if (!localSyms.has(member)) continue;
+      pushRef(symId(rel, caller), symId(rel, member), "references", 0.81, me.startPosition.row + 1);
     }
   }
 }
+
+type Ref = {
+  src: string;
+  dst: string;
+  kind: string;
+  confidence: number;
+  count: number;
+  lines: number[];
+};
+
+/** Parents under which an identifier is a declaration, a binding or already an edge of another kind. */
+const REF_SKIP_PARENT = new Set([
+  "import_specifier",
+  "namespace_import",
+  "import_clause",
+  "export_specifier",
+  "required_parameter",
+  "optional_parameter",
+  "rest_pattern",
+  "array_pattern",
+  "object_pattern",
+  "pair_pattern",
+  "catch_clause",
+  "extends_clause",
+  "implements_clause",
+  "class_heritage",
+  "extends_type_clause",
+  "property_signature",
+  "method_signature",
+  "labeled_statement",
+]);

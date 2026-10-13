@@ -3,10 +3,10 @@ import type { ChunkWithDoc, ContentType, SearchFilters } from "../storage/types.
 import { rrf } from "./fusion.js";
 import { buildMatch, parseQuery } from "./query.js";
 import { rerank, type Scored } from "./rerank.js";
-import { snippet } from "./snippets.js";
+import { regexSnippet, snippet } from "./snippets.js";
 import { type Correction, correctTerms } from "./typo.js";
 
-export type SearchMode = "hybrid" | "lexical" | "semantic";
+export type SearchMode = "hybrid" | "lexical" | "semantic" | "regex";
 
 export interface SearchOptions {
   limit?: number;
@@ -73,6 +73,20 @@ export async function search(
   const limit = opts.limit ?? 5;
   const n = opts.candidates ?? 50;
   const mode = opts.mode ?? "hybrid";
+  if (mode === "regex") {
+    // A scan, not a ranking: newest documents first, matching lines with context.
+    const ids = db.chunkRegexSearch(query, "", Math.max(limit, 1), opts.filters);
+    const re = new RegExp(query, "g");
+    const hits: SearchHit[] = db.getChunks(ids).map((c) => ({
+      chunk: c,
+      score: 1,
+      matched: [query],
+      snippet: regexSnippet(c.body, re),
+    }));
+    if (opts.sort === "timeline")
+      hits.sort((a, b) => b.chunk.document.created_at - a.chunk.document.created_at);
+    return { query, hits, corrections: [], used: ["regex"] };
+  }
   const parsed = parseQuery(query);
   const used: string[] = [];
   let corrections: Correction[] = [];

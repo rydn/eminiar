@@ -115,6 +115,20 @@ Runs shell and javascript in a child process with a timeout.
     expect(new Set(spans.map(String)).size).toBe(spans.length);
   });
 
+  it("scans with a regular expression and rejects a bad one", async () => {
+    const r = await search(db, "runSandbox\\(cmd: \\w+", {
+      mode: "regex",
+      filters: { source: "code" },
+    });
+    expect(r.used).toEqual(["regex"]);
+    expect(r.hits).toHaveLength(1);
+    expect(r.hits[0]!.snippet).toContain("export function runSandbox");
+    const none = await search(db, "^zzz$", { mode: "regex" });
+    expect(none.hits).toHaveLength(0);
+    await expect(search(db, "(", { mode: "regex" })).rejects.toThrow();
+    await expect(search(db, "a".repeat(201), { mode: "regex" })).rejects.toThrow(/too long/);
+  });
+
   it("replaces a document when its content changes", () => {
     const first = indexContent(db, {
       source: "file",
@@ -136,6 +150,15 @@ Runs shell and javascript in a child process with a timeout.
     });
     expect(same.created).toBe(false);
     expect(same.documentId).toBe(first.documentId);
+    const forced = indexContent(db, {
+      source: "file",
+      title: "x.md",
+      uri: "file:///x.md",
+      content: "# one",
+      force: true,
+    });
+    expect(forced.created).toBe(true);
+    expect(db.getDocument(first.documentId)).toBeUndefined();
     expect(changed.created).toBe(true);
     expect(changed.documentId).not.toBe(first.documentId);
     expect(db.getDocument(first.documentId)).toBeUndefined();

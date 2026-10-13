@@ -191,6 +191,16 @@ ALTER TABLE memories ADD COLUMN updated_at INTEGER;
 CREATE UNIQUE INDEX IF NOT EXISTS memories_name ON memories(name) WHERE name IS NOT NULL;
 `,
   },
+  {
+    // Code chunks are cut at declaration boundaries and remember the symbol they belong
+    // to (sym:<rel>#<Qualified>), so search hits can name their symbol and tools can go
+    // from a symbol to its body. Chunks are rebuilt on every reparse; the id is stable.
+    version: 3,
+    sql: `
+ALTER TABLE chunks ADD COLUMN symbol_id TEXT;
+CREATE INDEX IF NOT EXISTS chunks_symbol ON chunks(symbol_id);
+`,
+  },
 ];
 
 /** vec0 lives outside the migration list: it needs the extension loaded first and takes the dimension. */

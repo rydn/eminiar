@@ -2,19 +2,33 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import fg from "fast-glob";
 import { hashText } from "../chunker/index.js";
+import { chunkBySymbols, type SymbolSpan } from "../chunker/symbols.js";
+import { getCodeBackend } from "../code/backend.js";
 import type { ProjectContext } from "../context.js";
 import { indexContent } from "../index/indexer.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { reindexGit } from "./git.js";
-import { grammarFor, parseFile } from "./treesitter.js";
+import { grammarFor } from "./treesitter.js";
 
 export interface CodeSummary {
   scanned: number;
   parsed: number;
   removed: number;
   unchanged: number;
+  /** Files over the size limit. */
+  skipped: number;
   errors: Array<{ path: string; error: string }>;
 }
+
+/** Largest file the parser is asked to handle (minified bundles are not worth a graph). */
+export const MAX_CODE_BYTES = 1_500_000;
+
+/**
+ * Bumped when how code is parsed or chunked changes; a database built by an older
+ * version gets one automatic full pass so every file carries symbol chunks and
+ * reference edges without anyone remembering to run `em_reindex {full: true}`.
+ */
+const CODE_INDEX_VERSION = "2";
 
 function listCodeFiles(ctx: ProjectContext): string[] {
   return fg.sync(ctx.config.graph.include, {
@@ -26,27 +40,41 @@ function listCodeFiles(ctx: ProjectContext): string[] {
   });
 }
 
-/** Parse one file into the graph and the code search index. Returns false when unchanged. */
+/**
+ * Parse one file into the graph and the code search index. Search chunks are cut at
+ * the declarations the parser found, so each carries its symbol id.
+ */
 async function indexOne(
   ctx: ProjectContext,
   db: StorageAdapter,
   rel: string,
   force: boolean,
-): Promise<boolean> {
+): Promise<"parsed" | "unchanged" | "skipped"> {
   const abs = join(ctx.root, rel);
   const st = statSync(abs);
-  if (st.size > 1_500_000) return false;
+  if (st.size > MAX_CODE_BYTES) return "skipped";
   const code = readFileSync(abs, "utf8");
   const hash = hashText(code);
   const prev = db.fileIndexGet(rel);
-  if (!force && prev?.hash === hash) return false;
-  const parsed = await parseFile(ctx.root, rel, code);
+  if (!force && prev?.hash === hash) return "unchanged";
+  const parsed = await getCodeBackend(ctx).parse(ctx.root, rel, code);
+  const spans: SymbolSpan[] = parsed.nodes
+    .filter((n) => n.path === rel && n.kind !== "file" && n.kind !== "package")
+    .map((n) => ({
+      id: n.id,
+      name: n.name,
+      kind: n.kind,
+      startLine: n.startLine ?? 0,
+      endLine: n.endLine ?? 0,
+    }));
   const doc = indexContent(db, {
     source: "code",
     title: rel,
     uri: `file://${abs}`,
     content: code,
     kind: "code",
+    chunks: spans.length ? chunkBySymbols(code, rel, spans) : undefined,
+    force,
   });
   db.transaction(() => {
     // keep the file node so git-derived meta (hotspots) survives a re-parse
@@ -62,7 +90,7 @@ async function indexOne(
       document_id: doc.documentId,
     });
   });
-  return true;
+  return "parsed";
 }
 
 function removeOne(db: StorageAdapter, rel: string): void {
@@ -80,8 +108,20 @@ export async function reindexCode(
   db: StorageAdapter,
   opts: { paths?: string[] | undefined; full?: boolean | undefined } = {},
 ): Promise<CodeSummary> {
-  const summary: CodeSummary = { scanned: 0, parsed: 0, removed: 0, unchanged: 0, errors: [] };
-  const targets = opts.paths?.length ? opts.paths.filter((p) => grammarFor(p)) : listCodeFiles(ctx);
+  const summary: CodeSummary = {
+    scanned: 0,
+    parsed: 0,
+    removed: 0,
+    unchanged: 0,
+    skipped: 0,
+    errors: [],
+  };
+  const backend = getCodeBackend(ctx);
+  const stale = db.metaGet("code_index_version") !== CODE_INDEX_VERSION;
+  const full = (opts.full ?? false) || (stale && !opts.paths?.length);
+  const targets = opts.paths?.length
+    ? opts.paths.filter((p) => backend.supports(p))
+    : listCodeFiles(ctx).filter((p) => backend.supports(p));
   summary.scanned = targets.length;
   for (const rel of targets) {
     try {
@@ -92,8 +132,7 @@ export async function reindexCode(
         }
         continue;
       }
-      if (await indexOne(ctx, db, rel, opts.full ?? false)) summary.parsed++;
-      else summary.unchanged++;
+      summary[await indexOne(ctx, db, rel, full)]++;
     } catch (err) {
       summary.errors.push({ path: rel, error: (err as Error).message });
     }
@@ -107,6 +146,7 @@ export async function reindexCode(
         summary.removed++;
       }
     }
+    if (full) db.metaSet("code_index_version", CODE_INDEX_VERSION);
   }
   return summary;
 }

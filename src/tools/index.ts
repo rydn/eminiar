@@ -11,6 +11,7 @@ import { emRecall } from "./em_recall.js";
 import { emRemember } from "./em_remember.js";
 import { emSearch } from "./em_search.js";
 import { emStats } from "./em_stats.js";
+import { emSymbols } from "./em_symbols.js";
 import type { ToolDef } from "./types.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous schemas in one registry
@@ -24,6 +25,7 @@ export const tools: ToolDef<any>[] = [
   emRemember,
   emRecall,
   emMemory,
+  emSymbols,
   emGraphQuery,
   emGraphImpact,
   emGraphAdd,

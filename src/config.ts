@@ -81,6 +81,12 @@ export const ConfigSchema = z.object({
       extraDeny: z.array(z.string()).default([]),
     })
     .prefault({}),
+  code: z
+    .object({
+      /** Symbol backend for parsing and references; tree-sitter ships in the box. */
+      backend: z.enum(["tree-sitter"]).default("tree-sitter"),
+    })
+    .prefault({}),
   memories: z
     .object({
       /** Project-relative directory of markdown memory files (`<topic>/<name>.md`); commit it. */

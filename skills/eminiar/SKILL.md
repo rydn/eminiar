@@ -22,7 +22,12 @@ surfacing only the answer.
   `.eminiar/memories/<topic>/<name>.md` (human-editable, committed with the repo).
   `em_memory {action: list|read|edit|rename|delete}` manages them; `/em-onboard` writes the
   onboarding set.
-- **Before refactors.** `em_graph_impact` on a file or symbol lists dependents, co-changing files
-  and the reasons.
+- **Navigate by symbol, not by file.** `em_symbols {mode: "overview", file}` lists a file's
+  symbols with line ranges; `{name_path: "Class/method", include_body: true}` returns one
+  definition; `{mode: "references", name_path}` lists callers and other uses. Search hits on code
+  are titled by symbol (`src/x.ts > Class.method`). `em_search {mode: "regex"}` greps indexed
+  content with context.
+- **Before refactors.** `em_graph_impact` on a file or symbol lists dependents, co-changing files,
+  memories that mention it, and the reasons.
 
 Plain `Bash`, `Read` and `Grep` stay right for short, fixed outputs and for files you will edit.

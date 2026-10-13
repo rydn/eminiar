@@ -43,6 +43,15 @@ export interface StorageAdapter {
   countDocuments(source?: string): number;
   getChunks(ids: number[]): ChunkWithDoc[];
   chunksOfDocument(documentId: number): ChunkWithDoc[];
+  /** Code chunks that make up a symbol's body, in order (empty when the file predates symbol chunks). */
+  chunksForSymbol(symbolId: string): ChunkWithDoc[];
+  /** Chunk ids whose body matches a JS regular expression, newest documents first. Throws on a bad pattern. */
+  chunkRegexSearch(
+    pattern: string,
+    flags: string,
+    limit: number,
+    filters?: SearchFilters,
+  ): number[];
 
   // --- lexical search ----------------------------------------------------
   ftsSearch(

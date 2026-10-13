@@ -15,6 +15,8 @@ export interface RawChunk {
   body: string;
   startLine: number;
   endLine: number;
+  /** Graph symbol this chunk belongs to (code cut at declaration boundaries). */
+  symbolId?: string | undefined;
 }
 
 export function hashText(s: string): string {
@@ -32,6 +34,7 @@ export function finalize(raw: RawChunk[], contentType: ContentType): ChunkInput[
       startLine: r.startLine,
       endLine: r.endLine,
       hash: hashText(r.body),
+      symbolId: r.symbolId,
     }));
 }
 
