@@ -9,7 +9,7 @@ updated: 2026-10-15T17:12:23.786Z
 
 Project knowledge is pushed to Claude by hooks, not only pulled via em_* tools (branch feature/docs-memory-recall, v0.5.0, 2026-10-15). `src/session/recall.ts` powers every path:
 - UserPromptSubmit: up to 3 memories + 2 docs pages matching the prompt ("eminiar recall").
-- PreToolUse Read/Edit/MultiEdit/Write: memories whose `related` names the file or a symbol in it ("eminiar memory"); on edits also the fix record of bug-prone files ("eminiar history") and fan-in >= 5 ("eminiar graph").
+- PreToolUse Read/Edit/MultiEdit/Write: memories whose `related` names the file or a symbol in it ("eminiar memory"); on edits also the fix record of bug-prone files ("eminiar history") and, when 5 or more other files import or use it, their count ("eminiar graph"; distinct dependent files via graphDependentFileCounts, not the metrics fan-in, which also counts calls inside the file).
 - PreToolUse Bash `git commit`: bug-prone / widely imported files among `git diff --cached` (+ tracked changes with -a).
 - PostToolUseFailure (made synchronous; async hook output only arrives next turn): earlier occurrences of the error with the `error_resolution` recorded after them in that session, plus memories.
 - PreToolUse WebSearch/WebFetch: indexed doc pages covering the query ("eminiar docs").

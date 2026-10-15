@@ -22,8 +22,8 @@ The project remembers things so you do not have to rediscover or re-decide them.
     it when your change overrides it.
   - `eminiar history: … is bug-prone` before an edit: read the fixes with
     `em_history {action: "file", path}` and keep the behaviour they restored under test.
-  - `eminiar graph: … imported by N files` before an edit: `em_graph_impact` before changing an
-    exported signature.
+  - `eminiar graph: N other files import or use …` before an edit: `em_graph_impact` before
+    changing an exported signature.
   - Before `git commit`: the bug-prone and widely imported files in the commit.
   - After a failed call: `this error has been seen before` with what resolved it last time. Try
     that first.
@@ -42,6 +42,7 @@ surfacing only the answer.
 - **Batch research.** `em_batch_execute` runs labelled commands in parallel and answers `queries`
   against all outputs in one round trip.
 - **Large files.** `em_execute_file` processes a file in the sandbox; only what you print returns.
+  Images and PDFs are the exception: `Read` shows them, so read those directly.
 - **Library, service and API docs.** `em_docs {action: "lookup", query}` answers from the
   project's documentation knowledge base (local docs plus the third-party libraries, services,
   infrastructure and APIs it uses, registered in `.eminiar/docs.json`). Ask it before

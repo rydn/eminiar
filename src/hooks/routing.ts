@@ -106,6 +106,12 @@ const BIG_TEXT_EXT = new Set([
   ".sql",
   ".har",
 ]);
+/**
+ * Files Read shows to the model as images or pages, not as text. em_execute_file only returns
+ * what code prints, so routing these there loses the content instead of saving context.
+ * (SVG is text and stays routable.)
+ */
+const VISUAL_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf"]);
 
 /** A command with its heredoc bodies cut out: they are data, not commands to classify. */
 export function withoutHeredocs(cmd: string): string {
@@ -135,9 +141,10 @@ export function suggest(
     case "Read": {
       const fp = String(input.file_path ?? "");
       if (!fp) return undefined;
+      const ext = extname(fp).toLowerCase();
+      if (VISUAL_EXT.has(ext)) return undefined;
       try {
         const st = statSync(resolve(root, fp));
-        const ext = extname(fp).toLowerCase();
         if (st.size > 200 * 1024 || (BIG_TEXT_EXT.has(ext) && st.size > 20 * 1024)) {
           return {
             tool: "em_execute_file",
