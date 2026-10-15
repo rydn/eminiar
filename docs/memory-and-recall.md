@@ -76,7 +76,7 @@ Hooks bring the relevant knowledge to Claude at the right moment.
 |---|---|---|
 | **Every prompt** | Up to 3 memories and 2 doc pages that share distinctive terms with the prompt | `eminiar recall —` |
 | **Before a file is read or edited** | Memories whose `related` list names the file or a symbol in it | `eminiar memory:` |
-| **Before a file is edited** | Its fix record if it is bug-prone, and its fan-in if 5 or more files import it | `eminiar history:` / `eminiar graph:` |
+| **Before a file is edited** | Its fix record if it is bug-prone, and how many other files import or use it, if 5 or more | `eminiar history:` / `eminiar graph:` |
 | **Before `git commit`** | The bug-prone and widely imported files in the commit | `eminiar history:` |
 | **After a failed tool call** | Earlier occurrences of the same error, with how they were resolved, and memories that mention it | `eminiar recall —` |
 | **Before `WebSearch` / `WebFetch`** | Indexed doc pages that already cover the query | `eminiar docs:` |

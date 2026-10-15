@@ -117,8 +117,8 @@ eminiar recall — project memories and indexed docs that match this request:
 eminiar history: src/cli.ts is bug-prone (1/6 commits were fixes; 1 earlier change later needed
 fixing; last fix 3f8c697 Fix MCP registration, make enforce routing and dev upgrades safe).
 
-eminiar graph: src/cli.ts is imported by 6 files; em_graph_impact {node:"file:src/cli.ts"} lists
-them before you change an exported signature.
+eminiar graph: 32 other files import or use src/storage/adapter.ts; em_graph_impact
+{node:"file:src/storage/adapter.ts"} lists them before you change an exported signature.
 ```
 
 Each note appears once per context window. After a `/compact`, notes come back when they are

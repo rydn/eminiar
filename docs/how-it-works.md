@@ -46,7 +46,7 @@ The hooks are one small program, `bin/em-hook`. Claude Code runs it on these eve
 |---|---|
 | `SessionStart` | Adds the project brief: overview, accepted decisions, constraints, hot files, index freshness. After a resume, replays the Session Guide |
 | `UserPromptSubmit` | Attaches memories and doc pages that match the prompt |
-| `PreToolUse` | Routes noisy calls to `em_*` tools. Attaches memories, fix history and fan-in for a file before a read or edit. Lists risky files before `git commit` |
+| `PreToolUse` | Routes noisy calls to `em_*` tools. Attaches memories, fix history and dependent files for a file before a read or edit. Lists risky files before `git commit` |
 | `PostToolUse` | Captures session events (async, never blocks) |
 | `PostToolUseFailure` | Attaches earlier occurrences of the same error and how they were resolved |
 | `SubagentStop` | Records the subagent's findings, so `em_recall` can find them later |
@@ -64,7 +64,7 @@ Routing decides what happens when Claude calls a native tool that an `em_*` tool
 | Native call | Suggested tool | Trigger |
 |---|---|---|
 | `Bash` | `em_execute` | Commands that usually print a lot, or pipes into `head`, `tail`, `grep`, `wc`, `sort`, `jq` … |
-| `Read` | `em_execute_file` | Files over 200 KB, or data files (`.log`, `.json`, `.csv`, `.xml`, `.sql`, `.har` …) over 20 KB |
+| `Read` | `em_execute_file` | Files over 200 KB, or data files (`.log`, `.json`, `.csv`, `.xml`, `.sql`, `.har` …) over 20 KB. Never images or PDFs: `Read` shows those visually |
 | `Grep` | `em_execute` | Content-mode grep without a `head_limit` |
 | `WebFetch` | `em_fetch_and_index` / `em_docs` | Always. Names the docs source if the site is already indexed |
 | `WebSearch` | `em_docs` | When documentation sources exist (annotation only) |
@@ -83,7 +83,7 @@ Set the mode with `routing.mode` in `eminiar.config.json`:
 The server writes a pid marker under `~/.eminiar/projects/<id>/servers/`. With no server, the
 hook annotates instead. Claude is never told to retry with a tool that it cannot reach.
 
-**Project knowledge is not routing.** Memories, fix history, fan-in and doc notes are attached
+**Project knowledge is not routing.** Memories, fix history, dependent files and doc notes are attached
 in every mode, including `off`.
 
 ## Sandbox

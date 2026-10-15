@@ -108,7 +108,7 @@ eminiar merges four layers. A later layer overrides an earlier one.
 | Key | Default | Description |
 |---|---|---|
 | `onPrompt` | `true` | Attach matching memories and docs to each prompt |
-| `onFile` | `true` | Attach memories, fix history and fan-in before a file read or edit |
+| `onFile` | `true` | Attach memories, fix history and dependent-file count before a file read or edit |
 | `onAgent` | `true` | Add the brief and matching knowledge to subagent prompts |
 | `onCommit` | `true` | List risky files before `git commit` |
 | `onError` | `true` | Attach earlier occurrences of a failed call's error |
