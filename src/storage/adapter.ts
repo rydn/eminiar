@@ -139,6 +139,11 @@ export interface StorageAdapter {
   graphDeleteEdges(edges: Array<Pick<GraphEdge, "src" | "dst" | "kind" | "source">>): void;
   /** Distinct-neighbour counts over the given edge kinds: incoming (fan-in) and outgoing (fan-out). */
   graphDegrees(kinds: string[]): Map<string, { fanIn: number; fanOut: number }>;
+  /**
+   * Per path: how many *other* files depend on that file or a symbol in it over the given edge
+   * kinds. Unlike a file's metrics fan-in, calls from inside the file do not count.
+   */
+  graphDependentFileCounts(paths: string[], kinds: string[]): Map<string, number>;
   /** Delete everything a source produced for one file path (nodes with that path + edges touching them). */
   graphDeleteForPath(source: GraphSource, path: string, opts?: { keepFile?: boolean }): void;
   graphDeleteBySource(source: GraphSource): void;

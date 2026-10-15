@@ -805,6 +805,29 @@ export class SqliteAdapter implements StorageAdapter {
     return out;
   }
 
+  graphDependentFileCounts(paths: string[], kinds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (!paths.length || !kinds.length) return out;
+    const kph = kinds.map(() => "?").join(",");
+    for (let i = 0; i < paths.length; i += 400) {
+      const batch = paths.slice(i, i + 400);
+      const pph = batch.map(() => "?").join(",");
+      for (const r of this.db
+        .prepare(
+          `SELECT d.path p, COUNT(DISTINCT s.path) n
+             FROM graph_nodes d
+             JOIN graph_edges e ON e.dst = d.id AND e.kind IN (${kph})
+             JOIN graph_nodes s ON s.id = e.src
+            WHERE d.path IN (${pph}) AND s.path IS NOT NULL AND s.path <> d.path
+            GROUP BY d.path`,
+        )
+        .all(...kinds, ...batch) as Array<{ p: string; n: number }>) {
+        out.set(r.p, r.n);
+      }
+    }
+    return out;
+  }
+
   private edgesWhere(col: "src" | "dst", ids: string[], kinds?: string[]): GraphEdgeRow[] {
     if (!ids.length) return [];
     const out: GraphEdgeRow[] = [];
