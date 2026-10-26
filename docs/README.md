@@ -15,6 +15,8 @@
   hotspots, and classified git history
 - **[Documentation knowledge base](documentation-kb.md)**: discover, index and look up the docs
   your project depends on
+- **[Usage insights](usage.md)**: tokens, cache, cost and billing blocks per model call, from
+  the transcripts on your machine, with insights and what eminiar saved
 - **[Dashboard](dashboard.md)**: the `eminiar ui` web app
 
 ## Reference

@@ -1,9 +1,9 @@
 ---
 name: em-purge
-description: Permanently delete eminiar data for this project (index, sessions, graph, memories or all).
+description: Permanently delete eminiar data for this project (index, sessions, graph, memories, usage or all).
 user-invocable: true
 disable-model-invocation: true
-argument-hint: <index|sessions|graph|memories|all>
+argument-hint: <index|sessions|graph|memories|usage|all>
 allowed-tools: mcp__plugin_eminiar_eminiar__em_purge
 ---
 

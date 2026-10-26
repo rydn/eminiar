@@ -210,6 +210,39 @@ export const ConfigSchema = z.object({
         .default([]),
     })
     .prefault({}),
+  usage: z
+    .object({
+      /** Ingest Claude Code transcripts (tokens, cache, cost per model call) and record statusline snapshots. */
+      enabled: z.boolean().default(true),
+      /** Soft budgets; crossing one adds a one-line warning to the next prompt (never blocks). */
+      budgets: z
+        .object({
+          sessionUsd: z.number().positive().optional(),
+          dailyUsd: z.number().positive().optional(),
+          /** A single API call above this is flagged as an expensive turn. */
+          turnUsd: z.number().positive().optional(),
+        })
+        .prefault({}),
+      /**
+       * Price overrides per model, USD per million tokens, matched by substring of the model id
+       * (first match wins). Missing fields fall back to the bundled table.
+       */
+      pricing: z
+        .record(
+          z.string(),
+          z.object({
+            input: z.number().nonnegative().optional(),
+            output: z.number().nonnegative().optional(),
+            cacheWrite5m: z.number().nonnegative().optional(),
+            cacheWrite1h: z.number().nonnegative().optional(),
+            cacheRead: z.number().nonnegative().optional(),
+          }),
+        )
+        .default({}),
+      /** Show cost, context and plan usage segments in `eminiar statusline`. */
+      statusline: z.boolean().default(true),
+    })
+    .prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

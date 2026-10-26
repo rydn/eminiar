@@ -63,7 +63,10 @@ export function Sessions(): JSX.Element {
               sessions.data.map((s) => (
                 <div class={cls("item", sel === s.id && "sel")} onClick={() => setSel(s.id)}>
                   <div class="n">
-                    <code>{s.id.slice(0, 8)}</code> {s.current ? <Tag>current</Tag> : null}
+                    <code>{s.id.slice(0, 8)}</code> {s.current ? <Tag>current</Tag> : null}{" "}
+                    <a class="small" href={`#/usage?session=${s.id}`}>
+                      usage →
+                    </a>
                     <span class="muted" style={{ float: "right", fontWeight: 400 }}>
                       {ago(s.started_at)}
                     </span>

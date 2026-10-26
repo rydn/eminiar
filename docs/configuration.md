@@ -133,6 +133,19 @@ eminiar merges four layers. A later layer overrides an earlier one.
 | `discover.subprojects` | `true` | Scan one level of sub-projects |
 | `catalog` | `[]` | Extra catalogue entries, each with a `tier`: `service`, `infra` or `library` |
 
+### `usage`
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `true` | Ingest Claude Code transcripts (tokens, cache, cost per model call) and record statusline snapshots |
+| `budgets.sessionUsd` | unset | Session cost above which the next prompt gets a one-line warning (once per session). Never blocks |
+| `budgets.dailyUsd` | unset | The same for the calendar day |
+| `budgets.turnUsd` | `1.00` | A single API call above this is flagged as an expensive turn |
+| `pricing` | `{}` | Price overrides, USD per million tokens, keyed by a substring of the model id (first match wins): `input`, `output`, `cacheWrite5m`, `cacheWrite1h`, `cacheRead`. Missing fields fall back to the bundled table |
+| `statusline` | `true` | Append `$<cost> · ctx <pct>% · 5h <pct>%` to `eminiar statusline` |
+
+See [Usage insights](usage.md) for the sources, the privacy notes and the savings model.
+
 ## Environment variables
 
 | Variable | Effect |
@@ -142,3 +155,4 @@ eminiar merges four layers. A later layer overrides an earlier one.
 | `EMINIAR_HOME` | Moves the data directory (default `~/.eminiar`) |
 | `EMINIAR_PROJECT_ROOT` | Sets the project root. Otherwise `CLAUDE_PROJECT_DIR`, then the current directory |
 | `EMINIAR_DEBUG` | Prints stack traces from the CLI |
+| `EMINIAR_CLAUDE_DIR` | Where Claude Code keeps its transcripts (default `~/.claude`) |
