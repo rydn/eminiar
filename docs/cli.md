@@ -9,9 +9,10 @@ documentation that Claude uses, from your terminal. Run `eminiar help` for the f
 
 | Command | What it does |
 |---|---|
-| `eminiar install` | Install into Claude Code. Options: `--no-model`, `--method plugin\|settings`, `--team`, `--marketplace github:org/repo`, `--statusline`, `--yes`, `--force` |
-| `eminiar upgrade` | Update to the latest version and re-register |
-| `eminiar uninstall [--purge-data]` | Remove from Claude Code. Data is kept unless you add `--purge-data` |
+| `eminiar install` | Install into Claude Code. Options: `--no-model`, `--method plugin\|settings`, `--cursor`, `--team`, `--marketplace github:org/repo`, `--statusline`, `--yes`, `--force` |
+| `eminiar install --cursor` | Also register with Cursor: hooks in `~/.cursor/hooks.json`, the MCP server in `~/.cursor/mcp.json`, skills in `~/.cursor/skills/`. Without the `claude` CLI this installs for Cursor only |
+| `eminiar upgrade` | Update to the latest version and re-register with every client from the last install |
+| `eminiar uninstall [--purge-data]` | Remove from Claude Code and Cursor. Data is kept unless you add `--purge-data` |
 | `eminiar doctor [--json] [--fix]` | Check installation health. `--fix` re-pins Node.js and the root, and clears Claude Code's cached launch failure |
 | `eminiar replace-context-mode [--yes]` | Remove the context-mode plugin after you are satisfied with eminiar |
 
@@ -83,7 +84,7 @@ eminiar statusline                             # Claude Code statusLine command
 ## Other
 
 ```sh
-eminiar hook [--event E]                       # run the hook handler by hand (JSON on stdin)
+eminiar hook [--event E] [--client cursor]     # run the hook handler by hand (JSON on stdin)
 eminiar version
 eminiar help
 ```

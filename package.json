@@ -1,7 +1,7 @@
 {
   "name": "eminiar",
-  "version": "0.8.1",
-  "description": "Local-first context, memory and knowledge-graph plugin for Claude Code. Sandboxed execution, FTS5 + vector search, session continuity, and a code graph — nothing leaves your machine.",
+  "version": "0.9.0",
+  "description": "Local-first context, memory and knowledge-graph plugin for Claude Code and Cursor. Sandboxed execution, FTS5 + vector search, session continuity, and a code graph — nothing leaves your machine.",
   "type": "module",
   "license": "MIT",
   "author": "Ryan Dick",
@@ -22,7 +22,8 @@
     "sqlite-vec",
     "knowledge-graph",
     "tree-sitter",
-    "sandbox"
+    "sandbox",
+    "cursor"
   ],
   "engines": {
     "node": ">=22.12"
@@ -40,6 +41,8 @@
     "hooks",
     "skills",
     ".claude-plugin",
+    ".cursor-plugin",
+    "rules",
     "vendor",
     "eminiar.config.schema.json",
     "README.md",
@@ -56,7 +59,7 @@
     "lint:fix": "biome check --write .",
     "validate": "claude plugin validate .",
     "prepack": "npm run build",
-    "version": "node scripts/sync-plugin-version.mjs && git add .claude-plugin/plugin.json",
+    "version": "node scripts/sync-plugin-version.mjs && git add .claude-plugin/plugin.json .cursor-plugin/plugin.json",
     "build:ui": "tsup --config tsup.web.config.ts",
     "dev:ui": "tsup --config tsup.web.config.ts --watch",
     "screenshots": "node scripts/capture-screenshots.mjs"

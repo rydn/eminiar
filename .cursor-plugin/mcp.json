@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "eminiar": {
+      "command": "${CURSOR_PLUGIN_ROOT}/bin/em-server",
+      "args": [],
+      "env": {
+        "EMINIAR_PLUGIN_ROOT": "${CURSOR_PLUGIN_ROOT}"
+      }
+    }
+  }
+}

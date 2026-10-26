@@ -8,9 +8,11 @@ const USAGE = `eminiar v${version()} — local-first context, memory & knowledge
 Usage: eminiar <command> [options]
 
 Setup
-  install [--no-model] [--method plugin|settings] [--team] [--yes] [--force]   Install into Claude Code
+  install [--no-model] [--method plugin|settings] [--cursor] [--team] [--yes] [--force]
+                               Install into Claude Code; --cursor also registers with Cursor
+                               (hooks, MCP server, skills under ~/.cursor)
   upgrade                      Update to the latest version and re-register
-  uninstall [--purge-data]     Remove from Claude Code (data kept unless --purge-data)
+  uninstall [--purge-data]     Remove from Claude Code and Cursor (data kept unless --purge-data)
   doctor [--json] [--fix]      Check installation health; --fix re-pins node/root and clears
                                Claude Code's cached launch failure
   replace-context-mode [--yes] Remove the context-mode plugin after parity sign-off
@@ -32,7 +34,7 @@ Use
   ui [--port 7331] [--no-open] Web dashboard: stats, memories, graph, search, sessions, actions
                                (alias: serve)
   statusline                   Claude Code statusLine command (reads JSON on stdin)
-  hook [--event E]             Run the hook handler manually (reads JSON on stdin)
+  hook [--event E] [--client claude|cursor]   Run the hook handler manually (reads JSON on stdin)
   version | help
 `;
 
@@ -67,6 +69,7 @@ const commands: Record<string, Command> = {
         node: { type: "string" },
         yes: { type: "boolean" },
         statusline: { type: "boolean" },
+        cursor: { type: "boolean" },
         force: { type: "boolean" },
       },
       strict: false,
@@ -74,6 +77,7 @@ const commands: Record<string, Command> = {
     const { install } = await import("./install/install.js");
     return install({
       force: !!values.force,
+      cursor: !!values.cursor,
       noModel: !!values["no-model"],
       method:
         values.method === "settings"

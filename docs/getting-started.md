@@ -5,7 +5,7 @@
 ## Requirements
 
 - Node.js **22.12 or later**
-- Claude Code (terminal, desktop app or IDE extension)
+- Claude Code (terminal, desktop app or IDE extension), Cursor, or both
 - macOS or Linux. The `bin/` shims are POSIX `sh`.
 
 Optional: Python, Ruby, Go, PHP, Perl, R, Elixir, Rust or .NET. The sandbox finds them on your
@@ -34,6 +34,33 @@ without a prompt. Add `--statusline` to also install the [status line](#status-l
 
 The rest of the docs write commands as `eminiar <command>`. Run them as `npx eminiar <command>`,
 or install the CLI globally once with `npm install -g eminiar`.
+
+### Cursor
+
+```sh
+npx eminiar install --cursor
+```
+
+One flag adds Cursor. The same stable copy serves both clients, so the index, memories and graph
+are shared. The **register** step then also writes:
+
+| File | Contents |
+|---|---|
+| `~/.cursor/hooks.json` | eminiar's hook entries on nine events (other hooks are kept) |
+| `~/.cursor/mcp.json` | the `eminiar` MCP server |
+| `~/.cursor/skills/em-*` | the `em-*` skills |
+
+If the `claude` CLI is not on your `PATH`, `--cursor` installs for Cursor only. With both present,
+one run registers both. Restart Cursor (or **Developer: Reload Window**) afterwards; the agent
+gets the routing guidance and project brief at the start of every conversation, and `em_*` tools
+appear under **Settings → MCP**.
+
+Cursor imports Claude Code hooks from `~/.claude/settings.json` by default (**Settings → Agents →
+Third-Party Imports**). That only matters when Claude Code was registered with `--method settings`:
+each event would fire twice. `eminiar doctor` warns about it; turn the setting off or reinstall
+Claude Code with `--method plugin`.
+
+What differs in Cursor is listed in [How it works](how-it-works.md#cursor).
 
 ### Verify
 
@@ -88,7 +115,8 @@ git add eminiar.config.json .eminiar/
 git commit -m "Add eminiar team config"
 ```
 
-`--team` writes `eminiar.config.json` with the team defaults.
+`--team` writes `eminiar.config.json` with the team defaults. Add `--cursor` to also write
+`.cursor/rules/eminiar.mdc`, a project rule that keeps Cursor's agent aware of the `em_*` tools.
 
 To make Claude Code prompt teammates to install the plugin, add a marketplace:
 
@@ -102,7 +130,7 @@ This also writes the marketplace and `enabledPlugins` entries to the project's
 **Each teammate:**
 
 ```sh
-npx eminiar install
+npx eminiar install            # add --cursor for Cursor
 ```
 
 The installer reads the committed `eminiar.config.json`.
@@ -114,6 +142,7 @@ The installer reads the committed `eminiar.config.json`.
 | `eminiar.config.json` | Yes | Team configuration |
 | `.eminiar/memories/` | Yes | Memory files (markdown) |
 | `.eminiar/docs.json` | Yes | Documentation sources manifest |
+| `.cursor/rules/eminiar.mdc` | Yes | Cursor project rule (written by `--team --cursor`) |
 | `~/.eminiar/` | No | The local database, model and stable copy (outside the repo) |
 
 ## Status line
@@ -133,6 +162,7 @@ eminiar upgrade
 ```
 
 This installs the latest version, re-registers the plugin and refreshes Claude Code's cached copy.
+A Cursor registration is repeated too, so its config files point at the new copy.
 
 ## Uninstall
 
@@ -141,7 +171,8 @@ eminiar uninstall               # keeps your data in ~/.eminiar
 eminiar uninstall --purge-data  # also deletes ~/.eminiar
 ```
 
-Memory files in your repositories are not deleted.
+This removes only the entries eminiar wrote, in Claude Code and in Cursor. Memory files in your
+repositories are not deleted.
 
 ## Migrate from context-mode
 

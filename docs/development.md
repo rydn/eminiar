@@ -27,10 +27,12 @@ claude --plugin-dir "$PWD"   # run Claude Code with this checkout as the plugin
 | Path | Contents |
 |---|---|
 | `bin/` | POSIX `sh` shims: `eminiar`, `em-server`, `em-hook` |
-| `hooks/hooks.json` | Hook registration for Claude Code |
-| `skills/` | The slash commands (`/em-*`) and the `eminiar` skill |
+| `hooks/hooks.json`, `hooks/cursor.json` | Hook registration for Claude Code and for Cursor (plugin form) |
+| `.claude-plugin/`, `.cursor-plugin/` | Plugin manifests. Both carry the package version (`scripts/sync-plugin-version.mjs`) |
+| `rules/` | Cursor project rule copied by `install --team --cursor` |
+| `skills/` | The slash commands (`/em-*`) and the `eminiar` skill; also installed as Cursor agent skills |
 | `src/server.ts` | MCP server entry |
-| `src/hook.ts`, `src/hooks/` | Hook entry and handlers: routing, capture, session start, pre-compact |
+| `src/hook.ts`, `src/hooks/` | Hook entry and handlers: routing, capture, session start, pre-compact. `dispatch.ts` picks the client dialect; `cursor.ts` translates Cursor's |
 | `src/session/` | Session brief, guide and proactive recall |
 | `src/tools/` | One file per `em_*` tool |
 | `src/sandbox/`, `src/permissions/` | Code execution and permission checks |
@@ -77,8 +79,9 @@ release with generated notes. A merge without a version bump publishes nothing.
    npm version patch --no-git-tag-version    # or minor / major
    ```
 
-   The `version` script copies the new version into `.claude-plugin/plugin.json`. Claude Code
-   names its plugin cache directory after it, and CI fails if the two differ.
+   The `version` script copies the new version into `.claude-plugin/plugin.json` and
+   `.cursor-plugin/plugin.json`. Claude Code names its plugin cache directory after it, and CI
+   fails if the manifests differ from `package.json`.
 2. Merge the PR. The workflow builds, typechecks, lints, tests, runs
    `npm publish --provenance --access public`, and creates the tag and release.
 

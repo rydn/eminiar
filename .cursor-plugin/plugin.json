@@ -1,0 +1,23 @@
+{
+  "name": "eminiar",
+  "displayName": "Eminiar",
+  "version": "0.9.0",
+  "description": "Local-first context, memory and knowledge graph for coding agents: sandboxed execution, FTS5 + vector search, session continuity, code graph.",
+  "author": {
+    "name": "Ryan Dick"
+  },
+  "homepage": "https://github.com/rydn/eminiar#readme",
+  "repository": "https://github.com/rydn/eminiar",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "memory",
+    "search",
+    "sandbox",
+    "knowledge-graph"
+  ],
+  "hooks": "./hooks/cursor.json",
+  "mcpServers": "./.cursor-plugin/mcp.json",
+  "skills": "./skills",
+  "rules": "./rules"
+}

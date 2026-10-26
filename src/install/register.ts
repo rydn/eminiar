@@ -135,7 +135,8 @@ export function unregisterPlugin(): void {
   run(claude, ["plugin", "marketplace", "remove", "eminiar"]);
 }
 
-function isOurs(cmd: unknown, stable: string): boolean {
+/** Does a hook/server command string point at an eminiar binary (stable copy or `stable`)? */
+export function isOurs(cmd: unknown, stable: string): boolean {
   return typeof cmd === "string" && (cmd.includes("/.eminiar/plugin/") || cmd.includes(stable));
 }
 
