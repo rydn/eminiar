@@ -26,6 +26,11 @@ eminiar search "x" --lexical --limit 10 --json
 
 eminiar recall "rate limiting"                 # memories and session history
 eminiar index docs/ --source notes             # index files or a directory
+
+eminiar recall --explain "why is the pool capped"   # why hook recall would (not) fire, per candidate
+eminiar recall --explain "…" --session <id>         # counting what that session was already shown
+eminiar recall --file src/storage/pool.ts            # what a Read/Edit of the file would attach
+eminiar recall --replay [--limit 200] [--since 30d]  # re-run past prompts: hit rate, closest misses
 ```
 
 ## Graph
@@ -69,7 +74,7 @@ eminiar docs remove example
 ```sh
 eminiar reindex                                # incremental, all scopes
 eminiar reindex --scope code --full            # code | git | metrics | docs | memories | embeddings | all
-eminiar stats [--lifetime]                     # context savings
+eminiar stats [--lifetime]                     # context savings and recall hit rate
 eminiar purge <index|sessions|graph|memories|all> --yes   # irreversible
 ```
 

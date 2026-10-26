@@ -35,6 +35,8 @@ export const CATEGORIES = {
   data: 4,
   tool_call: 4,
   session_start: 4,
+  /** A proactive recall decision (fired or quiet) and what it showed; never in the guide. */
+  recall: 4,
 } as const satisfies Record<string, Priority>;
 
 export type Category = keyof typeof CATEGORIES;

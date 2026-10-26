@@ -85,8 +85,8 @@ const tool = (sid: string, tool_name: string, tool_input: Record<string, unknown
     base({ session_id: sid, hook_event_name: "PreToolUse", tool_name, tool_input }),
   );
 
-describe("history and graph context before an edit", () => {
-  it("warns about a bug-prone file once per window, never on a plain Read", async () => {
+describe("history and graph context before a read or an edit", () => {
+  it("warns about a bug-prone file once per window, on a Read as well as an Edit", async () => {
     const edit = () => tool("e1", "Edit", { file_path: join(root, "src/parser.ts") });
     const out = await edit();
     expect(out?.hookSpecificOutput?.permissionDecision).toBeUndefined();
@@ -95,12 +95,65 @@ describe("history and graph context before an edit", () => {
     expect(ctxText(out)).toContain("2 earlier changes later needed fixing");
     expect(ctxText(out)).toContain("last fix 1a2b3c4 fix: parser drops trailing comments");
     expect(await edit()).toBeUndefined();
-    expect(await tool("e2", "Read", { file_path: join(root, "src/parser.ts") })).toBeUndefined();
+    // a fresh window: the fix record arrives before the file is even read, and the edit
+    // that follows does not repeat it
+    const read = await tool("e2", "Read", { file_path: join(root, "src/parser.ts") });
+    expect(ctxText(read)).toContain("eminiar history: src/parser.ts is bug-prone");
+    expect(await tool("e2", "Edit", { file_path: join(root, "src/parser.ts") })).toBeUndefined();
   });
-  it("notes fan-in for widely imported files only", async () => {
+  it("notes fan-in for widely imported files only, and only before an edit", async () => {
+    expect(await tool("e3", "Read", { file_path: join(root, "src/core.ts") })).toBeUndefined();
     const core = await tool("e3", "Write", { file_path: join(root, "src/core.ts") });
     expect(ctxText(core)).toContain("eminiar graph: src/core.ts is imported by 12 files");
     expect(await tool("e3", "Edit", { file_path: join(root, "src/quiet.ts") })).toBeUndefined();
+  });
+});
+
+describe("git history commands route to em_history", () => {
+  it("maps log, blame, show and shortlog forms to the matching em_history call", () => {
+    const call = (cmd: string) => suggest("Bash", { command: cmd }, root);
+    expect(call("git log --oneline -30")?.tool).toBe("em_history");
+    expect(call("git log --oneline -30")?.reason).toContain('{action:"overview"}');
+    expect(call("git log -p -- src/parser.ts")?.reason).toContain(
+      '{action:"file", path:"src/parser.ts"}',
+    );
+    expect(call("git log --follow src/parser.ts | head -20")?.reason).toContain(
+      '{action:"file", path:"src/parser.ts"}',
+    );
+    expect(call("git blame src/core.ts")?.reason).toContain('{action:"file", path:"src/core.ts"}');
+    expect(call("git show 1a2b3c4 --stat")?.reason).toContain('{action:"commit", sha:"1a2b3c4"}');
+    expect(call("git log --grep='rate limit' -i")?.reason).toContain(
+      '{action:"search", query:"rate limit"}',
+    );
+    expect(call("git log main..feature/x --oneline")?.reason).toContain(
+      '{action:"branch", name:"feature/x"}',
+    );
+    expect(call("git log -L :parse:src/parser.ts")?.reason).toContain(
+      '{action:"symbol", name_path:"src/parser.ts#parse"}',
+    );
+    expect(call("git log --author=ryan --since=2.weeks")?.reason).toContain(
+      '{action:"timeline", author:"ryan"}',
+    );
+    expect(call("cd src && git log -5")?.tool).toBe("em_history");
+    expect(call("git -C /tmp/other --no-pager log -5")?.tool).toBe("em_history");
+  });
+  it("leaves one-commit lookups and file prints alone", () => {
+    const call = (cmd: string) => suggest("Bash", { command: cmd }, root);
+    expect(call("git log -1 --format=%H")).toBeUndefined();
+    expect(call("git log -n 1 --pretty=%s")).toBeUndefined();
+    // a patch is big even for one commit
+    expect(call("git log -1 -p")?.tool).toBe("em_history");
+    // `git show REF:path` prints a file, not history
+    expect(call("git show HEAD:package.json")?.tool).toBe("em_execute");
+    expect(call("git status")).toBeUndefined();
+  });
+  it("denies the raw log in enforce mode and names the em_history call", async () => {
+    const out = await tool("h1", "Bash", { command: "git log --oneline -20 -- src/parser.ts" });
+    expect(out?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out?.hookSpecificOutput?.permissionDecisionReason).toContain("Retry with em_history");
+    expect(out?.hookSpecificOutput?.permissionDecisionReason).toContain(
+      'em_history {action:"file", path:"src/parser.ts"}',
+    );
   });
 });
 
