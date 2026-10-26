@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "name": "better-sqlite3",
+      "kind": "url",
+      "addedAt": "2026-10-26T20:03:17.500Z",
+      "urls": [
+        "https://github.com/WiseLibs/better-sqlite3/blob/master/docs/api.md"
+      ],
+      "provider": "npm:better-sqlite3",
+      "title": "better-sqlite3",
+      "crawl": {
+        "depth": 0
+      }
+    },
+    {
+      "name": "docs",
+      "kind": "path",
+      "addedAt": "2026-10-26T20:03:17.500Z",
+      "path": "docs",
+      "glob": [
+        "**/*.md",
+        "**/*.mdx",
+        "**/*.rst",
+        "**/*.txt"
+      ],
+      "title": "docs/ directory"
+    },
+    {
+      "name": "readme",
+      "kind": "path",
+      "addedAt": "2026-10-26T20:03:17.500Z",
+      "path": ".",
+      "glob": [
+        "README.md"
+      ],
+      "title": "project readme and top-level guides"
+    },
+    {
+      "name": "sqlite-vec",
+      "kind": "url",
+      "addedAt": "2026-10-26T20:03:17.500Z",
+      "urls": [
+        "https://alexgarcia.xyz/sqlite-vec/api-reference.html"
+      ],
+      "provider": "npm:sqlite-vec",
+      "title": "sqlite-vec",
+      "crawl": {
+        "depth": 0
+      }
+    },
+    {
+      "name": "transformers-js",
+      "kind": "url",
+      "addedAt": "2026-10-26T20:03:17.500Z",
+      "urls": [
+        "https://huggingface.co/docs/transformers.js/index"
+      ],
+      "provider": "npm:@huggingface/transformers",
+      "title": "Transformers.js",
+      "crawl": {
+        "depth": 1,
+        "maxPages": 6
+      }
+    },
+    {
+      "name": "tree-sitter",
+      "kind": "url",
+      "addedAt": "2026-10-26T20:03:17.500Z",
+      "urls": [
+        "https://tree-sitter.github.io/tree-sitter/using-parsers/"
+      ],
+      "provider": "npm:web-tree-sitter",
+      "title": "tree-sitter",
+      "crawl": {
+        "depth": 1,
+        "maxPages": 6
+      }
+    },
+    {
+      "name": "zod",
+      "kind": "url",
+      "addedAt": "2026-10-26T20:03:17.500Z",
+      "urls": [
+        "https://zod.dev/"
+      ],
+      "provider": "npm:zod",
+      "title": "Zod",
+      "crawl": {
+        "depth": 1,
+        "maxPages": 8
+      }
+    }
+  ]
+}
