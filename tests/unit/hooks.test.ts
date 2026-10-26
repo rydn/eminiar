@@ -89,7 +89,8 @@ describe("routing suggestions", () => {
   });
 
   it("flags heavy bash, big reads, content grep, webfetch and agents; leaves tiny calls alone", () => {
-    expect(suggest("Bash", { command: "git log --oneline -50" }, root)?.tool).toBe("em_execute");
+    expect(suggest("Bash", { command: "git log --oneline -50" }, root)?.tool).toBe("em_history");
+    expect(suggest("Bash", { command: "git diff HEAD~3" }, root)?.tool).toBe("em_execute");
     expect(suggest("Bash", { command: "ls -la | grep foo" }, root)?.tool).toBe("em_execute");
     expect(suggest("Bash", { command: "git status" }, root)).toBeUndefined();
     expect(suggest("Bash", { command: "pwd" }, root)).toBeUndefined();
@@ -350,7 +351,7 @@ describe("server liveness", () => {
       }),
     );
     expect(out?.hookSpecificOutput?.permissionDecision).toBeUndefined();
-    expect(out?.hookSpecificOutput?.additionalContext).toContain("em_execute");
+    expect(out?.hookSpecificOutput?.additionalContext).toContain("em_history");
     expect(out?.hookSpecificOutput?.additionalContext).toContain("not running");
   });
 });

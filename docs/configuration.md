@@ -108,13 +108,14 @@ eminiar merges four layers. A later layer overrides an earlier one.
 | Key | Default | Description |
 |---|---|---|
 | `onPrompt` | `true` | Attach matching memories and docs to each prompt |
-| `onFile` | `true` | Attach memories, fix history and fan-in before a file read or edit |
+| `onFile` | `true` | Attach memories and fix history before a file read or edit, fan-in before an edit |
 | `onAgent` | `true` | Add the brief and matching knowledge to subagent prompts |
 | `onCommit` | `true` | List risky files before `git commit` |
 | `onError` | `true` | Attach earlier occurrences of a failed call's error |
 | `onWeb` | `true` | Attach indexed doc pages before `WebSearch` / `WebFetch` |
 | `maxMemories` | `3` | Memories per prompt |
 | `maxDocs` | `2` | Doc pages per prompt |
+| `repeatAfter` | `10` | Prompts after which an item already shown in this context window may be attached again (`0` = once per window) |
 
 ### `docs`
 

@@ -26,8 +26,11 @@ Use
   docs add [--pick recommended|local|service|infra|catalog|api|registry|all] [--name N] [--url U ...] [--path P]
            [--glob G ...] [--provider npm:x|pypi:x|go:x|env:X|image:x|api:host] [--depth N] [--max N] [--no-sync]
   docs list | sync [name ...] [--force] | remove <name> | lookup "<q>" [--name N] | resolve <provider>
-  stats [--lifetime]           Context savings
+  stats [--lifetime]           Context savings and how often proactive recall fired
   recall ["<q>"]               Memories and session history
+  recall --explain "<prompt>" [--session ID]   Why hook recall would (not) fire for a prompt
+  recall --file <path>         What a Read/Edit of the file would attach (memories, history)
+  recall --replay [--limit N] [--since 30d]    Re-run recall over past prompts: hit rate, misses
   purge <index|sessions|graph|memories|all> --yes
   ui [--port 7331] [--no-open] Web dashboard: stats, memories, graph, search, sessions, actions
                                (alias: serve)
@@ -335,9 +338,49 @@ const commands: Record<string, Command> = {
   },
 
   async recall(args) {
-    const { positionals } = parseArgs({ args, allowPositionals: true, strict: false });
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        explain: { type: "boolean" },
+        file: { type: "string" },
+        replay: { type: "boolean" },
+        session: { type: "string" },
+        limit: { type: "string" },
+        since: { type: "string" },
+      },
+      allowPositionals: true,
+      strict: false,
+    });
+    const ctx = getContext();
+    if (values.explain || values.file || values.replay) {
+      const { explainFile, explainPrompt, replayPrompts } = await import(
+        "./session/recall-explain.js"
+      );
+      const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+      if (values.replay) {
+        console.log(
+          await replayPrompts(ctx, {
+            limit: values.limit ? Number(values.limit) : undefined,
+            since: str(values.since),
+          }),
+        );
+        return 0;
+      }
+      const file = str(values.file);
+      if (file) {
+        console.log(explainFile(ctx, file, { sessionId: str(values.session) }));
+        return 0;
+      }
+      const prompt = positionals.join(" ");
+      if (!prompt) {
+        console.error('usage: eminiar recall --explain "<prompt>" [--session ID]');
+        return 2;
+      }
+      console.log(await explainPrompt(ctx, prompt, { sessionId: str(values.session) }));
+      return 0;
+    }
     const { emRecall } = await import("./tools/em_recall.js");
-    const r = await emRecall.handler({ query: positionals.join(" ") || undefined }, getContext());
+    const r = await emRecall.handler({ query: positionals.join(" ") || undefined }, ctx);
     console.log(text(r));
     return 0;
   },

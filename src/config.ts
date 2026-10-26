@@ -129,6 +129,11 @@ export const ConfigSchema = z.object({
       onWeb: z.boolean().default(true),
       maxMemories: z.number().int().min(0).max(10).default(3),
       maxDocs: z.number().int().min(0).max(10).default(2),
+      /**
+       * Prompts after which an item already shown in this context window may be injected
+       * again when it matches (0 = once per context window only).
+       */
+      repeatAfter: z.number().int().min(0).max(1000).default(10),
     })
     .prefault({}),
   docs: z

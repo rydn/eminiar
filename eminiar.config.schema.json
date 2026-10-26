@@ -245,6 +245,12 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 10
+        },
+        "repeatAfter": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
         }
       }
     },

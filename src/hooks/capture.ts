@@ -81,9 +81,13 @@ export const userPromptSubmit: HookHandler = async (input) => {
       maxMemories: recall.maxMemories,
       maxDocs: recall.maxDocs,
       sessionId,
+      repeatAfter: recall.repeatAfter,
+      trace: true,
+      path: "prompt",
     });
+    // Quiet decisions are recorded too: the hit rate is only measurable with both sides.
+    recordShown(db, sessionId, r.keys, { path: "prompt", trace: r.trace });
     if (!r.text) return undefined;
-    recordShown(db, sessionId, r.keys);
     return {
       hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: r.text },
     };
@@ -147,10 +151,11 @@ export const postToolUseFailure: HookHandler = async (input) => {
       const r = await recallForError(db, input.error, {
         sessionId,
         maxMemories: Math.min(2, recall.maxMemories),
+        repeatAfter: recall.repeatAfter,
       });
       if (r.text) {
         recalled = r.text;
-        recordShown(db, sessionId, r.keys);
+        recordShown(db, sessionId, r.keys, { path: "error" });
       }
     } catch {
       // recall is best effort

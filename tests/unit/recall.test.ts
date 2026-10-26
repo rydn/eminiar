@@ -9,11 +9,16 @@ import { indexContent } from "../../src/index/indexer.js";
 import { write } from "../../src/memory/store.js";
 import { renderProjectBrief } from "../../src/session/brief.js";
 import {
+  bodyNamesPath,
+  formatRecallStats,
   memoriesForFile,
   promptTerms,
   recallForText,
+  recallStats,
   requiredMatches,
+  symbolMentionPattern,
 } from "../../src/session/recall.js";
+import { explainFile, explainPrompt, replayPrompts } from "../../src/session/recall-explain.js";
 import { markServerAlive } from "../../src/session/server-alive.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 
@@ -231,5 +236,120 @@ describe("session brief", () => {
       base({ session_id: "r-start", hook_event_name: "SessionStart", source: "startup" }),
     );
     expect(ctxText(out)).toMatch(/^Project knowledge \(check before deciding/);
+  });
+});
+
+describe("name and tag matches", () => {
+  it("lets a short prompt naming a memory's slug through on one shared term", async () => {
+    const db = getStorage(getContext(root), { vectors: false });
+    // "pool" is a slug word of decision/sqlite-connection-pool and half of the prompt
+    const r = await recallForText(db, "tune the pool");
+    expect(r.text).toContain("decision/sqlite-connection-pool");
+    expect(r.text).not.toContain("old-pool-design");
+    // one shared word in a long prompt is still noise
+    expect((await recallForText(db, "draw a swimming pool diagram for the garden")).text).toBe("");
+  });
+  it("always lets a prompt that names the memory outright through", async () => {
+    const db = getStorage(getContext(root), { vectors: false });
+    const r = await recallForText(db, "re-read constraint/no-pnpm before installing packages");
+    expect(r.text).toContain("constraint/no-pnpm");
+  });
+});
+
+describe("repeat after N prompts", () => {
+  it("shows a memory again once enough prompts have gone by", async () => {
+    setConfig({ recall: { repeatAfter: 2 } });
+    const prompt = (p: string) =>
+      handlers.UserPromptSubmit!(
+        base({ session_id: "r-rep", hook_event_name: "UserPromptSubmit", prompt: p }),
+      );
+    const change = "Change the sqlite connection pool to allow concurrent writers";
+    expect(ctxText(await prompt(change))).toContain("decision/sqlite-connection-pool");
+    expect(await prompt(change)).toBeUndefined();
+    // "app" sits inside "capped" and "write" inside "writer": substrings are not shared terms
+    expect(await prompt("unrelated: write the release notes for the garden app")).toBeUndefined();
+    expect(ctxText(await prompt(change))).toContain("decision/sqlite-connection-pool");
+    setConfig({});
+  });
+});
+
+describe("implied links and symbol mentions", () => {
+  it("links a memory to the project files its body names", () => {
+    const ctx = getContext(root);
+    const db = getStorage(ctx, { vectors: false });
+    write(ctx, db, {
+      name: "fact/pool-wal",
+      kind: "fact",
+      content:
+        "WAL mode is switched on in src/storage/pool.ts at startup; src/missing.ts is not a file and docs/x.md neither.",
+    });
+    const row = db.memoryGetByName("fact/pool-wal")!;
+    expect(JSON.parse(row.node_ids!)).toEqual(["file:src/storage/pool.ts"]);
+    const edges = db.graphEdgesFrom(["memory:fact/pool-wal"], ["mentions"]);
+    expect(edges.map((e) => [e.dst, e.confidence])).toEqual([["file:src/storage/pool.ts", 0.6]]);
+    expect(memoriesForFile(db, "src/storage/pool.ts", { max: 6 }).text).toContain("fact/pool-wal");
+    expect(bodyNamesPath("see lib/src/storage/pool.ts", "src/storage/pool.ts")).toBe(false);
+    expect(bodyNamesPath("see ./src/storage/pool.ts.", "src/storage/pool.ts")).toBe(true);
+    expect(bodyNamesPath("see `src/storage/pool.ts`", "src/storage/pool.ts")).toBe(true);
+    expect(bodyNamesPath("see src/storage/pool.tsx", "src/storage/pool.ts")).toBe(false);
+  });
+  it("finds memories that name one of the file's symbols", () => {
+    const ctx = getContext(root);
+    const db = getStorage(ctx, { vectors: false });
+    write(ctx, db, {
+      name: "note/release-all",
+      kind: "note",
+      content: "Call releaseAll() after each batch, never inside a transaction.",
+    });
+    const symbols = ["releaseAll", "acquire"];
+    expect(memoriesForFile(db, "src/storage/pool.ts", { max: 6, symbols }).text).toContain(
+      "note/release-all",
+    );
+    expect(memoriesForFile(db, "src/storage/pool.ts", { max: 6 }).text).not.toContain(
+      "note/release-all",
+    );
+    // short names say nothing about which file is meant
+    expect(symbolMentionPattern(["run", "main"])).toBeUndefined();
+    expect(symbolMentionPattern(["releaseAll"])!.test("the releaseAll step")).toBe(false);
+  });
+});
+
+describe("recall observability", () => {
+  it("records quiet decisions too and tallies the hit rate", async () => {
+    const db = getStorage(getContext(root), { vectors: false });
+    const prompt = (p: string) =>
+      handlers.UserPromptSubmit!(
+        base({ session_id: "r-stat", hook_event_name: "UserPromptSubmit", prompt: p }),
+      );
+    expect(await prompt("paint the garden fence green")).toBeUndefined();
+    await prompt("Change the sqlite connection pool to allow concurrent writers");
+    const s = recallStats(db.eventsBySession("r-stat", { categories: ["recall"] }));
+    expect(s.decisions).toBe(2);
+    expect(s.byPath.prompt).toMatchObject({ fired: 1, quiet: 1 });
+    expect(s.byPath.prompt!.items).toBeGreaterThanOrEqual(1);
+    expect(formatRecallStats("recall", s)).toContain("prompt 1/2 fired (50%");
+  });
+  it("explains a prompt and a file, and replays past prompts", async () => {
+    const ctx = getContext(root);
+    const out = await explainPrompt(
+      ctx,
+      "Change the sqlite connection pool to allow concurrent writers",
+    );
+    expect(out).toContain("✓ shown   decision/sqlite-connection-pool [decision]");
+    expect(out).toContain("· skipped decision/old-pool-design [decision]");
+    expect(out).toContain("(superseded)");
+    expect(out).toMatch(/result: would attach \d+ item/);
+    expect(await explainPrompt(ctx, "ok thanks")).toContain("too vague");
+
+    const file = explainFile(ctx, "src/storage/pool.ts");
+    expect(file).toContain("decision/sqlite-connection-pool [decision]");
+    expect(file).toContain("(related)");
+    expect(file).toContain("fact/pool-wal");
+    expect(file).toContain("history table not built yet");
+
+    const replay = await replayPrompts(ctx, { limit: 50 });
+    expect(replay).toMatch(/replayed \d+ prompt\(s\)/);
+    expect(replay).toContain("fired:");
+    expect(replay).toContain("live decisions recorded by the hooks");
   });
 });

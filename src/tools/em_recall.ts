@@ -10,7 +10,7 @@ import { defineTool, text } from "./types.js";
 export const emRecall = defineTool({
   name: "em_recall",
   description:
-    'Recall memories (.eminiar/memories, written by em_remember) and captured session history — decisions, constraints, errors and their fixes, rejected approaches — matching a query (hybrid keyword + semantic). Without a query, lists the most recent memories, onboarding first. Use at the start of a task to avoid re-deciding or re-breaking things; em_memory {action:"read"} shows a whole memory.',
+    'Call this first when a task starts, a design changes or an approach is chosen: it recalls memories (.eminiar/memories, written by em_remember) and captured session history — decisions, constraints, errors and their fixes, rejected approaches — matching a query (hybrid keyword + semantic), so nothing is re-decided or re-broken. Without a query, lists the most recent memories, onboarding first. The hooks also push matching memories on their own ("eminiar recall", "eminiar memory"); this tool searches further, with synonyms. em_memory {action:"read"} shows a whole memory.',
   schema: {
     query: z.string().optional(),
     kind: z.enum(MEMORY_KINDS).optional().describe("Restrict to one memory kind"),

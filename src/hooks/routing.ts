@@ -9,6 +9,7 @@ import { renderProjectBrief } from "../session/brief.js";
 import {
   commitContext,
   fileContext,
+  fileSymbols,
   memoriesForFile,
   recallForText,
   recordShown,
@@ -60,6 +61,61 @@ export function coverageHint(db: StorageAdapter, rel: string): string | undefine
   return `eminiar graph: ${rel} is ${row.status}${row.reason ? ` (${row.reason})` : ""}; graph answers about it may be incomplete.`;
 }
 
+const GIT_HISTORY =
+  /(?:^|[;&|]\s*)git\s+(?:(?:-C|--git-dir|--work-tree)[= ]\S+\s+|--no-pager\s+)*(log|blame|shortlog|show|whatchanged|reflog)\b([^;&|]*)/;
+/** One commit, printed short: `git log -1 --format=%H` is a lookup, not a history read. */
+const ONE_COMMIT = /(^|\s)(-1|-n\s*1|-n1|--max-count[= ]1)(?=\s|$)/;
+
+/**
+ * The em_history call that answers a `git log` / `blame` / `show` / `shortlog` command,
+ * or undefined when the command is not a history read (or prints a file, like
+ * `git show HEAD:path`).
+ */
+export function historyCall(cmd: string): string | undefined {
+  const m = GIT_HISTORY.exec(cmd);
+  if (!m) return undefined;
+  const sub = m[1]!;
+  const rest = (m[2] ?? "").trim();
+  const args = rest.split(/\s+/).filter(Boolean);
+  const q = (s: string) => JSON.stringify(s.replace(/^['"]|['"]$/g, ""));
+  const positional = (a: string) => !a.startsWith("-");
+  if (sub === "show") {
+    if (/\S+:\S+/.test(rest)) return undefined; // `git show REF:path` prints a file
+    const sha = args.find(positional);
+    return `{action:"commit", sha:${q(sha ?? "HEAD")}}`;
+  }
+  if (sub === "blame") {
+    const path = args.filter(positional).pop();
+    return path ? `{action:"file", path:${q(path)}}` : undefined;
+  }
+  if (sub === "log" && ONE_COMMIT.test(rest) && !/(^|\s)(-p|--patch|--stat)\b/.test(rest))
+    return undefined;
+  const lineRange = /-L\s*:?([^:\s]+):(\S+)/.exec(rest);
+  if (lineRange) {
+    const [, fn, file] = lineRange;
+    return /^[A-Za-z_$]/.test(fn!)
+      ? `{action:"symbol", name_path:${q(`${file}#${fn}`)}}`
+      : `{action:"file", path:${q(file!)}}`;
+  }
+  const grep = /--grep[= ]("[^"]*"|'[^']*'|\S+)/.exec(rest);
+  if (grep) return `{action:"search", query:${q(grep[1]!)}}`;
+  const author = /--author[= ]("[^"]*"|'[^']*'|\S+)/.exec(rest);
+  const range = args.find((a) => positional(a) && /\.\.\.?/.test(a));
+  if (range) {
+    const [a, b] = range.split(/\.\.\.?/);
+    return `{action:"branch", name:${q(b || a || "HEAD")}}`;
+  }
+  const dash = args.indexOf("--");
+  const path =
+    dash !== -1
+      ? args[dash + 1]
+      : args.find((a) => positional(a) && /[/.]/.test(a) && !/^[0-9a-f]{7,40}$/i.test(a));
+  if (path) return `{action:"file", path:${q(path)}}`;
+  if (author) return `{action:"timeline", author:${q(author[1]!)}}`;
+  if (sub === "shortlog") return `{action:"timeline"}`;
+  return `{action:"overview"}`;
+}
+
 interface Suggestion {
   tool: string;
   reason: string;
@@ -67,6 +123,12 @@ interface Suggestion {
   prefixPrompt?: string;
   /** Context only, never a denial (the native tool is still the right one). */
   annotateOnly?: boolean;
+}
+
+/** What preToolUse already knows that changes a suggestion. */
+export interface SuggestExtra {
+  /** For Grep: the pattern's identifier when the graph defines symbols by that name. */
+  symbol?: string | undefined;
 }
 
 /** Registered documentation sources (default manifest location; cheap, cached by the OS). */
@@ -127,6 +189,7 @@ export function suggest(
   toolName: string,
   input: Record<string, unknown>,
   root: string,
+  extra: SuggestExtra = {},
 ): Suggestion | undefined {
   switch (toolName) {
     case "Bash": {
@@ -134,6 +197,17 @@ export function suggest(
       if (!cmd || TINY_BASH.test(cmd)) return undefined;
       // `cat > file` / `cat >> file <<EOF` writes a file and prints nothing
       if (/^\s*cat\b[^|\n]*>/.test(cmd) && !cmd.includes("|")) return undefined;
+      // git history reads have a classified answer: fixes traced to their origin, risk per
+      // file, branches vs base — em_history, not a raw log through em_execute.
+      const history = historyCall(cmd);
+      if (history) {
+        return {
+          tool: "em_history",
+          reason: `the git history is already classified (commit kinds, fixes traced to the change that caused them, risk per file); em_history ${history} answers this without the raw log`,
+        };
+      }
+      if (/^\s*git\s+log\b/.test(cmd) && ONE_COMMIT.test(cmd) && !cmd.includes("|"))
+        return undefined;
       if (HEAVY_BASH.test(cmd) || /\|\s*(head|tail|grep|wc|sort|uniq|jq|less)\b/.test(cmd)) {
         return {
           tool: "em_execute",
@@ -164,10 +238,20 @@ export function suggest(
       return undefined;
     }
     case "Grep": {
-      if (input.output_mode === "content" && !input.head_limit) {
+      const content = input.output_mode === "content" && !input.head_limit;
+      if (extra.symbol) {
+        // The graph already knows this identifier: symbol-level answers beat raw matches.
+        // A files-only grep is cheap, so that one is annotated rather than denied.
+        return {
+          tool: "em_symbols",
+          annotateOnly: !content,
+          reason: `the graph indexes "${extra.symbol}": em_symbols {name_path:"${extra.symbol}", mode:"references"} lists its uses, {include_body:true} its definition; em_search {queries:["${extra.symbol}"], source:"code"} finds the code by symbol`,
+        };
+      }
+      if (content) {
         return {
           tool: "em_execute",
-          reason: `content-mode grep can be large; em_execute with rg and an intent returns only matching sections`,
+          reason: `content-mode grep can be large; em_execute with rg and an intent returns only matching sections (em_search {queries, mode:"regex"} scans the indexed files with context)`,
         };
       }
       return undefined;
@@ -199,7 +283,7 @@ export function suggest(
         reason:
           "subagents should prefer em_execute / em_batch_execute / em_search over Bash, Read and Grep",
         prefixPrompt:
-          'Use the eminiar tools (em_execute, em_batch_execute, em_execute_file, em_fetch_and_index, em_search) instead of Bash/Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on.\n\n',
+          'Use the eminiar tools (em_execute, em_batch_execute, em_execute_file, em_fetch_and_index, em_search, em_symbols, em_history) instead of Bash/Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, em_history {action:"file", path} before editing a file, em_symbols / em_search {source:"code"} before grepping for an identifier, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on.\n\n',
       };
     default:
       return undefined;
@@ -245,8 +329,9 @@ const FILE_TOOLS = new Set(["Read", "Edit", "MultiEdit", "Write"]);
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
 
 /**
- * Before a file is read or edited: the memories linked to it; before an edit, also its fix
- * history and fan-in. Each once per context window.
+ * Before a file is read or edited: the memories about it (linked, naming its path or one
+ * of its symbols) and its fix history; before an edit, also its fan-in. Each once per
+ * context window, again after `recall.repeatAfter` prompts.
  */
 function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefined {
   if (!ctx.config.recall.onFile || !FILE_TOOLS.has(input.tool_name ?? "")) return undefined;
@@ -255,8 +340,12 @@ function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefine
     if (!rel) return undefined;
     const db = getStorage(ctx, { vectors: false });
     const sessionId = input.session_id || undefined;
-    const results = [memoriesForFile(db, rel, { sessionId })];
-    if (EDIT_TOOLS.has(input.tool_name ?? "")) results.push(fileContext(db, rel, { sessionId }));
+    const repeatAfter = ctx.config.recall.repeatAfter;
+    const edit = EDIT_TOOLS.has(input.tool_name ?? "");
+    const results = [
+      memoriesForFile(db, rel, { sessionId, symbols: fileSymbols(db, rel), repeatAfter }),
+      fileContext(db, rel, { sessionId, edit, repeatAfter }),
+    ];
     const shown = results.filter((r) => r.text);
     if (!shown.length) return undefined;
     if (sessionId)
@@ -264,6 +353,7 @@ function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefine
         db,
         sessionId,
         shown.flatMap((r) => r.keys),
+        { path: "file" },
       );
     return shown.map((r) => r.text).join("\n");
   } catch {
@@ -320,7 +410,7 @@ async function webKnowledge(ctx: ProjectContext, input: HookInput): Promise<stri
   if (!text.trim()) return undefined;
   try {
     const db = getStorage(ctx, { vectors: false });
-    const r = await recallForText(db, text, { maxMemories: 0, maxDocs: 3 });
+    const r = await recallForText(db, text, { maxMemories: 0, maxDocs: 3, path: "web" });
     if (!r.text) return undefined;
     const pages = r.text.split("\n").filter((l) => l.startsWith("- docs:"));
     return [
@@ -374,8 +464,15 @@ export const preToolUse: HookHandler = async (
   if (coexisting && ["Bash", "Read", "Grep", "WebFetch"].includes(input.tool_name))
     return withContext(undefined, memo);
 
-  const hint = joinHints(graphContext(ctx, input), memo);
-  const s = suggest(input.tool_name, input.tool_input, ctx.root);
+  const graph = graphContext(ctx, input);
+  const hint = joinHints(graph, memo);
+  // graphContext names matching symbols only when the graph has them: that is the signal
+  // to route a Grep for the identifier to em_symbols / em_search instead of rg.
+  const symbol =
+    input.tool_name === "Grep" && graph
+      ? literalOf(String(input.tool_input.pattern ?? ""))
+      : undefined;
+  const s = suggest(input.tool_name, input.tool_input, ctx.root, { symbol });
   if (!s) return withContext(undefined, hint);
   if (s.annotateOnly) return withContext(annotate(s), hint);
 
@@ -443,6 +540,7 @@ async function briefFor(ctx: ProjectContext, task: string): Promise<string> {
       const r = await recallForText(db, task, {
         maxMemories: recall.maxMemories,
         maxDocs: recall.maxDocs,
+        path: "agent",
       });
       if (r.text) parts.push(r.text);
     }

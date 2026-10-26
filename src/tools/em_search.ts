@@ -19,7 +19,7 @@ export function sourceFilter(source: string | string[] | undefined): {
 export const emSearch = defineTool({
   name: "em_search",
   description:
-    "Search everything eminiar has indexed: sandbox outputs, files, fetched pages, session memory, memories and code (chunks named by symbol, e.g. `src/auth.ts > Session.refresh`). Pass several queries at once — the round trip is paid once. Hybrid BM25 (porter + trigram) with typo correction; `sort: timeline` orders by recency (use after a resume); `mode: regex` scans indexed content with a JS regular expression and returns the matching lines with context (for ad-hoc greps over files not indexed, use em_execute with rg).",
+    'Search everything eminiar has indexed: sandbox outputs, files, fetched pages, session memory, memories, commit messages (source git) and code (chunks named by symbol, e.g. `src/auth.ts > Session.refresh`). Reach for it before Grep or Bash when looking for where something lives, what an earlier command printed, or what a past session found: `source: "code"` answers code questions by symbol, `sort: timeline` orders by recency (use after a resume), `mode: regex` scans indexed content with a JS regular expression and returns the matching lines with context (for ad-hoc greps over files not indexed, use em_execute with rg). Pass several queries at once — the round trip is paid once. Hybrid BM25 (porter + trigram) with typo correction.',
   schema: {
     queries: z.array(z.string().min(1)).min(1).describe("One or more search queries"),
     source: z
