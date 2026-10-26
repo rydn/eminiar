@@ -5,6 +5,9 @@ import { formatRoutingStats, ROUTING_CATEGORY, routingStats } from "../session/r
 import { globalDb } from "../stats/global.js";
 import { fmtTokens, formatStats } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
+import { usageBrief } from "../usage/brief.js";
+import { ingestSession, usageEnabled } from "../usage/ingest.js";
+import { formatUsd } from "../usage/pricing.js";
 import { defineTool, text } from "./types.js";
 
 export const emStats = defineTool({
@@ -65,9 +68,25 @@ export const emStats = defineTool({
     parts.push(
       `index: ${db.countDocuments()} documents (${db.countDocuments("exec")} exec, ${db.countDocuments("batch")} batch, ${db.countDocuments("file")} file, ${db.countDocuments("url")} url, ${db.countDocuments("code")} code), ${db.vecCount()} vectors`,
     );
+    const cost = usageLine(ctx, sessionId);
+    if (cost) parts.push(cost);
     return text(parts.join("\n\n"));
   },
 });
+
+/** `usage: today $X · session $Y · see em_usage`, or undefined when nothing has been recorded. */
+function usageLine(ctx: Parameters<typeof getStorage>[0], sessionId: string): string | undefined {
+  if (!usageEnabled(ctx)) return undefined;
+  try {
+    const db = getStorage(ctx);
+    ingestSession(db, ctx.root, sessionId, undefined, { overrides: ctx.config.usage.pricing });
+    const b = usageBrief(db, ctx, { sessionId });
+    if (!b.todayUsd && !b.sessionUsd) return undefined;
+    return `usage: today ${formatUsd(b.todayUsd)} · session ${formatUsd(b.sessionUsd)} · see em_usage`;
+  } catch {
+    return undefined;
+  }
+}
 
 function mergeByTool(rows: ReturnType<ReturnType<typeof getStorage>["statsAll"]>) {
   const m = new Map<string, (typeof rows)[number]>();

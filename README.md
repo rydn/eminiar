@@ -39,7 +39,7 @@ Claude Code is very capable, but three things slow it down on a real project:
 
 ## The solution
 
-eminiar is a Claude Code plugin. It adds an MCP server with 22 `em_*` tools and a set of hooks.
+eminiar is a Claude Code plugin. It adds an MCP server with 23 `em_*` tools and a set of hooks.
 Everything runs locally in one SQLite database per project.
 
 | | Without eminiar | With eminiar |
@@ -95,10 +95,20 @@ a bug-prone file, it sees the record.
 and third-party APIs your code calls. It indexes their documentation locally. OpenAPI specs are
 split into one section per endpoint, so a lookup returns the exact operation.
 
+### 💸 Usage insights — what each session really costs
+
+`em_usage` reads the transcripts Claude Code keeps on your machine and records tokens, cache
+traffic and estimated cost per model call: cost today and this week, cache hit rate, per-model
+and per-session breakdowns, 5-hour billing blocks with burn rate, the context timeline of a
+session with its compactions, which tools fill the context, insights with recommendations, and
+what eminiar's own tools saved in dollars. Everything stays local; cost is an estimate at list
+price ([details](docs/usage.md)).
+
 ### 📊 Local dashboard
 
-`eminiar ui` opens a local web app with token savings, a source explorer with impact analysis, a
-graph "galaxy", an architecture map, a history explorer, a memory editor and a docs manager.
+`eminiar ui` opens a local web app with token savings, usage and cost, a source explorer with
+impact analysis, a graph "galaxy", an architecture map, a history explorer, a memory editor and
+a docs manager.
 
 | | |
 |:---:|:---:|
@@ -154,7 +164,7 @@ flowchart LR
     CC["Claude Code"]
     subgraph eminiar ["eminiar (local)"]
         H["Hooks<br/>recall · routing · capture"]
-        S["MCP server<br/>22 em_* tools"]
+        S["MCP server<br/>23 em_* tools"]
         SB["Sandbox<br/>shell · JS · TS · Python …"]
         DB[("SQLite per project<br/>FTS5 · vectors · graph")]
         M["Memory files<br/>.eminiar/memories/*.md"]
@@ -187,6 +197,7 @@ Read more in [How it works](docs/how-it-works.md).
 | [Memory and recall](docs/memory-and-recall.md) | Memory files, decisions, automatic recall |
 | [Knowledge graph and history](docs/knowledge-graph.md) | Graph, symbols, impact analysis, git history |
 | [Documentation knowledge base](docs/documentation-kb.md) | Discover, index and look up docs |
+| [Usage insights](docs/usage.md) | Tokens, cache, cost, billing blocks, insights and savings per session |
 | [Dashboard](docs/dashboard.md) | The `eminiar ui` web app |
 | [Configuration](docs/configuration.md) | Every config key with its default |
 | [CLI](docs/cli.md) | The `eminiar` command |

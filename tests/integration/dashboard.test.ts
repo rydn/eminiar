@@ -315,6 +315,151 @@ describe("dashboard", () => {
     expect(one.output).toContain("1 scanned");
   });
 
+  it("answers the usage endpoints", async () => {
+    const { getContext } = await import("../../src/context.js");
+    const { getStorage } = await import("../../src/storage/index.js");
+    const db = getStorage(getContext(root));
+    const ts = Date.now() - 60_000;
+    const row = (i: number, session: string) => ({
+      request_id: `req-${i}`,
+      message_id: `msg-${i}`,
+      session_id: session,
+      agent_id: null,
+      sidechain: 0,
+      ts: ts + i * 1000,
+      model: "claude-sonnet-5-5",
+      input_tokens: 1000,
+      output_tokens: 200,
+      cache_create_5m: 500,
+      cache_create_1h: 0,
+      cache_read: 8000,
+      thinking_tokens: 0,
+      web_searches: 0,
+      web_fetches: 0,
+      service_tier: null,
+      speed: null,
+      stop_reason: "end_turn",
+      prompt_id: null,
+      git_branch: null,
+      cwd: null,
+      effort: null,
+      version: null,
+      entrypoint: null,
+      cost_usd: 0.01,
+      priced: 1,
+    });
+    db.apiCallsUpsert([row(1, "s-usage"), row(2, "s-usage"), row(3, "s-other")]);
+    db.toolUsesUpsert([
+      {
+        tool_use_id: "tu-1",
+        session_id: "s-usage",
+        agent_id: null,
+        ts: ts + 500,
+        tool: "Bash",
+        input_chars: 10,
+        result_chars: 4000,
+        is_error: 0,
+        request_id: "req-1",
+      },
+    ]);
+
+    const summary = await j<{
+      view: string;
+      scope: string;
+      totals: { calls: number; costUsd: number };
+      today: { calls: number };
+      cache: { hitRate: number };
+      models: Array<{ model: string }>;
+      block: { active: boolean } | null;
+      insights: unknown[];
+      scores: Array<{ id: string; reasons: string[] }>;
+      savings: { assumptions: string[] };
+    }>("/api/usage?view=summary");
+    expect(summary.view).toBe("summary");
+    expect(summary.scope).toBe("project");
+    expect(summary.totals.calls).toBe(3);
+    expect(summary.totals.costUsd).toBeCloseTo(0.03);
+    expect(summary.cache.hitRate).toBeGreaterThan(0.5);
+    expect(summary.models[0]?.model).toBe("claude-sonnet-5-5");
+    expect(summary.block?.active).toBe(true);
+    expect(Array.isArray(summary.insights)).toBe(true);
+    expect(summary.scores.map((s) => s.id)).toContain("context-health");
+    expect(summary.savings.assumptions.length).toBeGreaterThan(0);
+
+    const daily = await j<{ rows: Array<{ key: string; models: Array<{ model: string }> }> }>(
+      "/api/usage?view=daily&since=7d",
+    );
+    expect(daily.rows.length).toBe(1);
+    expect(daily.rows[0]?.models[0]?.model).toBe("claude-sonnet-5-5");
+    const sessions = await j<{ rows: Array<{ session: string }> }>(
+      "/api/usage?view=sessions&limit=1",
+    );
+    expect(sessions.rows.length).toBe(1);
+    const scoped = await j<{ scope: string; totals: { calls: number } }>(
+      "/api/usage?view=summary&session=s-usage",
+    );
+    expect(scoped.scope).toBe("session");
+    expect(scoped.totals.calls).toBe(2);
+
+    const limited = await j<{ rows: unknown[] }>("/api/usage?view=sessions&limit=1000");
+    expect(limited.rows.length).toBe(2);
+    const scopedProject = await j<{ scope: string; totals: { calls: number } }>(
+      "/api/usage?view=summary&scope=project",
+    );
+    expect(scopedProject.scope).toBe("project");
+    expect(scopedProject.totals.calls).toBe(3);
+
+    type Detail = {
+      session: string;
+      timeline: Array<{ contextTokens: number }>;
+      calls?: Array<{ model: string }>;
+      toolUses: Array<{ tool: string; chars: number }>;
+      insights: unknown[];
+      scores: unknown[];
+    };
+    const detail = await j<Detail>("/api/usage/session?id=s-usage");
+    expect(detail.session).toBe("s-usage");
+    expect(detail.timeline.length).toBe(2);
+    expect(detail.timeline[0]?.contextTokens).toBe(9500);
+    expect(detail.calls).toBeUndefined(); // the per-call rows only on request
+    expect(detail.toolUses).toEqual([expect.objectContaining({ tool: "Bash", chars: 4000 })]);
+    expect(Array.isArray(detail.insights)).toBe(true);
+    expect(detail.scores.length).toBeGreaterThan(0);
+    const withCalls = await j<Detail>("/api/usage/session?id=s-usage&calls=1");
+    expect(withCalls.calls?.length).toBe(2);
+    expect(withCalls.calls?.[0]?.model).toBe("claude-sonnet-5-5");
+
+    // bad query values are 400s, never defaults
+    for (const bad of [
+      "/api/usage?view=nope",
+      "/api/usage?view=daily&since=lately",
+      "/api/usage?view=daily&since=1",
+      "/api/usage?view=daily&since=32",
+      "/api/usage?view=daily&since=1/1",
+      "/api/usage?view=daily&since=99999999999999999999d",
+      "/api/usage?view=sessions&limit=0",
+      "/api/usage?view=sessions&limit=-1",
+      "/api/usage?view=sessions&limit=abc",
+      "/api/usage?view=sessions&limit=1001",
+      "/api/usage?view=sessions&limit=1.5",
+      "/api/usage?scope=bogus",
+      "/api/usage?session=../x",
+      "/api/usage?session=a%20b",
+      `/api/usage?session=${"x".repeat(129)}`,
+      "/api/usage/session",
+      "/api/usage/session?id=../x",
+      "/api/usage/session?id=a/b",
+    ]) {
+      const r = await get(bad);
+      expect(r.status, bad).toBe(400);
+      expect((JSON.parse(r.body) as { error: string }).error, bad).toBeTruthy();
+    }
+    const unknownSession = await j<{ session: string; timeline: unknown[] }>(
+      "/api/usage/session?id=never-seen_1.0",
+    );
+    expect(unknownSession.timeline).toEqual([]);
+  });
+
   it("refuses cross-site and foreign-host requests", async () => {
     // fetch drops a custom Host header, so go through node:http
     const foreign = await new Promise<number>((resolve, reject) => {

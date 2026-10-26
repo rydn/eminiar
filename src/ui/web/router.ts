@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 
 export const VIEWS = [
   "overview",
+  "usage",
   "explore",
   "galaxy",
   "architecture",

@@ -75,8 +75,26 @@ eminiar docs remove example
 eminiar reindex                                # incremental, all scopes
 eminiar reindex --scope code --full            # code | git | metrics | docs | memories | embeddings | all
 eminiar stats [--lifetime]                     # context savings, routing interceptions, recall hit rate
-eminiar purge <index|sessions|graph|memories|all> --yes   # irreversible
+eminiar purge <index|sessions|graph|memories|usage|all> --yes   # irreversible
 ```
+
+## Usage insights
+
+```sh
+eminiar usage                                  # summary: cost today / 7d / 30d, cache, models, block, insights
+eminiar usage session                          # the current session
+eminiar usage daily | weekly | monthly         # one row per period, cost per model
+eminiar usage models | sessions | blocks       # breakdowns; blocks = 5-hour windows and burn rate
+eminiar usage turns --session <id>             # context timeline of one session with compactions
+eminiar usage tools                            # which tools fill the context
+eminiar usage insights | savings
+eminiar usage daily --since 30d --json         # ISO date or 30d / 12h / 2w; --json for the aggregate
+eminiar usage sessions --csv                   # daily, weekly, monthly, models, sessions, blocks
+eminiar usage ingest                           # read every transcript of the project now
+```
+
+`--session <id>` narrows any view to one session and `--limit N` caps list views. See
+[Usage insights](usage.md).
 
 ## Dashboard and status line
 

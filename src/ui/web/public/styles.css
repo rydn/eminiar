@@ -1685,3 +1685,94 @@ svg.glyph {
     padding: 12px 16px;
   }
 }
+
+/* --- usage tab ------------------------------------------------------------------------- */
+.usage-chart .line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.usage-chart .compact {
+  stroke: var(--warn);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.usage-chart circle.dot {
+  stroke: var(--card);
+  stroke-width: 1;
+}
+.usage-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tag.sev-info {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.tag.sev-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.tag.sev-high {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+.insights {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.insight {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+}
+.insight.info {
+  border-left-color: var(--accent);
+}
+.insight.warn {
+  border-left-color: var(--warn);
+}
+.insight.high {
+  border-left-color: var(--bad);
+}
+.insight .p {
+  font-size: 12px;
+  margin-top: 3px;
+}
+.score {
+  margin-bottom: 8px;
+}
+.scorebar {
+  display: block;
+  height: 6px;
+  margin: 4px 0;
+  background: var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.scorebar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.scorebar i.ok {
+  background: var(--ok);
+}
+.scorebar i.warn {
+  background: var(--warn);
+}
+.scorebar i.bad {
+  background: var(--bad);
+}
+.reasons {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.reasons li {
+  margin: 1px 0;
+}

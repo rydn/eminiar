@@ -2,7 +2,7 @@
 
 [← Docs index](README.md)
 
-eminiar adds 22 MCP tools. In Claude Code their full names are
+eminiar adds 23 MCP tools. In Claude Code their full names are
 `mcp__plugin_eminiar_eminiar__em_*`. This page uses the short names.
 
 You do not normally call these tools yourself. Claude calls them, and the hooks remind Claude to
@@ -122,10 +122,11 @@ See [Knowledge graph and history](knowledge-graph.md).
 
 | Tool | Use for |
 |---|---|
-| `em_stats` | Tokens kept out of context, by `session`, `project` or `lifetime` |
+| `em_stats` | Tokens kept out of context, by `session`, `project` or `lifetime`, ending with today's and the session's cost |
+| `em_usage` | Tokens, cache, cost and insights per model call from the local transcripts. `view`: `summary`, `daily`, `weekly`, `monthly`, `models`, `sessions`, `blocks`, `turns`, `tools`, `insights`, `savings`; `scope`: `project` or `session`; `since`: `30d` or an ISO date; `json`. See [Usage insights](usage.md) |
 | `em_doctor` | Installation health |
 | `em_reindex` | Rebuild part of the index: `code`, `git`, `metrics`, `docs`, `memories`, `embeddings` or `all`. Incremental unless `full: true` |
-| `em_purge` | Permanently delete project data: `index`, `sessions`, `graph`, `memories` (the database mirror only) or `all`. Needs `confirm: true` |
+| `em_purge` | Permanently delete project data: `index`, `sessions`, `graph`, `memories` (the database mirror only), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots) or `all`. Needs `confirm: true` |
 
 ## Slash commands
 
@@ -138,5 +139,6 @@ See [Knowledge graph and history](knowledge-graph.md).
 | `/em-search` | Search everything indexed |
 | `/em-index` | Index files, a directory or pasted content |
 | `/em-stats` | Context savings and index size |
+| `/em-usage` | Tokens, cache, cost, billing blocks, insights and savings |
 | `/em-doctor` | Diagnose the installation |
 | `/em-purge` | Delete project data |

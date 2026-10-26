@@ -22,6 +22,7 @@ import {
   graphMap,
   graphPayload,
   graphSubgraph,
+  isUsageSessionId,
   listProjects,
   type MemoryWrite,
   memoriesPayload,
@@ -33,6 +34,8 @@ import {
   setMemoryStatus,
   statsPayload,
   updateMemory,
+  usagePayload,
+  usageSessionPayload,
 } from "./api.js";
 import {
   architecturePayload,
@@ -521,6 +524,39 @@ export async function serve(opts: { port: number; open: boolean; root?: string }
         const name = str("name");
         if (!name) return json(res, 400, { error: "name required" });
         return json(res, 200, historySymbolPayload(ctx(), name));
+      }
+
+      // --- usage -------------------------------------------------------------------
+      // The usage routes validate their own query: `num()` would silently turn a bad
+      // limit into the default, and a bad scope, session id, since or limit is a 400.
+      if (p === "/api/usage") {
+        const scope = str("scope");
+        if (scope !== undefined && scope !== "session" && scope !== "project")
+          return json(res, 400, { error: `unknown scope "${scope}": use session or project` });
+        const session = str("session");
+        if (session !== undefined && !isUsageSessionId(session))
+          return json(res, 400, { error: "invalid session id" });
+        try {
+          return json(
+            res,
+            200,
+            usagePayload(ctx(), {
+              view: str("view"),
+              scope,
+              session,
+              since: str("since"),
+              limit: q.get("limit") ?? undefined,
+            }),
+          );
+        } catch (err) {
+          return json(res, 400, { error: (err as Error).message });
+        }
+      }
+      if (p === "/api/usage/session") {
+        const id = str("id");
+        if (!id) return json(res, 400, { error: "id required" });
+        if (!isUsageSessionId(id)) return json(res, 400, { error: "invalid session id" });
+        return json(res, 200, usageSessionPayload(ctx(), id, { calls: q.get("calls") === "1" }));
       }
 
       // --- sessions, doctor, actions -----------------------------------------------

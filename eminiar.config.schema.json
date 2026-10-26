@@ -425,6 +425,70 @@
           }
         }
       }
+    },
+    "usage": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "budgets": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "sessionUsd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "dailyUsd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "turnUsd": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          }
+        },
+        "pricing": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "number",
+                "minimum": 0
+              },
+              "output": {
+                "type": "number",
+                "minimum": 0
+              },
+              "cacheWrite5m": {
+                "type": "number",
+                "minimum": 0
+              },
+              "cacheWrite1h": {
+                "type": "number",
+                "minimum": 0
+              },
+              "cacheRead": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "statusline": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
     }
   },
   "title": "eminiar.config.json",

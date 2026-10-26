@@ -13,6 +13,8 @@ import { globalDb } from "../stats/global.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import type { EventInput } from "../storage/types.js";
+import { budgetWarnings } from "../usage/brief.js";
+import { ingestSession, ingestTranscript, usageEnabled } from "../usage/ingest.js";
 import type { HookHandler, HookInput } from "./types.js";
 
 /** Categories worth finding again with em_recall / em_search (source "session"). */
@@ -67,6 +69,24 @@ function open(input: HookInput): { db: StorageAdapter; root: string; sessionId: 
   return { db, root: ctx.root, sessionId };
 }
 
+/**
+ * Pull the session's new transcript entries (model calls, tool result sizes, compactions)
+ * into the usage tables. Reads only the tail past the stored offset, so it is cheap; it
+ * never throws, since a hook must not fail over bookkeeping.
+ */
+export function ingestUsage(db: StorageAdapter, input: HookInput, sessionId: string): void {
+  try {
+    const ctx = getContext(input.cwd);
+    if (!usageEnabled(ctx)) return;
+    const overrides = ctx.config.usage.pricing;
+    ingestSession(db, ctx.root, sessionId, input.transcript_path, { overrides });
+    if (input.agent_transcript_path)
+      ingestTranscript(db, input.agent_transcript_path, { sessionId, overrides });
+  } catch {
+    // usage capture is best effort
+  }
+}
+
 export const userPromptSubmit: HookHandler = async (input) => {
   if (!input.prompt?.trim()) return undefined;
   const { db, sessionId } = open(input);
@@ -74,27 +94,40 @@ export const userPromptSubmit: HookHandler = async (input) => {
   persist(db, sessionId, withPriority(sessionId, classifyPrompt(input.prompt)));
   // Hand Claude the memories and doc pages this prompt touches, so it does not have
   // to remember to ask em_recall / em_docs first.
-  const { recall } = getContext(input.cwd).config;
-  if (!recall.onPrompt) return undefined;
-  try {
-    const r = await recallForText(db, input.prompt, {
-      maxMemories: recall.maxMemories,
-      maxDocs: recall.maxDocs,
-      sessionId,
-      repeatAfter: recall.repeatAfter,
-      trace: true,
-      path: "prompt",
-    });
-    // Quiet decisions are recorded too: the hit rate is only measurable with both sides.
-    recordShown(db, sessionId, r.keys, { path: "prompt", trace: r.trace });
-    if (!r.text) return undefined;
-    return {
-      hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: r.text },
-    };
-  } catch {
-    // recall is best effort; never block a prompt on it
-    return undefined;
+  const ctx = getContext(input.cwd);
+  const { recall } = ctx.config;
+  const parts: string[] = [];
+  if (recall.onPrompt) {
+    try {
+      const r = await recallForText(db, input.prompt, {
+        maxMemories: recall.maxMemories,
+        maxDocs: recall.maxDocs,
+        sessionId,
+        repeatAfter: recall.repeatAfter,
+        trace: true,
+        path: "prompt",
+      });
+      // Quiet decisions are recorded too: the hit rate is only measurable with both sides.
+      recordShown(db, sessionId, r.keys, { path: "prompt", trace: r.trace });
+      if (r.text) parts.push(r.text);
+    } catch {
+      // recall is best effort; never block a prompt on it
+    }
   }
+  // A crossed budget is said once per threshold; the Stop hook already ingested the
+  // transcript, so this only reads totals.
+  try {
+    if (usageEnabled(ctx)) parts.push(...budgetWarnings(db, ctx, sessionId));
+  } catch {
+    // budgets are advisory
+  }
+  if (!parts.length) return undefined;
+  return {
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: parts.join("\n\n"),
+    },
+  };
 };
 
 /** 3+ calls with identical input in the last 30 → iteration loop (recorded once per key). */
@@ -176,18 +209,20 @@ export const postToolUseFailure: HookHandler = async (input) => {
 export const subagentStop: HookHandler = (input) => {
   const { db, sessionId } = open(input);
   const msg = input.last_assistant_message ?? "";
-  if (!msg.trim()) return undefined;
-  // Through persist() so the findings are indexed (source "session") for em_recall.
-  persist(
-    db,
-    sessionId,
-    withPriority(sessionId, [
-      ev("agent_findings", {
-        agent: input.agent_type ?? input.agent_id,
-        text: clip(msg.replace(/\s+/g, " "), 1000),
-      }),
-    ]),
-  );
+  if (msg.trim()) {
+    // Through persist() so the findings are indexed (source "session") for em_recall.
+    persist(
+      db,
+      sessionId,
+      withPriority(sessionId, [
+        ev("agent_findings", {
+          agent: input.agent_type ?? input.agent_id,
+          text: clip(msg.replace(/\s+/g, " "), 1000),
+        }),
+      ]),
+    );
+  }
+  ingestUsage(db, input, sessionId);
   return undefined;
 };
 
@@ -195,6 +230,7 @@ export const stop: HookHandler = (input) => {
   const { db, sessionId } = open(input);
   const msg = input.last_assistant_message ?? "";
   persist(db, sessionId, withPriority(sessionId, classifyAssistant(msg)));
+  ingestUsage(db, input, sessionId);
   return undefined;
 };
 
@@ -204,6 +240,7 @@ export const sessionEnd: HookHandler = (input) => {
   db.eventInsert({
     ...withPriority(sessionId, [ev("session_start", { ended: input.reason ?? "unknown" })])[0]!,
   });
+  ingestUsage(db, input, sessionId);
   // keep the global DB warm so lifetime stats include this session's last calls
   globalDb();
   return undefined;

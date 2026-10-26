@@ -7,6 +7,8 @@ import { renderProjectBrief } from "../session/brief.js";
 import { setCurrentSession } from "../session/current.js";
 import { renderGuide } from "../session/guide.js";
 import { getStorage } from "../storage/index.js";
+import { usageBrief } from "../usage/brief.js";
+import { ingestUsage } from "./capture.js";
 import { effectiveRoutingMode } from "./coexist.js";
 import { hookLog } from "./log.js";
 import type { HookHandler } from "./types.js";
@@ -34,7 +36,7 @@ export function routingGuidance(mode: string): string {
     '- em_docs: the documentation knowledge base (local docs plus the libraries, services and APIs the project uses); {action:"discover"} / {action:"add", pick:"recommended"} build it, {action:"sync"} refreshes it.',
     '- em_search {queries, sort:"timeline"}: everything indexed plus session memory.',
     "- em_remember {content, kind, name?, status?}: memories are markdown under .eminiar/memories (survive compaction, shareable via git); em_memory {action: list|read|edit|rename|delete|status} manages them.",
-    '- em_architecture {aspects?}: the project map (folders, entry points, routes, hotspots, decisions) in one call; em_symbols {name_path | mode:"overview", file} for a symbol or a file outline; em_graph_impact {node} before a refactor; em_graph_changes for what the current diff reaches; em_graph_query {pattern | preset} to walk the graph; em_index_status for coverage. em_stats shows savings.',
+    '- em_architecture {aspects?}: the project map (folders, entry points, routes, hotspots, decisions) in one call; em_symbols {name_path | mode:"overview", file} for a symbol or a file outline; em_graph_impact {node} before a refactor; em_graph_changes for what the current diff reaches; em_graph_query {pattern | preset} to walk the graph; em_index_status for coverage. em_stats shows savings; em_usage {view} shows model calls, cost, cache and insights.',
     "- em_history {action: overview | file {path} | risk | commit {sha} | branch {name} | symbol {name_path} | search {query}}: the git history classified (feat/fix/refactor…), branches vs base, and each fix traced back to the commit that caused it — ask it before editing a file or committing instead of running git log/blame/show (those are routed to it); commit messages are searchable via em_search (source git).",
     '- A Grep for an identifier the graph knows is routed to em_symbols {name_path, mode:"references"} / em_search {queries, source:"code"}: symbol-level answers instead of raw matches.',
     "Plain Bash/Read/Grep remain right for short fixed output and files you are about to edit.",
@@ -70,6 +72,9 @@ export const sessionStart: HookHandler = (input) => {
     }
   }
 
+  // A resumed or compacted session already has a transcript: catch the usage tables up.
+  if (input.source === "compact" || input.source === "resume") ingestUsage(db, input, sessionId);
+
   const parts: string[] = [];
   if (input.source === "compact" || input.source === "resume") {
     const snap = db.snapshotLatestUnconsumed(sessionId);
@@ -93,6 +98,16 @@ export const sessionStart: HookHandler = (input) => {
     if (brief) parts.push(brief);
   } catch {
     // the brief is optional
+  }
+  // Where the money went: today's spend, this session's (after a resume/compact) and the
+  // top insight. Reads the tables the Stop hooks fill; empty when nothing is recorded yet.
+  try {
+    if (ctx.config.usage.enabled) {
+      const { line } = usageBrief(db, ctx, { sessionId });
+      if (line) parts.push(`eminiar usage — ${line}`);
+    }
+  } catch {
+    // usage is optional
   }
   try {
     const onboarding = join(memoriesDir(ctx), "onboarding");

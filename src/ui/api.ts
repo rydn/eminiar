@@ -45,7 +45,22 @@ import type { GraphEdgeRow, GraphNodeRow, MemoryStatus, StatRow } from "../stora
 import { emIndex } from "../tools/em_index.js";
 import { emPurge } from "../tools/em_purge.js";
 import { sourceFilter } from "../tools/em_search.js";
+import {
+  LIMIT_DEFAULT,
+  loadUsage,
+  parseLimit,
+  parseSince,
+  recentlyIngested,
+  sortInsights,
+  USAGE_VIEWS,
+  type UsageScope,
+  type UsageView,
+  usageView,
+} from "../tools/em_usage.js";
 import type { ToolResult } from "../tools/types.js";
+import { contextTimeline, topToolConsumers, totals } from "../usage/aggregate.js";
+import { usageEnabled } from "../usage/ingest.js";
+import { detectInsights, loadInsightInput } from "../usage/insights.js";
 
 /** Every project that has a database under ~/.eminiar/projects, with its root when known. */
 export function listProjects(): Array<{ id: string; root: string | null }> {
@@ -633,6 +648,102 @@ export function eventsPayload(
     document: e.document_id,
     payload: JSON.parse(e.payload) as unknown,
   }));
+}
+
+// --- usage ---------------------------------------------------------------
+
+export const usageViews: readonly string[] = USAGE_VIEWS;
+
+/** Session ids as Claude Code writes them (UUIDs) or as tests seed them; no path tricks. */
+const SESSION_ID = /^[A-Za-z0-9_.-]{1,128}$/;
+export const isUsageSessionId = (s: string): boolean => SESSION_ID.test(s) && !s.includes("..");
+
+/**
+ * One em_usage view as JSON (`/api/usage`). `since` is an ISO date or a relative value
+ * (`30d`); an unknown view, scope, session id, `since` or `limit` throws so the route can
+ * answer 400. The transcript ingest runs at most once per request, and not at all when the
+ * same project was ingested within the last few seconds (the dashboard fires several
+ * requests per range change).
+ */
+export function usagePayload(
+  ctx: ProjectContext,
+  opts: {
+    view?: string | undefined;
+    scope?: string | undefined;
+    session?: string | undefined;
+    since?: string | undefined;
+    limit?: number | string | undefined;
+  },
+) {
+  const view = (opts.view ?? "summary") as UsageView;
+  if (!USAGE_VIEWS.includes(view)) throw new Error(`unknown view "${opts.view}"`);
+  if (opts.scope !== undefined && opts.scope !== "session" && opts.scope !== "project")
+    throw new Error(`unknown scope "${opts.scope}": use session or project`);
+  if (opts.session !== undefined && !isUsageSessionId(opts.session))
+    throw new Error("invalid session id");
+  const limit = parseLimit(opts.limit);
+  if (typeof limit === "string") throw new Error(limit);
+  const scope: UsageScope = opts.scope === "session" || opts.session ? "session" : "project";
+  const since = parseSince(opts.since);
+  const data = loadUsage(ctx, { scope, sessionId: opts.session, since });
+  return {
+    view,
+    scope,
+    enabled: usageEnabled(ctx),
+    sessionId: data.sessionId,
+    since: since ?? null,
+    ...usageView(ctx, view, data, limit ?? LIMIT_DEFAULT),
+  };
+}
+
+/**
+ * `/api/usage/session?id=`: the context timeline, tool consumers and insights of one
+ * session. The per-call rows are large and the dashboard never reads them, so they are only
+ * included with `calls: true` (`?calls=1`). The ingest is skipped when the project (or this
+ * session) was ingested within the guard window, which is the case right after `/api/usage`.
+ */
+export function usageSessionPayload(
+  ctx: ProjectContext,
+  id: string,
+  opts: { calls?: boolean | undefined; ingest?: boolean | undefined } = {},
+) {
+  if (!isUsageSessionId(id)) throw new Error("invalid session id");
+  const ingest = opts.ingest ?? !recentlyIngested(ctx.root, id);
+  const data = loadUsage(ctx, { scope: "session", sessionId: id, ingest });
+  const db = getStorage(ctx);
+  const timeline = contextTimeline(data.calls, data.contextEvents);
+  const r = detectInsights(loadInsightInput(db, ctx, { sessionId: id, now: data.now }));
+  return {
+    session: id,
+    totals: totals(data.calls),
+    timeline,
+    ...(opts.calls
+      ? {
+          calls: data.calls.map((c) => ({
+            ts: c.ts,
+            requestId: c.request_id,
+            model: c.model,
+            agentId: c.agent_id,
+            sidechain: !!c.sidechain,
+            input: c.input_tokens,
+            output: c.output_tokens,
+            cacheRead: c.cache_read,
+            cacheWrite: c.cache_create_5m + c.cache_create_1h,
+            thinking: c.thinking_tokens,
+            costUsd: c.cost_usd,
+            priced: !!c.priced,
+            speed: c.speed,
+            effort: c.effort,
+            stopReason: c.stop_reason,
+          })),
+        }
+      : {}),
+    contextEvents: data.contextEvents,
+    toolUses: topToolConsumers(data.toolUses, 20),
+    insights: sortInsights(r.insights),
+    scores: r.scores,
+    snapshot: data.snapshot ?? null,
+  };
 }
 
 // --- doctor & actions ----------------------------------------------------
