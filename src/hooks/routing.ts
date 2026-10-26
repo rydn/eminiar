@@ -4,6 +4,7 @@ import type { ProjectContext } from "../context.js";
 import { getContext } from "../context.js";
 import { type DocSource, readManifestAt } from "../docs/manifest.js";
 import { git } from "../history/log.js";
+import { checkReadPath, loadPermissionRules } from "../permissions/settings.js";
 import { renderProjectBrief } from "../session/brief.js";
 import {
   commitContext,
@@ -145,9 +146,13 @@ export function suggest(
       const fp = String(input.file_path ?? "");
       if (!fp) return undefined;
       try {
-        const st = statSync(resolve(root, fp));
+        const abs = resolve(root, fp);
+        const st = statSync(abs);
         const ext = extname(fp).toLowerCase();
         if (st.size > 200 * 1024 || (BIG_TEXT_EXT.has(ext) && st.size > 20 * 1024)) {
+          // em_execute_file refuses what a Read deny or ask rule matches; leave the native Read
+          // to Claude Code's own permission check instead of redirecting to a dead end.
+          if (!checkReadPath(loadPermissionRules(root), abs).allowed) return undefined;
           return {
             tool: "em_execute_file",
             reason: `${fp} is ${Math.round(st.size / 1024)} KB; em_execute_file {path, code} processes it in the sandbox so only what you print enters context`,

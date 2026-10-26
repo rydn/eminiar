@@ -1,10 +1,19 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ConfigSchema } from "../../src/config.js";
 import type { ProjectContext } from "../../src/context.js";
+import { type PermissionRules, parseRule } from "../../src/permissions/rules.js";
 import { execute } from "../../src/sandbox/execute.js";
+import { confinePath } from "../../src/sandbox/file.js";
 import { processOutput } from "../../src/sandbox/output.js";
 import { runProcess } from "../../src/sandbox/run.js";
 import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
@@ -104,4 +113,82 @@ describe("processOutput", () => {
     const noIntent = await processOutput(db, ctx, { stdout: big, title: "logs2", source: "exec" });
     expect(noIntent.text).toContain("chars omitted");
   });
+});
+
+describe("confinePath", () => {
+  const rules = (r: { allow?: string[]; deny?: string[]; ask?: string[] }): PermissionRules => ({
+    allow: (r.allow ?? []).map((s) => parseRule(s)!),
+    deny: (r.deny ?? []).map((s) => parseRule(s)!),
+    ask: (r.ask ?? []).map((s) => parseRule(s)!),
+  });
+  let root: string;
+  let outside: string;
+  beforeAll(() => {
+    // The project root is always a real path, and the macOS tmpdir is a symlink.
+    root = realpathSync(mkdtempSync(join(tmpdir(), "em-confine-")));
+    outside = realpathSync(mkdtempSync(join(tmpdir(), "em-outside-")));
+    writeFileSync(join(root, "app.ts"), "export {};");
+    writeFileSync(join(root, ".env"), "SECRET=1");
+    writeFileSync(join(root, "config.txt"), "c");
+    mkdirSync(join(root, "secrets"));
+    writeFileSync(join(root, "secrets", "key.pem"), "k");
+    symlinkSync(join(root, ".env"), join(root, "notes.txt"));
+    mkdirSync(join(root, "linked"));
+    symlinkSync(join(root, "config.txt"), join(root, "linked", ".env"));
+    writeFileSync(join(outside, "data.log"), "d");
+    writeFileSync(join(outside, "key.pem"), "k");
+  });
+
+  it("keeps files inside the root and opts outside files in with a Read allow rule", () => {
+    expect(confinePath(root, "app.ts", rules({}))).toBe(join(root, "app.ts"));
+    expect(() => confinePath(root, join(outside, "data.log"), rules({}))).toThrow(
+      /outside the project root/,
+    );
+    const allowed = rules({ allow: [`Read(${outside}/**)`] });
+    expect(confinePath(root, join(outside, "data.log"), allowed)).toBe(join(outside, "data.log"));
+  });
+
+  it("refuses files inside the root that a Read deny rule matches", () => {
+    expect(() => confinePath(root, ".env", rules({ deny: ["Read(**/.env)"] }))).toThrow(
+      /refused by permission rule Read\(\*\*\/\.env\) \(deny\)/,
+    );
+  });
+
+  it("refuses a denied name before checking whether it exists", () => {
+    expect(() => confinePath(root, "missing/.env", rules({ deny: ["Read(**/.env)"] }))).toThrow(
+      /\(deny\)/,
+    );
+  });
+
+  it("treats a Read ask rule as deny", () => {
+    const r = rules({ ask: ["Read(**/secrets/**)"] });
+    expect(() => confinePath(root, "secrets/key.pem", r)).toThrow(
+      /refused by permission rule Read\(\*\*\/secrets\/\*\*\) \(ask\)/,
+    );
+  });
+
+  it("lets a Read deny rule win over a Read allow rule", () => {
+    const r = rules({ allow: [`Read(${outside}/**)`], deny: [`Read(${outside}/key.pem)`] });
+    expect(() => confinePath(root, join(outside, "key.pem"), r)).toThrow(
+      /refused by permission rule .* \(deny\)/,
+    );
+    expect(confinePath(root, join(outside, "data.log"), r)).toBe(join(outside, "data.log"));
+  });
+
+  it("matches deny rules on the requested path and on the symlink target", () => {
+    const r = rules({ deny: ["Read(**/.env)"] });
+    expect(() => confinePath(root, "notes.txt", r)).toThrow(/\(deny\)/);
+    expect(() => confinePath(root, "linked/.env", r)).toThrow(/\(deny\)/);
+  });
+
+  const probe = mkdtempSync(join(tmpdir(), "em-case-"));
+  writeFileSync(join(probe, "a"), "");
+  it.runIf(existsSync(join(probe, "A")))(
+    "matches deny rules on the on-disk name when the file system ignores case",
+    () => {
+      expect(() => confinePath(root, ".ENV", rules({ deny: ["Read(**/.env)"] }))).toThrow(
+        /\(deny\)/,
+      );
+    },
+  );
 });

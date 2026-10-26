@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -78,6 +78,16 @@ describe("classify", () => {
 });
 
 describe("routing suggestions", () => {
+  // Read routing reads ~/.claude/settings.json; keep the developer's own rules out of it.
+  const home = process.env.HOME;
+  beforeAll(() => {
+    process.env.HOME = mkdtempSync(join(tmpdir(), "em-userhome-"));
+  });
+  afterAll(() => {
+    if (home === undefined) delete process.env.HOME;
+    else process.env.HOME = home;
+  });
+
   it("flags heavy bash, big reads, content grep, webfetch and agents; leaves tiny calls alone", () => {
     expect(suggest("Bash", { command: "git log --oneline -50" }, root)?.tool).toBe("em_execute");
     expect(suggest("Bash", { command: "ls -la | grep foo" }, root)?.tool).toBe("em_execute");
@@ -91,6 +101,24 @@ describe("routing suggestions", () => {
     expect(suggest("Grep", { pattern: "x" }, root)).toBeUndefined();
     expect(suggest("WebFetch", { url: "https://x" }, root)?.tool).toBe("em_fetch_and_index");
     expect(suggest("Agent", { prompt: "p" }, root)?.prefixPrompt).toBeDefined();
+  });
+
+  it("leaves a big Read to Claude Code when a Read deny or ask rule covers the file", () => {
+    const guarded = mkdtempSync(join(tmpdir(), "em-root-guarded-"));
+    mkdirSync(join(guarded, ".claude"));
+    writeFileSync(
+      join(guarded, ".claude", "settings.local.json"),
+      JSON.stringify({
+        permissions: { deny: ["Read(**/secret.log)"], ask: ["Read(**/audit.log)"] },
+      }),
+    );
+    for (const f of ["secret.log", "audit.log", "big.log"])
+      writeFileSync(join(guarded, f), "x".repeat(30 * 1024));
+    symlinkSync(join(guarded, "secret.log"), join(guarded, "shortcut.log"));
+    expect(suggest("Read", { file_path: "secret.log" }, guarded)).toBeUndefined();
+    expect(suggest("Read", { file_path: "audit.log" }, guarded)).toBeUndefined();
+    expect(suggest("Read", { file_path: "shortcut.log" }, guarded)).toBeUndefined();
+    expect(suggest("Read", { file_path: "big.log" }, guarded)?.tool).toBe("em_execute_file");
   });
 });
 

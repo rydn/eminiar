@@ -81,7 +81,10 @@ Set the mode with `routing.mode` in `eminiar.config.json`:
 
 **Safety rule:** `enforce` denies a call only while an eminiar MCP server runs for the project.
 The server writes a pid marker under `~/.eminiar/projects/<id>/servers/`. With no server, the
-hook annotates instead. Claude is never told to retry with a tool that it cannot reach.
+hook annotates instead. Claude is never told to retry with a tool that it cannot reach. For
+the same reason, a big `Read` that a `Read` deny or `ask` rule matches is not redirected:
+`em_execute_file` would refuse it, so the native `Read` goes ahead under Claude Code's own
+permission check.
 
 **Project knowledge is not routing.** Memories, fix history, fan-in and doc notes are attached
 in every mode, including `off`.
@@ -97,6 +100,16 @@ root.
   sections that match its `intent`, plus a list of searchable terms.
 - **Permissions:** shell snippets are checked against Claude Code's `permissions.deny` and `ask`
   Bash rules, one chained segment at a time. An `ask` rule counts as deny.
+- **Files:** the `path` given to `em_execute_file` must be inside the project root, or outside it
+  with a `Read(<path>)` allow rule. A matching `Read` deny or `ask` rule refuses the path, inside
+  the root or out, even when an allow rule matches. The path as written, its symlink target and
+  (on macOS) its on-disk letter case are all checked. This guards the `path` only: the code you
+  pass is checked against Bash rules like any snippet, and can still open other files.
+- **Read rule forms:** a `Read` pattern is matched as a `*` / `**` glob against the absolute
+  path, after a leading `~` becomes your home folder, so `Read(**/.env)` and `Read(~/.ssh/**)`
+  match. These do not match yet: Claude Code's relative forms (`./.env`, `.env`, `/path` from the
+  settings file, `//path`), `?` and `[...]`, and a `/**/` that should match no folder
+  (`~/.aws/**/credentials` does not cover `~/.aws/credentials`).
 - **Environment:** the process gets a stripped environment. Credentials for `gh`, `aws`,
   `gcloud`, `kubectl` and `docker` pass through. Add more names with `sandbox.envAllow`.
 - **Speed:** these are the hot paths. They are designed to add about 1 ms over a raw process

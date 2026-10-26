@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { matchBash, matchRead, parseRule } from "../../src/permissions/rules.js";
-import { checkCommand } from "../../src/permissions/settings.js";
+import { checkCommand, checkRead } from "../../src/permissions/settings.js";
 import { normalize, splitCommand } from "../../src/permissions/split.js";
 import { buildEnv } from "../../src/sandbox/env.js";
 
@@ -38,6 +38,20 @@ describe("rules", () => {
     expect(matchRead(parseRule("Read(/var/log/**)")!, "/var/log/sys/x.log")).toBe(true);
     expect(matchRead(parseRule("Read(/var/log/*.log)")!, "/var/log/sys/x.log")).toBe(false);
   });
+  it("expands ~ with the current $HOME, even after a compiled rule is cached", () => {
+    const home = process.env.HOME;
+    const ssh = parseRule("Read(~/.ssh/**)")!;
+    try {
+      process.env.HOME = "/home/a";
+      expect(matchRead(ssh, "/home/a/.ssh/id_ed25519")).toBe(true);
+      process.env.HOME = "/home/b";
+      expect(matchRead(ssh, "/home/b/.ssh/id_ed25519")).toBe(true);
+      expect(matchRead(ssh, "/home/a/.ssh/id_ed25519")).toBe(false);
+    } finally {
+      if (home === undefined) delete process.env.HOME;
+      else process.env.HOME = home;
+    }
+  });
   it("deny wins on any segment, ask counts as deny", () => {
     const rules = { allow: [], deny: [sudo], ask: [parseRule("Bash(rm -rf:*)")!] };
     expect(checkCommand(rules, "ls && sudo reboot")).toMatchObject({
@@ -46,6 +60,24 @@ describe("rules", () => {
     });
     expect(checkCommand(rules, "rm -rf dist")).toMatchObject({ allowed: false, kind: "ask" });
     expect(checkCommand(rules, "git status").allowed).toBe(true);
+  });
+  it("checks Read paths: deny before ask, ask counts as deny, allow does not override", () => {
+    const rules = {
+      allow: [parseRule("Read(**)")!],
+      deny: [parseRule("Read(**/.env)")!],
+      ask: [parseRule("Read(**/secrets/**)")!, parseRule("Read(**/.env)")!],
+    };
+    expect(checkRead(rules, ["/p/.env"])).toEqual({
+      allowed: false,
+      rule: "Read(**/.env)",
+      kind: "deny",
+    });
+    expect(checkRead(rules, ["/p/app.ts", "/p/secrets/key.pem"])).toEqual({
+      allowed: false,
+      rule: "Read(**/secrets/**)",
+      kind: "ask",
+    });
+    expect(checkRead(rules, ["/p/app.ts"])).toEqual({ allowed: true });
   });
 });
 

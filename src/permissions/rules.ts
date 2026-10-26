@@ -58,17 +58,30 @@ export function matchBash(rule: Rule, command: string): boolean {
   return bashRegex(rule.pattern).test(command);
 }
 
+// em_execute_file and routing check every Read deny/ask rule against several paths per call,
+// so Read globs are compiled once, like the Bash ones. Keyed by the expanded pattern, so a
+// changed $HOME compiles afresh.
+const readRegexCache = new Map<string, RegExp>();
+function readRegex(pattern: string): RegExp {
+  let re = readRegexCache.get(pattern);
+  if (!re) {
+    if (readRegexCache.size >= 1024) readRegexCache.clear();
+    re = new RegExp(
+      `^${pattern
+        .split("**")
+        .map((seg) => seg.split("*").map(escapeRe).join("[^/]*"))
+        .join(".*")}$`,
+    );
+    readRegexCache.set(pattern, re);
+  }
+  return re;
+}
+
 /** Read(path) rules: glob with `**` and `*`; `~` expands to $HOME. */
 export function matchRead(rule: Rule, absPath: string): boolean {
   if (rule.tool !== "Read") return false;
   if (rule.pattern === undefined) return true;
   let p = rule.pattern;
   if (p.startsWith("~")) p = (process.env.HOME ?? "") + p.slice(1);
-  const re = new RegExp(
-    `^${p
-      .split("**")
-      .map((seg) => seg.split("*").map(escapeRe).join("[^/]*"))
-      .join(".*")}$`,
-  );
-  return re.test(absPath);
+  return readRegex(p).test(absPath);
 }

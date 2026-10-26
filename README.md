@@ -58,7 +58,8 @@ Everything runs locally in one SQLite database per project.
 `em_execute`, `em_batch_execute` and `em_execute_file` run shell, JavaScript and TypeScript, plus
 Python, Ruby, Go, PHP, Perl, R, Elixir, Rust and C# when they are installed. Output over 5 KB is
 indexed. Claude gets back only the sections that match its `intent`. Snippets obey your Claude
-Code `permissions.deny` rules.
+Code `Bash` deny rules, and `em_execute_file` refuses a `path` that one of your `Read` deny rules
+matches ([which rule forms](docs/how-it-works.md#sandbox)).
 
 ### 🔎 Hybrid search — keyword and meaning together
 

@@ -1,7 +1,7 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { matchBash, type PermissionRules, parseRule, type Rule } from "./rules.js";
+import { matchBash, matchRead, type PermissionRules, parseRule, type Rule } from "./rules.js";
 import { splitCommand } from "./split.js";
 
 interface SettingsFile {
@@ -85,4 +85,29 @@ export function checkCommand(rules: PermissionRules, command: string): CommandCh
     }
   }
   return { allowed: true };
+}
+
+export type ReadCheck = Omit<CommandCheck, "segment">;
+
+/**
+ * Claude Code's `Read` rules for absolute paths. Deny wins, over allow rules too; `ask`
+ * is treated as deny because the sandbox has no way to prompt.
+ */
+export function checkRead(rules: PermissionRules, absPaths: string[]): ReadCheck {
+  for (const kind of ["deny", "ask"] as const) {
+    for (const r of rules[kind]) {
+      if (absPaths.some((p) => matchRead(r, p))) return { allowed: false, rule: r.raw, kind };
+    }
+  }
+  return { allowed: true };
+}
+
+/**
+ * `checkRead` for an existing file: the path as given, its symlink target and its on-disk
+ * letter case. `realpathSync` keeps the requested case, so on macOS `.ENV` would miss
+ * `Read(**\/.env)` without `realpathSync.native`. Shared by em_execute_file and routing, so
+ * routing never redirects a Read that em_execute_file refuses. Throws when it does not exist.
+ */
+export function checkReadPath(rules: PermissionRules, abs: string): ReadCheck {
+  return checkRead(rules, [...new Set([abs, realpathSync(abs), realpathSync.native(abs)])]);
 }
