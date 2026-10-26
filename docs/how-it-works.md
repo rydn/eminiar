@@ -116,7 +116,9 @@ in every mode, including `off`. Every such decision is recorded, fired or quiet;
 root.
 
 - **Languages:** shell and JavaScript/TypeScript always. Python, Ruby, Go, PHP, Perl, R,
-  Elixir, Rust and C# when their tools are installed.
+  Elixir, Rust and C# when their tools are installed. JavaScript and TypeScript snippets run
+  as ES modules; a snippet that calls `require(...)` gets one that resolves packages and
+  relative paths from the project root, as a script of the project would.
 - **Output:** output over `sandbox.indexThreshold` (5 KB) is indexed. Claude gets back only the
   sections that match its `intent`, plus a list of searchable terms.
 - **Permissions:** shell snippets are checked against Claude Code's `permissions.deny` and `ask`

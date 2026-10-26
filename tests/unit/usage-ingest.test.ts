@@ -10,12 +10,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getContext, type ProjectContext, resetContextCache } from "../../src/context.js";
 import { handlers } from "../../src/hooks/index.js";
 import type { HookInput } from "../../src/hooks/types.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
+import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
+import { hasColumn, migrations } from "../../src/storage/sqlite/schema.js";
 import {
   ingestProject,
   ingestSession,
@@ -574,6 +577,75 @@ describe("usage storage adapter", () => {
       "statusline_snapshots_session_ts",
     ])
       expect(names).toContain(idx);
+  });
+});
+
+describe("schema migration v6: transcript_files.head_hash", () => {
+  const LATEST = migrations[migrations.length - 1]?.version;
+  const headHashColumns = (a: SqliteAdapter) =>
+    (a.db.pragma("table_info(transcript_files)") as { name: string }[]).filter(
+      (c) => c.name === "head_hash",
+    ).length;
+  const versionOf = (a: SqliteAdapter) =>
+    Number(
+      (
+        a.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as {
+          value: string;
+        }
+      ).value,
+    );
+  /**
+   * A database at meta.schema_version 5, built from the migrations as v5 first shipped
+   * (no head_hash) or as v5 was later edited in place (column present). Both shapes exist
+   * on real machines at version 5.
+   */
+  function v5Database(withColumn: boolean): string {
+    const path = join(mkdtempSync(join(tmpdir(), "em-v5-")), "eminiar.db");
+    const raw = new Database(path);
+    for (const m of migrations) {
+      if (m.version > 5) break;
+      if (m.sql) raw.exec(m.sql);
+    }
+    expect(hasColumn(raw, "transcript_files", "head_hash")).toBe(false);
+    if (withColumn) raw.exec("ALTER TABLE transcript_files ADD COLUMN head_hash TEXT");
+    raw.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '5')").run();
+    raw.close();
+    return path;
+  }
+
+  it.each([
+    ["without the column", false],
+    ["with the column", true],
+  ])("a v5 database %s migrates to the latest version with one head_hash column", (_, has) => {
+    const a = new SqliteAdapter(v5Database(has), { vectors: false });
+    try {
+      expect(versionOf(a)).toBe(LATEST);
+      expect(headHashColumns(a)).toBe(1);
+      // The INSERT that failed with "table transcript_files has no column named head_hash".
+      const r = ingestTranscript(a, FIXTURE, { sessionId: "sess-v6" });
+      expect(r.calls).toBeGreaterThan(0);
+      expect(a.transcriptFileGet(FIXTURE)?.head_hash).toBeTruthy();
+    } finally {
+      a.close();
+    }
+  });
+
+  it("a fresh database lands on the same version with one head_hash column", () => {
+    const a = db as SqliteAdapter;
+    expect(versionOf(a)).toBe(LATEST);
+    expect(headHashColumns(a)).toBe(1);
+  });
+
+  it("reopening a migrated database is a no-op", () => {
+    const path = v5Database(false);
+    new SqliteAdapter(path, { vectors: false }).close();
+    const again = new SqliteAdapter(path, { vectors: false });
+    try {
+      expect(versionOf(again)).toBe(LATEST);
+      expect(headHashColumns(again)).toBe(1);
+    } finally {
+      again.close();
+    }
   });
 });
 

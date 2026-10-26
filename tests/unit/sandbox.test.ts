@@ -8,15 +8,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ConfigSchema } from "../../src/config.js";
 import type { ProjectContext } from "../../src/context.js";
 import { type PermissionRules, parseRule } from "../../src/permissions/rules.js";
 import { execute } from "../../src/sandbox/execute.js";
 import { confinePath } from "../../src/sandbox/file.js";
+import { prepareCode, resolveLanguage } from "../../src/sandbox/languages.js";
 import { processOutput } from "../../src/sandbox/output.js";
 import { runProcess } from "../../src/sandbox/run.js";
+import { closeAllStorage } from "../../src/storage/index.js";
 import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
+import { chooseInline, emBatchExecute } from "../../src/tools/em_batch_execute.js";
 
 let ctx: ProjectContext;
 let db: SqliteAdapter;
@@ -30,6 +34,7 @@ beforeAll(() => {
 });
 afterAll(() => {
   db.close();
+  closeAllStorage();
   delete process.env.EMINIAR_HOME;
 });
 
@@ -87,6 +92,114 @@ describe("execute", () => {
     await expect(execute(ctx, { language: "cobol", code: "x" })).rejects.toThrow(
       /unknown language/,
     );
+  });
+
+  it("gives javascript and typescript a `require` next to `import`", async () => {
+    const js = await execute(ctx, {
+      language: "javascript",
+      code: "const fs = require('fs'); console.log(typeof fs.readFileSync)",
+    });
+    expect(js.stderr).toBe("");
+    expect(js.stdout.trim()).toBe("function");
+    const esm = await execute(ctx, {
+      language: "javascript",
+      code: 'import fs from "node:fs";\nconsole.log(typeof fs.statSync)',
+    });
+    expect(esm.stdout.trim()).toBe("function");
+    const ts = await execute(ctx, {
+      language: "typescript",
+      code: "const p: typeof import('node:path') = require('path'); console.log(typeof p.join)",
+    });
+    expect(ts.stdout.trim()).toBe("function");
+  }, 30_000);
+
+  it("resolves `require` from the project root, not the scratch directory", async () => {
+    // A package only the project has (zod, linked from this repo's node_modules) and a
+    // relative path: both must resolve against the project root, where the snippet runs.
+    mkdirSync(join(ctx.root, "node_modules"), { recursive: true });
+    symlinkSync(
+      fileURLToPath(new URL("../../node_modules/zod", import.meta.url)),
+      join(ctx.root, "node_modules", "zod"),
+    );
+    const r = await execute(ctx, {
+      language: "javascript",
+      code: "const { z } = require('zod'); const pkg = require('./package.json'); console.log(typeof z.object, JSON.stringify(pkg))",
+    });
+    expect(r.stderr).toBe("");
+    expect(r.stdout.trim()).toBe("function {}");
+    // A hashbang stays on the first line, the preamble goes second.
+    const bang = await execute(ctx, {
+      language: "javascript",
+      code: "#!/usr/bin/env node\nconsole.log(typeof require('os').platform)",
+    });
+    expect(bang.stderr).toBe("");
+    expect(bang.stdout.trim()).toBe("function");
+  }, 30_000);
+
+  it("does not declare `require` twice when the snippet brings its own", async () => {
+    const own =
+      'import { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);\nconsole.log(typeof require("os").platform)';
+    const js = resolveLanguage("javascript")!;
+    expect(prepareCode(js, own)).toBe(own);
+    expect(prepareCode(js, "const require = (m) => m; console.log(require('x'))")).toContain(
+      "const require = (m)",
+    );
+    expect(prepareCode(js, "function require(m) { return m }\nrequire('x')")).not.toContain(
+      "createRequire",
+    );
+    expect(prepareCode(js, "console.log(1)")).toBe("console.log(1)");
+    // The preamble is one line, so a snippet's line N is the file's line N+1.
+    expect(prepareCode(js, "require('fs')").split("\n")).toHaveLength(2);
+    expect(prepareCode(js, "#!/usr/bin/env node\nrequire('fs')").split("\n")).toEqual([
+      "#!/usr/bin/env node",
+      expect.stringContaining("createRequire"),
+      "require('fs')",
+    ]);
+    const r = await execute(ctx, { language: "javascript", code: own });
+    expect(r.stderr).toBe("");
+    expect(r.stdout.trim()).toBe("function");
+  }, 30_000);
+});
+
+describe("em_batch_execute inline rule", () => {
+  const textOf = (r: { content: Array<{ type: string; text?: string }> }) =>
+    r.content.map((c) => c.text ?? "").join("\n");
+  const twoKb = "console.log('x'.repeat(2000))";
+
+  it("inlines outputs up to the index threshold when there are no queries", async () => {
+    const r = await emBatchExecute.handler(
+      { commands: [{ label: "big", command: twoKb, language: "javascript" }] },
+      ctx,
+    );
+    const out = textOf(r);
+    expect(out).toMatch(/^## big — exit 0 · 2\.0 KB stdout .* · doc \d+\n/);
+    expect(out).toContain("x".repeat(2000));
+    expect(out).not.toContain("em_search {document_ids");
+  }, 30_000);
+
+  it("keeps the 1 KB cap with queries and says how to fetch an elided output", async () => {
+    const r = await emBatchExecute.handler(
+      {
+        commands: [{ label: "big", command: twoKb, language: "javascript" }],
+        queries: ["xxxx"],
+      },
+      ctx,
+    );
+    const out = textOf(r);
+    expect(out).not.toContain("x".repeat(2000));
+    expect(out).toMatch(
+      /^## big — exit 0 .* · doc (\d+) · em_search \{document_ids: \[\1\]\} for the output\n/,
+    );
+  }, 30_000);
+
+  it("shares the token budget without letting one output starve the rest", () => {
+    // Four outputs of about 1 KB, 3 KB budget: the three smallest fit, the largest is elided.
+    expect([...chooseInline([1024, 1000, 1010, 900], 5120, 3000)].sort()).toEqual([1, 2, 3]);
+    // Over the per-output cap: never inline, whatever the budget.
+    expect(chooseInline([6000, 10], 5120, 100_000).has(0)).toBe(false);
+    expect(chooseInline([6000, 10], 5120, 100_000).has(1)).toBe(true);
+    // One large output and several small ones: the small ones all come back.
+    expect([...chooseInline([5000, 100, 100, 100], 5120, 2000)].sort()).toEqual([1, 2, 3]);
   });
 });
 

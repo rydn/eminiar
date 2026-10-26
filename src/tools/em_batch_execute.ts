@@ -7,12 +7,35 @@ import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
 import { defineTool, text } from "./types.js";
 
-const INLINE_LIMIT = 1024;
+/** Per-output inline cap when `queries`/`intent` are given: the query hits carry the content. */
+const INLINE_LIMIT_WITH_QUERIES = 1024;
+const DEFAULT_MAX_TOKENS = 2000;
+
+/**
+ * Pick which outputs to return verbatim. Every output is indexed; an output is inlined
+ * when it is at most `perOutputCap` chars and still fits the shared `budgetChars`, the
+ * smallest outputs served first so one large output never starves the others. Returns
+ * the indexes of the outputs to inline.
+ */
+export function chooseInline(lengths: number[], perOutputCap: number, budgetChars: number) {
+  const candidates = lengths
+    .map((len, i) => ({ len, i }))
+    .filter((c) => c.len <= perOutputCap)
+    .sort((a, b) => a.len - b.len);
+  const inline = new Set<number>();
+  let remaining = budgetChars;
+  for (const c of candidates) {
+    if (c.len > remaining) break;
+    inline.add(c.i);
+    remaining -= c.len;
+  }
+  return inline;
+}
 
 export const emBatchExecute = defineTool({
   name: "em_batch_execute",
   description:
-    "Run several labelled commands in parallel, index every output under its label, and answer `queries` against all of them in the same round trip. Ideal for research: git status + recent commits + test output + dependency list in one call. Small outputs are returned inline; large ones only through the query hits.",
+    "Run several labelled commands in parallel, index every output under its label, and answer `queries` against all of them in the same round trip. Ideal for research: git status + recent commits + test output + dependency list in one call. Without `queries`/`intent`, each output up to the index threshold (5 KB) is returned inline, within `max_tokens` overall; with them, only outputs up to 1 KB are inlined and the query hits carry the rest. Every output is indexed; an elided one is fetched with em_search {document_ids: [N]}.",
   schema: {
     commands: z
       .array(
@@ -37,11 +60,14 @@ export const emBatchExecute = defineTool({
     const results: Array<{
       label: string;
       header: string;
-      inline?: string | undefined;
+      stdout?: string | undefined;
       docId?: number | undefined;
       stderr?: string | undefined;
     }> = [];
     let rawChars = 0;
+    const queries = [...(args.queries ?? [])];
+    if (args.intent && !queries.includes(args.intent)) queries.unshift(args.intent);
+    const maxTokens = args.max_tokens ?? DEFAULT_MAX_TOKENS;
 
     const queue = [...args.commands];
     const worker = async () => {
@@ -64,7 +90,7 @@ export const emBatchExecute = defineTool({
           results.push({
             label: cmd.label,
             header: describeRun(r),
-            inline: r.stdout.length <= INLINE_LIMIT ? r.stdout : undefined,
+            stdout: r.stdout,
             docId: p.documentId,
             stderr: r.exitCode !== 0 ? r.stderr.trim().slice(-800) : undefined,
           });
@@ -78,16 +104,28 @@ export const emBatchExecute = defineTool({
     const order = new Map(args.commands.map((c, i) => [c.label, i]));
     results.sort((a, b) => (order.get(a.label) ?? 0) - (order.get(b.label) ?? 0));
 
+    // Inline rule: without queries, up to the index threshold per output (as em_execute
+    // does), within the token budget overall; with queries, the 1 KB cap of old.
+    const perOutputCap = queries.length
+      ? INLINE_LIMIT_WITH_QUERIES
+      : ctx.config.sandbox.indexThreshold;
+    const inline = chooseInline(
+      results.map((r) => r.stdout?.length ?? Number.POSITIVE_INFINITY),
+      perOutputCap,
+      maxTokens * 4,
+    );
+
     const lines: string[] = [];
-    for (const r of results) {
-      lines.push(`## ${r.label} — ${r.header}${r.docId ? ` · doc ${r.docId}` : ""}`);
-      if (r.inline !== undefined) lines.push(r.inline.trimEnd());
+    results.forEach((r, i) => {
+      const shown = inline.has(i) && r.stdout !== undefined;
+      const hint =
+        r.docId && !shown ? ` · em_search {document_ids: [${r.docId}]} for the output` : "";
+      lines.push(`## ${r.label} — ${r.header}${r.docId ? ` · doc ${r.docId}` : ""}${hint}`);
+      if (shown) lines.push(r.stdout!.trimEnd());
       if (r.stderr) lines.push(`stderr: ${r.stderr}`);
       lines.push("");
-    }
+    });
 
-    const queries = [...(args.queries ?? [])];
-    if (args.intent && !queries.includes(args.intent)) queries.unshift(args.intent);
     const docIds = results.map((r) => r.docId).filter((d): d is number => d !== undefined);
     if (queries.length && docIds.length) {
       const responses: SearchResponse[] = [];
@@ -97,7 +135,7 @@ export const emBatchExecute = defineTool({
         );
       }
       lines.push("# query hits");
-      lines.push(formatResults(responses, args.max_tokens ?? 2000));
+      lines.push(formatResults(responses, maxTokens));
     }
     const out = lines.join("\n");
     recordStat(ctx, "em_batch_execute", {

@@ -15,6 +15,7 @@ import { getStorage } from "../storage/index.js";
 import type { EventInput } from "../storage/types.js";
 import { budgetWarnings } from "../usage/brief.js";
 import { ingestSession, ingestTranscript, usageEnabled } from "../usage/ingest.js";
+import { hookLog } from "./log.js";
 import type { HookHandler, HookInput } from "./types.js";
 
 /** Categories worth finding again with em_recall / em_search (source "session"). */
@@ -69,10 +70,14 @@ function open(input: HookInput): { db: StorageAdapter; root: string; sessionId: 
   return { db, root: ctx.root, sessionId };
 }
 
+/** Set once the first ingest failure of this process has been logged; later ones stay quiet. */
+let usageFailureLogged = false;
+
 /**
  * Pull the session's new transcript entries (model calls, tool result sizes, compactions)
  * into the usage tables. Reads only the tail past the stored offset, so it is cheap; it
- * never throws, since a hook must not fail over bookkeeping.
+ * never throws, since a hook must not fail over bookkeeping. A failure is written to
+ * ~/.eminiar/hook.log once per process so a broken ingest does not go unnoticed.
  */
 export function ingestUsage(db: StorageAdapter, input: HookInput, sessionId: string): void {
   try {
@@ -82,8 +87,14 @@ export function ingestUsage(db: StorageAdapter, input: HookInput, sessionId: str
     ingestSession(db, ctx.root, sessionId, input.transcript_path, { overrides });
     if (input.agent_transcript_path)
       ingestTranscript(db, input.agent_transcript_path, { sessionId, overrides });
-  } catch {
+  } catch (err) {
     // usage capture is best effort
+    if (usageFailureLogged) return;
+    usageFailureLogged = true;
+    hookLog(
+      "error",
+      `usage ingest failed (session ${sessionId}): ${(err as Error).message}; run \`eminiar usage ingest\` to see the error`,
+    );
   }
 }
 

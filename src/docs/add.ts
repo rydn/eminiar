@@ -241,9 +241,11 @@ export function removeDocSource(
   name: string,
 ): { removed: boolean; documents: number } {
   const removed = removeSource(ctx, name);
+  // Also drops an orphaned source's pages (indexed, but no manifest entry any more); the
+  // graph rebuild below then clears any `doc:` node left over from when it was registered.
   const documents = db.deleteDocumentsBySource(docsTag(name));
   clearSyncState(db, name);
-  if (removed) syncDocsGraphQuietly(ctx, db);
+  if (removed || documents) syncDocsGraphQuietly(ctx, db);
   return { removed, documents };
 }
 

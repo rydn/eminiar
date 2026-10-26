@@ -174,7 +174,8 @@ export class SqliteAdapter implements StorageAdapter {
     if (pending.length) {
       this.transaction(() => {
         for (const m of pending) {
-          this.db.exec(m.sql);
+          if (m.sql) this.db.exec(m.sql);
+          m.up?.(this.db);
           this.metaSet("schema_version", String(m.version));
         }
       });
@@ -449,28 +450,63 @@ export class SqliteAdapter implements StorageAdapter {
 
   vecSearch(embedding: Float32Array, k: number, filters?: SearchFilters): VecHit[] {
     if (!this.vectors) return [];
-    // vec0 KNN cannot join; over-fetch then apply filters.
-    const raw = this.db
-      .prepare(
-        "SELECT chunk_id id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-      )
-      .all(embedding, BigInt(filters ? k * 4 : k)) as Array<{ id: number; distance: number }>;
-    if (!filters || !raw.length) return raw.map((r) => ({ chunkId: r.id, distance: r.distance }));
     const { where, params } = filterSql(filters);
-    const allowed = new Set(
-      (
-        this.db
+    // The unfiltered query is the hot path: plain KNN, nothing else.
+    if (!where) return this.knn(embedding, k);
+    // vec0 KNN cannot join, but it takes an `IN` constraint on the key next to MATCH and
+    // k, so the k nearest are picked among the allowed chunks only. Over-fetching and
+    // post-filtering instead misses a narrow source (a few hundred chunks out of thousands)
+    // entirely when none of its chunks make the top k*4.
+    try {
+      return this.knn(
+        embedding,
+        k,
+        `AND chunk_id IN (SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE 1=1${where})`,
+        params,
+      );
+    } catch {
+      // a vec0 build without the IN constraint: widen the over-fetch until k allowed hits
+      return this.vecSearchWidening(embedding, k, where, params);
+    }
+  }
+
+  private knn(embedding: Float32Array, k: number, extra = "", params: unknown[] = []): VecHit[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT chunk_id id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ${extra} ORDER BY distance`,
+        )
+        .all(embedding, BigInt(k), ...params) as Array<{ id: number; distance: number }>
+    ).map((r) => ({ chunkId: r.id, distance: r.distance }));
+  }
+
+  /** Fallback filtered KNN: fetch k*4, k*16, ... nearest until k pass the filter or all were seen. */
+  private vecSearchWidening(
+    embedding: Float32Array,
+    k: number,
+    where: string,
+    params: unknown[],
+  ): VecHit[] {
+    const total = this.vecCount();
+    for (let fetch = k * 4; ; fetch *= 4) {
+      const raw = this.knn(embedding, Math.min(fetch, total));
+      if (!raw.length) return [];
+      const allowed = new Set<number>();
+      for (let i = 0; i < raw.length; i += 400) {
+        const ids = raw.slice(i, i + 400).map((r) => r.chunkId);
+        for (const r of this.db
           .prepare(
             `SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id
-             WHERE c.id IN (${raw.map(() => "?").join(",")})${where}`,
+             WHERE c.id IN (${ids.map(() => "?").join(",")})${where}`,
           )
-          .all(...raw.map((r) => r.id), ...params) as Array<{ id: number }>
-      ).map((r) => r.id),
-    );
-    return raw
-      .filter((r) => allowed.has(r.id))
-      .slice(0, k)
-      .map((r) => ({ chunkId: r.id, distance: r.distance }));
+          .all(...ids, ...params) as Array<{ id: number }>)
+          allowed.add(r.id);
+      }
+      const hits = raw.filter((r) => allowed.has(r.chunkId)).slice(0, k);
+      // Stop once everything was asked for (`fetch >= total`), not once everything came
+      // back: a KNN that returns fewer rows than asked must not widen for ever.
+      if (hits.length >= k || fetch >= total) return hits;
+    }
   }
 
   unembeddedChunkIds(limit: number): number[] {
@@ -840,6 +876,29 @@ export class SqliteAdapter implements StorageAdapter {
       )
       .all(...kinds) as Array<{ id: string; n: number }>) {
       get(r.id).fanOut = r.n;
+    }
+    return out;
+  }
+
+  graphDependentFileCounts(paths: string[], kinds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (!paths.length || !kinds.length) return out;
+    const kph = kinds.map(() => "?").join(",");
+    for (let i = 0; i < paths.length; i += 400) {
+      const batch = paths.slice(i, i + 400);
+      const pph = batch.map(() => "?").join(",");
+      for (const r of this.db
+        .prepare(
+          `SELECT d.path p, COUNT(DISTINCT s.path) n
+             FROM graph_nodes d
+             JOIN graph_edges e ON e.dst = d.id AND e.kind IN (${kph})
+             JOIN graph_nodes s ON s.id = e.src
+            WHERE d.path IN (${pph}) AND s.path IS NOT NULL AND s.path <> d.path
+            GROUP BY d.path`,
+        )
+        .all(...kinds, ...batch) as Array<{ p: string; n: number }>) {
+        out.set(r.p, r.n);
+      }
     }
     return out;
   }

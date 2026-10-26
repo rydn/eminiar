@@ -9,7 +9,7 @@ updated: 2026-10-26T19:51:14.056Z
 
 Project knowledge is pushed to Claude by hooks, not only pulled via em_* tools (branch feature/docs-memory-recall, v0.5.0, 2026-10-15). `src/session/recall.ts` powers every path:
 - UserPromptSubmit: up to 3 memories + 2 docs pages matching the prompt ("eminiar recall").
-- PreToolUse Read/Edit/MultiEdit/Write: memories whose `related` names the file or a symbol in it, whose body names the path, or that name one of its symbols ("eminiar memory"; widened in v0.9.0, see mem:decision/knowledge-routing-and-recall-tuning); the fix record of bug-prone files on reads and edits ("eminiar history"); fan-in >= 5 on edits ("eminiar graph").
+- PreToolUse Read/Edit/MultiEdit/Write: memories whose `related` names the file or a symbol in it, whose body names the path, or that name one of its symbols ("eminiar memory"; widened in v0.9.0, see mem:decision/knowledge-routing-and-recall-tuning); the fix record of bug-prone files on reads and edits ("eminiar history"); on edits, when 5 or more other files import or use it, their count ("eminiar graph: X is imported by N files"; distinct dependent files via graphDependentFileCounts, not the metrics fan-in, which also counts calls inside the file and quoted e.g. 89 for routing.ts against 8 real dependents; fix re-applied from 5ecafdd on fix/validation-findings).
 - PreToolUse Bash `git commit`: bug-prone / widely imported files among `git diff --cached` (+ tracked changes with -a).
 - PostToolUseFailure (made synchronous; async hook output only arrives next turn): earlier occurrences of the error with the `error_resolution` recorded after them in that session, plus memories.
 - PreToolUse WebSearch/WebFetch: indexed doc pages covering the query ("eminiar docs").

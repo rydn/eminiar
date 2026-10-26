@@ -20,6 +20,8 @@ Act on `$ARGUMENTS` with `em_docs`; with no arguments, run `list` and, when it i
   one source with `name`. Cite the `doc N` ids. Only when the answer is not in the index should
   you fall back to `em_fetch_and_index` for a specific page, then `{action: "add", url}` if it is
   worth keeping.
-- **list** / **remove** → the matching action.
+- **list** / **remove** → the matching action. `list` also shows sources *orphaned in the
+  index* (pages indexed under `docs:<name>` with no manifest entry, e.g. the manifest lives on
+  another branch); `remove` drops their pages, `add` with the same name re-registers them.
 
 The manifest `.eminiar/docs.json` is meant to be committed; say so once when sources were added.

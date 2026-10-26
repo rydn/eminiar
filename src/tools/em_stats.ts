@@ -74,17 +74,30 @@ export const emStats = defineTool({
   },
 });
 
-/** `usage: today $X · session $Y · see em_usage`, or undefined when nothing has been recorded. */
+/**
+ * `usage: today $X · session $Y · see em_usage`, or undefined when nothing has been recorded.
+ * A failed ingest is reported in one line rather than hidden: the figures would silently
+ * stop moving otherwise.
+ */
 function usageLine(ctx: Parameters<typeof getStorage>[0], sessionId: string): string | undefined {
   if (!usageEnabled(ctx)) return undefined;
   try {
     const db = getStorage(ctx);
-    ingestSession(db, ctx.root, sessionId, undefined, { overrides: ctx.config.usage.pricing });
+    let failed: string | undefined;
+    try {
+      ingestSession(db, ctx.root, sessionId, undefined, { overrides: ctx.config.usage.pricing });
+    } catch (err) {
+      failed = `usage: ingest failed: ${(err as Error).message}`;
+    }
     const b = usageBrief(db, ctx, { sessionId });
-    if (!b.todayUsd && !b.sessionUsd) return undefined;
-    return `usage: today ${formatUsd(b.todayUsd)} · session ${formatUsd(b.sessionUsd)} · see em_usage`;
-  } catch {
-    return undefined;
+    const line =
+      b.todayUsd || b.sessionUsd
+        ? `usage: today ${formatUsd(b.todayUsd)} · session ${formatUsd(b.sessionUsd)} · see em_usage`
+        : undefined;
+    return [line, failed].filter((s) => s).join("\n") || undefined;
+  } catch (err) {
+    // opening the database or reading the brief failed, not the ingest
+    return `usage: unavailable: ${(err as Error).message}`;
   }
 }
 

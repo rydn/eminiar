@@ -14,7 +14,7 @@ export const LANG_ENUM = z
 export const emExecute = defineTool({
   name: "em_execute",
   description:
-    "Run code in a sandbox inside the project root and return only stdout. Output over the index threshold (5 KB) is indexed; pass `intent` to get back just the matching sections plus a vocabulary of searchable terms. Use this instead of Bash for anything that prints a lot: git log/diff, test runs, dependency trees, logs, API calls. Shell snippets honour Claude Code's Bash deny rules.",
+    "Run code in a sandbox inside the project root and return only stdout. Output over the index threshold (5 KB) is indexed; pass `intent` to get back just the matching sections plus a vocabulary of searchable terms. Use this instead of Bash for anything that prints a lot: git log/diff, test runs, dependency trees, logs, API calls. Shell snippets honour Claude Code's Bash deny rules. javascript and typescript run as ES modules; `import` and `require` both work.",
   schema: {
     language: LANG_ENUM,
     code: z.string().min(1).describe("Program or shell script to run"),

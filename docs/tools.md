@@ -24,7 +24,10 @@ Use these instead of `Bash` or `Read` when the output can be large.
 
 **How `intent` works.** Output under 5 KB returns in full. Larger output is indexed and only the
 sections that match `intent` come back, with a list of searchable terms. Use `em_search` to dig
-further.
+further. `em_batch_execute` follows the same 5 KB rule per output when it has no `queries` or
+`intent` (within `max_tokens` overall); with them only outputs under 1 KB are inlined and the query
+hits carry the rest. Every output is indexed, and an elided one names its document id so
+`em_search {document_ids: [N]}` fetches it.
 
 ```text
 em_execute {language: "shell", code: "npm test", intent: "failing tests and their errors"}

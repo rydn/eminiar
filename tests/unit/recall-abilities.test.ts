@@ -42,7 +42,7 @@ beforeAll(() => {
     JSON.stringify({ routing: { mode: "enforce", deferToContextMode: false } }),
   );
   mkdirSync(join(root, "src"), { recursive: true });
-  for (const f of ["src/parser.ts", "src/core.ts", "src/quiet.ts"])
+  for (const f of ["src/parser.ts", "src/core.ts", "src/quiet.ts", "src/busy.ts"])
     writeFileSync(join(root, f), "export const x = 1;\n");
   resetContextCache();
   unmark = markServerAlive(getContext(root));
@@ -64,7 +64,57 @@ beforeAll(() => {
       },
     }),
   );
-  db.metricsReplace([metric("src/core.ts", 12), metric("src/quiet.ts", 1)]);
+  // src/core.ts: imported by five files, and its symbol is called from a sixth.
+  // src/busy.ts: no importers, but 20 calls between its own helpers (metrics fan-in 20).
+  const file = (path: string) => ({
+    id: `file:${path}`,
+    kind: "file",
+    name: path,
+    path,
+    source: "tree-sitter" as const,
+  });
+  const fn = (path: string, name: string) => ({
+    id: `sym:${path}#${name}`,
+    kind: "function",
+    name,
+    path,
+    source: "tree-sitter" as const,
+  });
+  const users = ["a", "b", "c", "d", "e"].map((n) => `src/use-${n}.ts`);
+  const helpers = Array.from({ length: 21 }, (_, i) => fn("src/busy.ts", `h${i}`));
+  db.graphUpsertNodes([
+    ...["src/core.ts", "src/quiet.ts", "src/busy.ts", "src/caller.ts", ...users].map(file),
+    fn("src/core.ts", "run"),
+    fn("src/caller.ts", "main"),
+    ...helpers,
+  ]);
+  db.graphUpsertEdges([
+    ...users.map((u) => ({
+      src: `file:${u}`,
+      dst: "file:src/core.ts",
+      kind: "imports",
+      source: "tree-sitter" as const,
+    })),
+    {
+      src: "sym:src/caller.ts#main",
+      dst: "sym:src/core.ts#run",
+      kind: "calls",
+      source: "tree-sitter",
+    },
+    { src: "file:src/use-a.ts", dst: "file:src/quiet.ts", kind: "imports", source: "tree-sitter" },
+    ...helpers.slice(1).map((h, i) => ({
+      src: helpers[i]!.id,
+      dst: h.id,
+      kind: "calls",
+      source: "tree-sitter" as const,
+    })),
+  ]);
+  // the metrics fan-in is what the old note quoted; it must not be any more
+  db.metricsReplace([
+    metric("src/core.ts", 12),
+    metric("src/quiet.ts", 1),
+    metric("src/busy.ts", 20),
+  ]);
   indexContent(db, {
     source: "docs:stripe",
     title: "Stripe › Rate limits",
@@ -101,11 +151,16 @@ describe("history and graph context before a read or an edit", () => {
     expect(ctxText(read)).toContain("eminiar history: src/parser.ts is bug-prone");
     expect(await tool("e2", "Edit", { file_path: join(root, "src/parser.ts") })).toBeUndefined();
   });
-  it("notes fan-in for widely imported files only, and only before an edit", async () => {
+  it("notes the files that depend on a widely used file, and only before an edit", async () => {
     expect(await tool("e3", "Read", { file_path: join(root, "src/core.ts") })).toBeUndefined();
     const core = await tool("e3", "Write", { file_path: join(root, "src/core.ts") });
-    expect(ctxText(core)).toContain("eminiar graph: src/core.ts is imported by 12 files");
+    // five importers plus one caller of its symbol; the metrics fan-in (12) is not quoted
+    expect(ctxText(core)).toContain("eminiar graph: src/core.ts is imported by 6 files");
     expect(await tool("e3", "Edit", { file_path: join(root, "src/quiet.ts") })).toBeUndefined();
+  });
+  it("does not count calls inside the file as dependents", async () => {
+    // metrics fan-in is 20, all from its own helpers: nobody else depends on it
+    expect(await tool("e4", "Edit", { file_path: join(root, "src/busy.ts") })).toBeUndefined();
   });
 });
 
@@ -161,14 +216,15 @@ describe("commit risk", () => {
   it("names bug-prone and widely imported staged files before git commit", async () => {
     const git = (...args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
     git("init", "-q");
-    git("add", "src/parser.ts", "src/core.ts", "src/quiet.ts");
+    git("add", "src/parser.ts", "src/core.ts", "src/quiet.ts", "src/busy.ts");
     const out = await tool("c1", "Bash", { command: 'git commit -m "tweak parser"' });
     const text = ctxText(out);
     expect(out?.hookSpecificOutput?.permissionDecision).toBeUndefined();
     expect(text).toContain("this commit includes files that deserve a second look");
     expect(text).toContain("src/parser.ts is bug-prone");
-    expect(text).toContain("widely imported: src/core.ts (12 importers)");
+    expect(text).toContain("widely imported: src/core.ts (6 importers)");
     expect(text).not.toContain("quiet.ts");
+    expect(text).not.toContain("busy.ts");
     // not a commit: nothing to say
     expect(await tool("c1", "Bash", { command: "git status" })).toBeUndefined();
   });
@@ -219,6 +275,31 @@ describe("docs before the web", () => {
     });
     expect(out?.hookSpecificOutput?.permissionDecision).toBe("deny");
     expect(out?.hookSpecificOutput?.permissionDecisionReason).toContain("docs:stripe");
+  });
+});
+
+describe("read routing", () => {
+  it("lets Read show large images and PDFs; large text still goes to the sandbox", () => {
+    const big = "x".repeat(300 * 1024);
+    for (const f of [
+      "shot.png",
+      "photo.JPG",
+      "anim.gif",
+      "pic.webp",
+      "spec.pdf",
+      "logo.svg",
+      "data.json",
+    ])
+      writeFileSync(join(root, f), big);
+    for (const f of ["shot.png", "photo.JPG", "anim.gif", "pic.webp", "spec.pdf"])
+      expect(suggest("Read", { file_path: join(root, f) }, root), f).toBeUndefined();
+    // SVG is text: a 300 KB one floods the context like any other text file
+    expect(suggest("Read", { file_path: join(root, "logo.svg") }, root)?.tool).toBe(
+      "em_execute_file",
+    );
+    expect(suggest("Read", { file_path: join(root, "data.json") }, root)?.tool).toBe(
+      "em_execute_file",
+    );
   });
 });
 

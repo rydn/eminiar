@@ -33,7 +33,7 @@ export const emIndex = defineTool({
       });
       kickEmbedding(ctx, db);
       return text(
-        `${r.created ? "indexed" : "unchanged"} "${args.title}" as doc ${r.documentId}: ${r.chunks} chunks, ${r.chars} chars (${r.kind})`,
+        `${r.created ? "indexed" : "unchanged"} "${args.title}" as doc ${r.documentId}: ${r.chunks} chunks, ${r.chars} chars (${r.kind})${r.fallback ? " (no sections found; indexed as one chunk)" : ""}`,
       );
     }
     if (!args.path) return errorResult("provide `path` or `content`");
@@ -43,7 +43,7 @@ export const emIndex = defineTool({
       recursive: args.recursive ?? true,
     });
     const lines = [
-      `${args.path}: ${s.files} file(s), ${s.indexed} indexed, ${s.unchanged} unchanged, ${s.chunks} chunks`,
+      `${args.path}: ${s.files} file(s), ${s.indexed} indexed, ${s.unchanged} unchanged, ${s.chunks} chunks${s.fallbacks ? ` (${s.fallbacks} with no sections found; indexed as one chunk)` : ""}`,
     ];
     for (const sk of s.skipped.slice(0, 10)) lines.push(`  skipped ${sk.path}: ${sk.reason}`);
     if (s.skipped.length > 10) lines.push(`  … ${s.skipped.length - 10} more skipped`);
