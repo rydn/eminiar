@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getCurrentSession } from "../session/current.js";
 import { formatRecallStats, RECALL_CATEGORY, recallStats } from "../session/recall.js";
+import { formatRoutingStats, ROUTING_CATEGORY, routingStats } from "../session/routing-stats.js";
 import { globalDb } from "../stats/global.js";
 import { fmtTokens, formatStats } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
@@ -9,7 +10,7 @@ import { defineTool, text } from "./types.js";
 export const emStats = defineTool({
   name: "em_stats",
   description:
-    "Show how much context eminiar has kept out of the conversation: tokens seen vs returned per tool for this session, this project, and lifetime across all projects, plus index/graph sizes and how often proactive recall (memories, docs, history before prompts, reads and edits) fired versus stayed quiet, with the reasons.",
+    "Show how much context eminiar has kept out of the conversation: tokens seen vs returned per tool for this session, this project, and lifetime across all projects, plus index/graph sizes, how often routing intercepted native Bash/Read/Grep calls (and by which rule), and how often proactive recall (memories, docs, history before prompts, reads and edits) fired versus stayed quiet, with the reasons.",
   schema: {
     scope: z.enum(["session", "project", "lifetime", "all"]).optional().describe("default all"),
   },
@@ -21,6 +22,12 @@ export const emStats = defineTool({
     if (scope === "session" || scope === "all") {
       parts.push(formatStats(`session ${sessionId.slice(0, 8)}`, db.statsBySession(sessionId)));
       parts.push(
+        formatRoutingStats(
+          "routing (session)",
+          routingStats(db.eventsBySession(sessionId, { categories: [ROUTING_CATEGORY] })),
+        ),
+      );
+      parts.push(
         formatRecallStats(
           "recall (session)",
           recallStats(db.eventsBySession(sessionId, { categories: [RECALL_CATEGORY] })),
@@ -29,6 +36,12 @@ export const emStats = defineTool({
     }
     if (scope === "project" || scope === "all") {
       parts.push(formatStats(`project ${ctx.root}`, mergeByTool(db.statsAll())));
+      parts.push(
+        formatRoutingStats(
+          "routing (project, last 2000 calls)",
+          routingStats(db.eventsRecent(2000, [ROUTING_CATEGORY])),
+        ),
+      );
       parts.push(
         formatRecallStats(
           "recall (project, last 2000 decisions)",

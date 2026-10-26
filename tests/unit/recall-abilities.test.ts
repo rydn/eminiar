@@ -224,10 +224,14 @@ describe("docs before the web", () => {
 
 describe("bash routing ignores heredoc bodies", () => {
   it("lets cat-redirect writes through and does not read pipes inside heredocs", () => {
+    writeFileSync(join(root, "big.log"), "x".repeat(30 * 1024));
     const write = "cat >> notes.md <<'EOF'\nsome | head text\nEOF";
     expect(withoutHeredocs(write)).toBe("cat >> notes.md <<EOF");
     expect(suggest("Bash", { command: write }, root)).toBeUndefined();
     expect(suggest("Bash", { command: "cat big.log" }, root)?.tool).toBe("em_execute");
-    expect(suggest("Bash", { command: "cat a.log > b.log | head" }, root)?.tool).toBe("em_execute");
+    expect(suggest("Bash", { command: "cat big.log | grep x" }, root)?.tool).toBe("em_execute");
+    // a redirection into a file is a write, and `| head` caps what is printed
+    expect(suggest("Bash", { command: "cat big.log > b.log" }, root)).toBeUndefined();
+    expect(suggest("Bash", { command: "cat big.log | head" }, root)).toBeUndefined();
   });
 });
