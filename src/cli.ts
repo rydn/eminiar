@@ -26,7 +26,7 @@ Use
   docs add [--pick recommended|local|service|infra|catalog|api|registry|all] [--name N] [--url U ...] [--path P]
            [--glob G ...] [--provider npm:x|pypi:x|go:x|env:X|image:x|api:host] [--depth N] [--max N] [--no-sync]
   docs list | sync [name ...] [--force] | remove <name> | lookup "<q>" [--name N] | resolve <provider>
-  stats [--lifetime]           Context savings and how often proactive recall fired
+  stats [--lifetime]           Context savings, routing interceptions, how often recall fired
   recall ["<q>"]               Memories and session history
   recall --explain "<prompt>" [--session ID]   Why hook recall would (not) fire for a prompt
   recall --file <path>         What a Read/Edit of the file would attach (memories, history)

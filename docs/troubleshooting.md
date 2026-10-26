@@ -35,6 +35,12 @@ It also reports a cached failure and the time it expires.
 This is `enforce` routing at work. A command that usually prints a lot was redirected to the
 sandbox, which returns only the matching output. Claude should retry with `em_execute`.
 
+Bounded commands are not redirected: a pipe ending in `head`, `tail` or `wc`, `cat` or `grep`
+over named files small enough for `Read`, and anything that commits, installs or writes a file.
+If a call like that is still denied, `em_stats` shows how often routing intercepts each native
+tool and which rule did it, and `~/.eminiar/hook.log` has one line per denial with the command,
+so the rule can be reported or tuned. See [Routing](how-it-works.md#routing).
+
 To relax it, set `routing.mode` to `annotate` in `eminiar.config.json`. Routing denies a call
 only while the eminiar server runs. If the server is down, the hook only annotates.
 

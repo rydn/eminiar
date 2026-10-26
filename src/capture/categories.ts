@@ -37,6 +37,8 @@ export const CATEGORIES = {
   session_start: 4,
   /** A proactive recall decision (fired or quiet) and what it showed; never in the guide. */
   recall: 4,
+  /** A routing decision (allow / annotate / deny) for one native call; never in the guide. */
+  routing: 4,
 } as const satisfies Record<string, Priority>;
 
 export type Category = keyof typeof CATEGORIES;
