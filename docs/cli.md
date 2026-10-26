@@ -74,7 +74,7 @@ eminiar docs remove example
 ```sh
 eminiar reindex                                # incremental, all scopes
 eminiar reindex --scope code --full            # code | git | metrics | docs | memories | embeddings | all
-eminiar stats [--lifetime]                     # context savings and recall hit rate
+eminiar stats [--lifetime]                     # context savings, routing interceptions, recall hit rate
 eminiar purge <index|sessions|graph|memories|usage|all> --yes   # irreversible
 ```
 

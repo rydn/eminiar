@@ -26,7 +26,7 @@ Use
   docs add [--pick recommended|local|service|infra|catalog|api|registry|all] [--name N] [--url U ...] [--path P]
            [--glob G ...] [--provider npm:x|pypi:x|go:x|env:X|image:x|api:host] [--depth N] [--max N] [--no-sync]
   docs list | sync [name ...] [--force] | remove <name> | lookup "<q>" [--name N] | resolve <provider>
-  stats [--lifetime]           Context savings and how often proactive recall fired
+  stats [--lifetime]           Context savings, routing interceptions, how often recall fired
   usage [summary|daily|weekly|monthly|models|session|sessions|blocks|turns|tools|insights|savings]
         [--since 30d] [--session ID] [--limit N] [--json] [--csv]   Tokens, cache, cost and insights
   usage ingest                 Read every transcript of the project into the usage tables

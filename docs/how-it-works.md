@@ -64,7 +64,7 @@ Routing decides what happens when Claude calls a native tool that an `em_*` tool
 | Native call | Suggested tool | Trigger |
 |---|---|---|
 | `Bash` | `em_history` | `git log`, `git blame`, `git show <sha>`, `git shortlog`, mapped to the matching action (`-- path` → `file`, `A..B` → `branch`, `--grep` → `search`, `-L :fn:file` → `symbol`). A one-commit `git log -1 --format=…` and `git show REF:path` are left alone |
-| `Bash` | `em_execute` | Commands that usually print a lot, or pipes into `head`, `tail`, `grep`, `wc`, `sort`, `jq` … |
+| `Bash` | `em_execute` | A simple command that usually prints a lot (`npm test`, `git diff`, `find`, `grep -r`, `curl` …) or streams an unknown output through `grep`, `sort`, `jq` … |
 | `Read` | `em_execute_file` | Files over 200 KB, or data files (`.log`, `.json`, `.csv`, `.xml`, `.sql`, `.har` …) over 20 KB |
 | `Grep` | `em_symbols` / `em_search` | The pattern's identifier is a symbol the graph defines. Files-only grep: annotated with the matching symbols. Content-mode grep: denied |
 | `Grep` | `em_execute` | Content-mode grep without a `head_limit` for anything else |
@@ -80,6 +80,23 @@ Set the mode with `routing.mode` in `eminiar.config.json`:
 | `enforce` | Denies the native call and tells Claude which `em_*` tool to use |
 | `annotate` | Allows the call and adds a hint |
 | `off` | No routing hints |
+
+**Bash is judged one simple command at a time.** A line is split at `;`, `&&`, `||` and
+newlines (heredoc bodies and quoted text are skipped), and each part is classified on its own, so
+`cd src && npm test` is heavy because of `npm test`, and the denial names that part. Output that
+is bounded by construction stays native:
+
+- a trailing `| head -40`, `| tail -5` or `| wc -l` (up to 400 lines);
+- `head` / `tail` of a file, a `sed -n 'A,Bp'` range, `du -s`, `grep -l` / `-c`, `git log -1`;
+- `cat` or `grep` over named files small enough for the native `Read` (200 KB in total, 20 KB
+  for data files): the same read through Bash;
+- a command that changes something (`git commit`, `git checkout`, `npm install`, `rm`, `mv`,
+  `sed -i`, a `>` redirection into a file …): its output is secondary, and the native tool is
+  where Claude Code's permission prompts live.
+
+Every routing decision is recorded as a `routing` session event: `em_stats` reports how many
+native calls were denied or annotated per tool, which `em_*` tool they were sent to and which
+rule did it, and `~/.eminiar/hook.log` has one line per denial.
 
 **Safety rule:** `enforce` denies a call only while an eminiar MCP server runs for the project.
 The server writes a pid marker under `~/.eminiar/projects/<id>/servers/`. With no server, the
