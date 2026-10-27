@@ -572,7 +572,9 @@ try {
 } catch (err) {
   console.error(`eminiar ${cmd} failed: ${(err as Error).message}`);
   if (process.env.EMINIAR_DEBUG) console.error((err as Error).stack);
-  // doctor is still useful when the main command fails
-  if (cmd !== "doctor") console.error(formatDoctor(runDoctor()));
+  // doctor is still useful when the main command fails; a usage error is about the
+  // transcripts or the usage tables, not the installation, so a hint is enough there.
+  if (cmd === "usage") console.error("run `eminiar doctor` to check the installation");
+  else if (cmd !== "doctor") console.error(formatDoctor(runDoctor()));
   process.exit(1);
 }

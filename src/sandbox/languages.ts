@@ -28,6 +28,43 @@ export interface Language {
   detect: () => string | undefined;
   /** argv to run `file` (code already written to it). `bin` is the detect() result. */
   argv: (bin: string, file: string) => string[];
+  /** Text to prepend to the snippet before it is written, or undefined to write it as is. */
+  preamble?: ((code: string) => string | undefined) | undefined;
+}
+
+/**
+ * Snippets run as ES modules (the scratch file is `.mjs`; tsx follows the nearest
+ * package.json), where `require` does not exist. Claude writes `require('fs')` all the
+ * time, so give it one unless the snippet declares its own. The preamble is exactly ONE
+ * line (no trailing newline inside it) so stack-trace line numbers are off by one at most.
+ *
+ * The scratch file lives under ~/.eminiar/tmp, so a `require` anchored on it would look for
+ * packages there and resolve `./x` against it. The sandbox exports the project root as
+ * EMINIAR_PROJECT_ROOT, so anchor on a (not necessarily existing) file in the root instead:
+ * bare names come from the project's node_modules and relative paths resolve against the
+ * cwd, as they do in a script of the project.
+ */
+export const REQUIRE_PREAMBLE =
+  'import { createRequire } from "node:module"; const require = createRequire(process.env.EMINIAR_PROJECT_ROOT ? process.env.EMINIAR_PROJECT_ROOT + "/package.json" : import.meta.url);';
+
+export function requirePreamble(code: string): string | undefined {
+  if (!/\brequire\s*\(/.test(code)) return undefined;
+  if (/\b(?:const|let|var|function)\s+require\b/.test(code) || /\bcreateRequire\b/.test(code)) {
+    return undefined;
+  }
+  return `${REQUIRE_PREAMBLE}\n`;
+}
+
+/** The code as it will be written to the scratch file: the language's preamble, then the snippet. */
+export function prepareCode(lang: Language, code: string): string {
+  const pre = lang.preamble?.(code);
+  if (!pre) return code;
+  // A hashbang only counts on the very first line: keep it there, preamble second.
+  if (code.startsWith("#!")) {
+    const nl = code.indexOf("\n");
+    return nl === -1 ? `${code}\n${pre}` : code.slice(0, nl + 1) + pre + code.slice(nl + 1);
+  }
+  return pre + code;
 }
 
 function preferredShell(): string {
@@ -73,6 +110,7 @@ export const LANGUAGES: Language[] = [
     ext: ".mjs",
     detect: () => process.execPath,
     argv: (bin, file) => [bin, "--no-warnings", file],
+    preamble: requirePreamble,
   },
   {
     id: "typescript",
@@ -80,6 +118,7 @@ export const LANGUAGES: Language[] = [
     ext: ".ts",
     detect: () => process.execPath,
     argv: (bin, file) => [bin, "--no-warnings", tsxCli(), file],
+    preamble: requirePreamble,
   },
   {
     id: "python",

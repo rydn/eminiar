@@ -1,4 +1,5 @@
 import { fileId, fileOf } from "../graph/ids.js";
+import { DEPENDENCY_KINDS } from "../graph/metrics.js";
 import { type FileRisk, readFileRisk } from "../history/model.js";
 import { search } from "../search/pipeline.js";
 import { parseQuery } from "../search/query.js";
@@ -541,8 +542,17 @@ export function memoriesForFile(
 
 /** A file is worth a history warning from this risk, or with any traced bug origin. */
 const RISKY = 0.3;
-/** A file is worth a dependents note from this many importers. */
+/** A file is worth a dependents note from this many other files depending on it. */
 const FAN_IN = 5;
+
+/**
+ * Other files that import the file or use its symbols. Not the metrics fan-in: that also
+ * counts calls from inside the file, so a self-contained script with helpers looked "widely
+ * imported" and real counts were inflated.
+ */
+function dependentFiles(db: StorageAdapter, paths: string[]): Map<string, number> {
+  return db.graphDependentFileCounts(paths, DEPENDENCY_KINDS);
+}
 
 function riskLine(path: string, f: FileRisk): string | undefined {
   if (f.risk < RISKY && !f.bugOrigins) return undefined;
@@ -582,10 +592,10 @@ export function fileContext(
   }
   const fanKey = `fanin:${rel}`;
   if (opts.edit && !seen.has(fanKey)) {
-    const fanIn = db.metricsGet([fileId(rel)])[0]?.fan_in ?? 0;
-    if (fanIn >= FAN_IN) {
+    const dependents = dependentFiles(db, [rel]).get(rel) ?? 0;
+    if (dependents >= FAN_IN) {
       lines.push(
-        `eminiar graph: ${rel} is imported by ${fanIn} files; em_graph_impact {node:"${fileId(rel)}"} lists them before you change an exported signature.`,
+        `eminiar graph: ${rel} is imported by ${dependents} files; em_graph_impact {node:"${fileId(rel)}"} lists them before you change an exported signature.`,
       );
       keys.push(fanKey);
     }
@@ -602,12 +612,11 @@ export function commitContext(db: StorageAdapter, files: string[]): string {
     .map((p) => (table[p] ? riskLine(p, table[p]) : undefined))
     .filter((l): l is string => !!l)
     .slice(0, 4);
-  const wide = db
-    .metricsGet(files.map(fileId))
-    .filter((m) => m.fan_in >= FAN_IN)
-    .sort((a, b) => b.fan_in - a.fan_in)
+  const wide = [...dependentFiles(db, files)]
+    .filter(([, n]) => n >= FAN_IN)
+    .sort((a, b) => b[1] - a[1])
     .slice(0, 4)
-    .map((m) => `${m.path} (${m.fan_in} importers)`);
+    .map(([p, n]) => `${p} (${n} importers)`);
   if (!risky.length && !wide.length) return "";
   const lines = ["eminiar history: this commit includes files that deserve a second look:"];
   for (const r of risky) lines.push(`- ${r}`);

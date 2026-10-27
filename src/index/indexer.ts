@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import fg from "fast-glob";
-import { chunk, hashText, type Kind } from "../chunker/index.js";
+import { chunk, hashText, type Kind, kindToContentType } from "../chunker/index.js";
 import { finalize, type RawChunk } from "../chunker/types.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { ContentType, Source } from "../storage/types.js";
@@ -27,6 +27,8 @@ export interface IndexResult {
   chunks: number;
   chars: number;
   kind: Kind;
+  /** The chunker found nothing in non-empty content, so the whole content became one chunk. */
+  fallback: boolean;
 }
 
 /** Chunk + store one piece of content. Unchanged uri+content is a no-op (created=false). */
@@ -34,9 +36,25 @@ export function indexContent(db: StorageAdapter, input: IndexInput): IndexResult
   const kind =
     input.kind ??
     (input.contentType === "code" ? "code" : input.contentType === "json" ? "json" : undefined);
-  const { chunks, kind: k } = input.chunks
+  const cut = input.chunks
     ? { chunks: finalize(input.chunks, input.contentType ?? "code"), kind: kind ?? "code" }
     : chunk(input.content, input.title, kind, input.uri);
+  const k = cut.kind;
+  // Nothing may index to nothing: content the chunker could not cut is stored whole.
+  const fallback = cut.chunks.length === 0 && input.content.trim().length > 0;
+  const chunks = fallback
+    ? finalize(
+        [
+          {
+            title: input.title,
+            body: input.content,
+            startLine: 1,
+            endLine: input.content.split("\n").length,
+          },
+        ],
+        kindToContentType(k),
+      )
+    : cut.chunks;
   const contentHash = hashText(input.content);
   const existing = input.uri ? db.findDocumentByUri(input.uri) : undefined;
   if (existing && existing.content_hash === contentHash) {
@@ -47,6 +65,7 @@ export function indexContent(db: StorageAdapter, input: IndexInput): IndexResult
         chunks: chunks.length,
         chars: input.content.length,
         kind: k,
+        fallback,
       };
     }
     db.deleteDocument(existing.id);
@@ -63,7 +82,14 @@ export function indexContent(db: StorageAdapter, input: IndexInput): IndexResult
     },
     chunks,
   );
-  return { documentId: id, created, chunks: chunks.length, chars: input.content.length, kind: k };
+  return {
+    documentId: id,
+    created,
+    chunks: chunks.length,
+    chars: input.content.length,
+    kind: k,
+    fallback,
+  };
 }
 
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -74,6 +100,8 @@ export interface IndexPathSummary {
   unchanged: number;
   skipped: Array<{ path: string; reason: string }>;
   chunks: number;
+  /** Files whose chunker found no sections and that were indexed as one chunk. */
+  fallbacks: number;
 }
 
 /** Index a file or every file under a directory matching `globs` (relative to the directory). */
@@ -98,7 +126,14 @@ export function indexPath(
   opts: IndexPathOptions = {},
 ): IndexPathSummary {
   const abs = resolve(root, target);
-  const summary: IndexPathSummary = { files: 0, indexed: 0, unchanged: 0, skipped: [], chunks: 0 };
+  const summary: IndexPathSummary = {
+    files: 0,
+    indexed: 0,
+    unchanged: 0,
+    skipped: [],
+    chunks: 0,
+    fallbacks: 0,
+  };
   const st = statSync(abs);
   const files = st.isDirectory()
     ? fg.sync(opts.globs ?? ["**/*.md"], {
@@ -135,6 +170,7 @@ export function indexPath(
       if (r.created) summary.indexed++;
       else summary.unchanged++;
       summary.chunks += r.chunks;
+      if (r.fallback) summary.fallbacks++;
     } catch (err) {
       summary.skipped.push({ path: rel, reason: (err as Error).message });
     }

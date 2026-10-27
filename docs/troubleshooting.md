@@ -71,6 +71,17 @@ The next memory call imports the change. To force it:
 eminiar reindex --scope memories
 ```
 
+## `eminiar usage ingest` fails, or the usage figures stop moving
+
+The hooks ingest transcripts best-effort and never block Claude, so a broken ingest shows up
+only as stale numbers in `em_usage` / `em_stats`. The first failure of a session is written to
+`~/.eminiar/hook.log`, `em_stats` prints a `usage: ingest failed: …` line, and
+`eminiar usage ingest` reports the same error on the command line. A message like
+`table transcript_files has no column named head_hash` means the project database is behind the
+schema the code expects; opening it with a current version migrates it in place. If the error
+persists, `eminiar purge usage --yes` followed by `eminiar usage ingest` rebuilds the usage tables
+from the transcripts.
+
 ## Start over for one project
 
 ```sh

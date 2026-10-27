@@ -80,10 +80,21 @@ export const emSearch = defineTool({
       }
     }
     const out = formatResults(responses, args.max_tokens ?? ctx.config.search.defaultMaxTokens);
-    const note =
+    let note =
       mode !== "lexical" && mode !== "regex" && !vectorSearch && ctx.config.embeddings.enabled
         ? "\n\n(embeddings: model still loading — lexical results only this time)"
         : "";
+    // docs.embed=false stores documentation pages without vectors, so a semantic query over
+    // docs:* sources has nothing to match; say so instead of a bare "no matches".
+    const sources = Array.isArray(args.source) ? args.source : args.source ? [args.source] : [];
+    if (
+      mode === "semantic" &&
+      !ctx.config.docs.embed &&
+      sources.some((s) => s.startsWith("docs:")) &&
+      responses.every((r) => r.hits.length === 0)
+    )
+      note +=
+        '\n\n(docs:* pages are indexed without vectors because docs.embed is off; use mode "hybrid" or "lexical", or set docs.embed: true in eminiar.config.json and em_docs {action:"sync", force:true})';
     recordStat(ctx, "em_search", {
       rawChars: responses.reduce(
         (a, r) => a + r.hits.reduce((b, h) => b + h.chunk.body.length, 0),

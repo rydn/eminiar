@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { getContext } from "../context.js";
-import { readManifest } from "../docs/manifest.js";
+import { DOCS_PREFIX, readManifest } from "../docs/manifest.js";
 import { memoriesDir } from "../memory/store.js";
 import { renderProjectBrief } from "../session/brief.js";
 import { setCurrentSession } from "../session/current.js";
@@ -117,10 +117,16 @@ export const sessionStart: HookHandler = (input) => {
       parts.push(
         "No onboarding memories yet: run /eminiar:em-onboard once so future sessions start with the project's structure, build and test commands.",
       );
-    else if (!readManifest(ctx).sources.length)
+    else if (!readManifest(ctx).sources.length) {
+      // Pages may still be indexed under docs:* from a manifest that was deleted or lives on
+      // another branch; lookup keeps serving them, so say so rather than "nothing registered".
+      const orphaned = db.documentSourceStats(DOCS_PREFIX).length;
       parts.push(
-        'No documentation sources registered yet: em_docs {action:"discover"} maps this project\'s libraries, services and APIs to their documentation, and {action:"add", pick:"recommended"} indexes it for em_docs lookup.',
+        orphaned
+          ? `No documentation sources registered (${orphaned} orphaned docs:* source(s) still in the index; em_docs {action:"list"} shows them, {action:"remove"} drops them, {action:"add", pick:"recommended"} re-registers).`
+          : 'No documentation sources registered yet: em_docs {action:"discover"} maps this project\'s libraries, services and APIs to their documentation, and {action:"add", pick:"recommended"} indexes it for em_docs lookup.',
       );
+    }
   } catch {
     // the nudge is optional
   }

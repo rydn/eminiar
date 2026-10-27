@@ -107,9 +107,15 @@ This searches every documentation source. `em_search {source: "docs:*"}` does th
 | Action | Effect |
 |---|---|
 | `sync` | Re-crawls all sources, or the named ones. Pages younger than `docs.ttlHours` (168 hours) come from the cache. `force: true` fetches everything again |
-| `list` | Sources, page counts and sync state |
-| `remove` | Drops a source and its pages |
+| `list` | Sources, page counts and sync state, plus any sources orphaned in the index |
+| `remove` | Drops a source and its pages; works on orphaned sources too |
 | `resolve` | Shows where a provider's documentation would come from, for example `provider: "npm:zod"` |
+
+Pages whose source has no manifest entry (the manifest was deleted, or was committed on another
+branch) are **orphaned**: `lookup` still serves them and flags them with a note, `sync` never
+refreshes them, and `list` shows them in an "Orphaned in the index" section with their page
+counts. `remove` with the orphaned name drops those pages; `add` with the same name (or
+`pick: "recommended"`) re-registers the source so `sync` picks it up again.
 
 ## Hooks keep Claude on the index
 

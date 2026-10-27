@@ -1,10 +1,24 @@
+import type Database from "better-sqlite3";
+
 /**
  * Versioned migrations. Each entry runs once, in order, inside a transaction;
- * `meta.schema_version` records the last applied version.
+ * `meta.schema_version` records the last applied version. A migration is raw `sql`,
+ * an `up` step for changes that must look at the live schema first (SQLite has no
+ * ADD COLUMN IF NOT EXISTS), or both (sql runs first).
+ *
+ * Never edit a shipped migration in place: databases that already ran it will not see
+ * the change. Add a new version instead.
  */
 export interface Migration {
   version: number;
-  sql: string;
+  sql?: string;
+  up?: (db: Database.Database) => void;
+}
+
+/** True when `table` already has a column named `column`. */
+export function hasColumn(db: Database.Database, table: string, column: string): boolean {
+  const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+  return cols.some((c) => c.name === column);
 }
 
 export const migrations: Migration[] = [
@@ -341,7 +355,6 @@ CREATE TABLE IF NOT EXISTS transcript_files (
   offset INTEGER NOT NULL DEFAULT 0,
   size INTEGER NOT NULL DEFAULT 0,
   mtime INTEGER NOT NULL DEFAULT 0,
-  head_hash TEXT,
   ingested_at INTEGER NOT NULL
 );
 
@@ -369,6 +382,16 @@ CREATE TABLE IF NOT EXISTS statusline_snapshots (
 CREATE INDEX IF NOT EXISTS statusline_snapshots_session_ts ON statusline_snapshots(session_id, ts);
 CREATE INDEX IF NOT EXISTS statusline_snapshots_ts ON statusline_snapshots(ts);
 `,
+  },
+  {
+    // transcript_files.head_hash (fingerprint of the file head, so a rewrite with the same
+    // size is noticed) was first added to v5 after v5 had already run on real databases, so
+    // version-5 databases exist both with and without the column. Add it only when missing.
+    version: 6,
+    up(db) {
+      if (!hasColumn(db, "transcript_files", "head_hash"))
+        db.exec("ALTER TABLE transcript_files ADD COLUMN head_hash TEXT");
+    },
   },
 ];
 

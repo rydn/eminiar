@@ -11,14 +11,23 @@ import {
 import { type CatalogEntry, catalogForProvider, mergedCatalog } from "../docs/catalog.js";
 import { categoryInfo, categoryRank, docCategory, GROUP_LABELS } from "../docs/category.js";
 import { type Discovery, discoverDocs } from "../docs/discover.js";
-import { DOCS_PREFIX, docsTag, manifestPath, readManifest, syncState } from "../docs/manifest.js";
+import {
+  DOCS_PREFIX,
+  docsTag,
+  manifestPath,
+  nameFromTag,
+  readManifest,
+  syncState,
+} from "../docs/manifest.js";
 import { resolveProvider } from "../docs/resolve.js";
 import { formatSync, syncSources } from "../docs/sync.js";
 import { vectorRanker } from "../embeddings/queue.js";
 import { formatResults } from "../search/format.js";
 import { type SearchResponse, search } from "../search/pipeline.js";
 import { recordStat } from "../stats/record.js";
+import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
+import type { SourceStatRow } from "../storage/types.js";
 import { defineTool, errorResult, text } from "./types.js";
 
 const sourceShape = {
@@ -72,6 +81,44 @@ function ago(ts: number): string {
   if (s < 5400) return `${Math.round(s / 60)}m ago`;
   if (s < 172800) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
+}
+
+export interface OrphanedDocSource {
+  name: string;
+  documents: number;
+  chunks: number;
+  latest: number;
+}
+
+/**
+ * `docs:<name>` sources that still have pages in the index but no manifest entry (the manifest
+ * was deleted, or lives on another branch). Lookup and the recall hooks keep serving them, so
+ * `list` must say so and `remove` must be able to drop them.
+ */
+export function orphanedDocSources(
+  db: StorageAdapter,
+  registered: Iterable<string>,
+  stats: SourceStatRow[] = db.documentSourceStats(DOCS_PREFIX),
+): OrphanedDocSource[] {
+  const known = new Set(registered);
+  const out: OrphanedDocSource[] = [];
+  for (const s of stats) {
+    const name = nameFromTag(s.source);
+    if (name === undefined || known.has(name)) continue;
+    out.push({ name, documents: s.documents, chunks: s.chunks, latest: s.latest });
+  }
+  return out;
+}
+
+function formatOrphans(orphans: OrphanedDocSource[]): string[] {
+  const names = orphans.map((o) => o.name);
+  return [
+    `# Orphaned in the index (${orphans.length}; pages without a manifest entry)`,
+    ...orphans.map(
+      (o) => `- ${o.name} · ${o.documents} doc(s) · ${o.chunks} chunks · indexed ${ago(o.latest)}`,
+    ),
+    `em_docs {action:"remove", names:${JSON.stringify(names)}} drops them; {action:"add", pick:"recommended"} or {action:"add", name, url|path} re-registers.`,
+  ];
 }
 
 export function formatDiscovery(d: Discovery, max = 40): string {
@@ -248,21 +295,32 @@ export const emDocs = defineTool({
         case "remove": {
           const names = [...(args.name ? [args.name] : []), ...(args.names ?? [])];
           if (!names.length) return errorResult("remove needs `name` or `names`");
+          // An orphaned source (pages in the index, no manifest entry) is removable too; a name
+          // that is neither registered nor indexed is an error.
+          let unknown = 0;
           const lines = names.map((n) => {
             const r = removeDocSource(ctx, db, n);
-            return r.removed
-              ? `removed ${n} (${r.documents} document(s) dropped)`
-              : `${n}: not registered${r.documents ? ` (${r.documents} orphan document(s) dropped)` : ""}`;
+            if (r.removed) return `removed ${n} (${r.documents} document(s) dropped)`;
+            if (r.documents) return `removed ${n} (orphaned; ${r.documents} document(s) dropped)`;
+            unknown++;
+            return `${n}: not registered and not in the index; em_docs {action:"list"} shows both`;
           });
-          return done(lines.join("\n"));
+          const out = lines.join("\n");
+          return unknown === names.length ? errorResult(out) : done(out);
         }
         case "list": {
           const m = readManifest(ctx);
-          if (!m.sources.length)
-            return done(
-              `no documentation sources registered (${manifestPath(ctx)}). em_docs {action:"discover"} finds local docs and the libraries, services and APIs this project uses.`,
-            );
-          const stats = new Map(db.documentSourceStats(DOCS_PREFIX).map((s) => [s.source, s]));
+          const sourceStats = db.documentSourceStats(DOCS_PREFIX);
+          const orphans = orphanedDocSources(
+            db,
+            m.sources.map((s) => s.name),
+            sourceStats,
+          );
+          if (!m.sources.length) {
+            const none = `no documentation sources registered (${manifestPath(ctx)}). em_docs {action:"discover"} finds local docs and the libraries, services and APIs this project uses.`;
+            return done(orphans.length ? [none, "", ...formatOrphans(orphans)].join("\n") : none);
+          }
+          const stats = new Map(sourceStats.map((s) => [s.source, s]));
           const catalog = mergedCatalog(ctx.config.docs.catalog as CatalogEntry[]);
           const categorised = m.sources
             .map((s) => ({
@@ -301,9 +359,10 @@ export const emDocs = defineTool({
               `- ${s.name} [${s.kind}]${s.provider ? ` ← ${s.provider}` : ""}${s.tags?.length ? ` (${s.tags.join(", ")})` : ""} · ${st?.documents ?? 0} doc(s) · ${st?.chunks ?? 0} chunks · ${state} · ${where}`,
             );
           }
+          if (orphans.length) lines.push("", ...formatOrphans(orphans));
           lines.push(
             "",
-            `${m.sources.length} source(s); em_docs {action:"lookup", query} searches them all, {action:"sync"} refreshes.`,
+            `${m.sources.length} source(s)${orphans.length ? ` + ${orphans.length} orphaned` : ""}; em_docs {action:"lookup", query} searches them all, {action:"sync"} refreshes.`,
           );
           return done(lines.join("\n"));
         }
@@ -351,10 +410,18 @@ export const emDocs = defineTool({
             raw += r.hits.reduce((n, h) => n + h.chunk.body.length, 0);
             responses.push(r);
           }
-          const out = formatResults(
-            responses,
-            args.max_tokens ?? ctx.config.search.defaultMaxTokens,
+          let out = formatResults(responses, args.max_tokens ?? ctx.config.search.defaultMaxTokens);
+          // Pages whose source lost its manifest entry still rank (ranking is untouched); say so,
+          // since nothing refreshes them until they are re-registered or removed.
+          const hitSources = new Set(
+            responses.flatMap((r) => r.hits.map((h) => h.chunk.document.source)),
           );
+          const orphaned = orphanedDocSources(
+            db,
+            m.sources.map((s) => s.name),
+          ).filter((o) => hitSources.has(docsTag(o.name)));
+          if (orphaned.length)
+            out += `\n\nnote: ${orphaned.map((o) => o.name).join(", ")} ${orphaned.length === 1 ? "is" : "are"} not in the manifest (orphaned pages); em_docs {action:"list"} explains`;
           recordStat(ctx, "em_docs", {
             rawChars: raw,
             returnedChars: out.length,
