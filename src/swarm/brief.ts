@@ -1,7 +1,7 @@
 import type { ProjectContext } from "../context.js";
 import { readBriefSummary, readFileRisk } from "../history/model.js";
 import { renderProjectBrief } from "../session/brief.js";
-import { recallForText } from "../session/recall.js";
+import { memoriesForFile, recallForText } from "../session/recall.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { MemoryRow } from "../storage/types.js";
 import { inScope } from "./glob.js";
@@ -80,30 +80,62 @@ function taggedMemories(
   return out;
 }
 
+/**
+ * Memories and doc pages for a brief. Recall runs on each short text separately (goal,
+ * task, role): one long concatenation has so many terms that nothing clears recall's bar.
+ * Memories linked to the task's files and the role's tagged memories are added.
+ */
 async function memorySection(
   db: StorageAdapter,
-  text: string,
+  texts: Array<string | undefined>,
   spec: ContextSpec,
   tags: string[],
+  files: string[] = [],
 ): Promise<string | undefined> {
   const lines: string[] = [];
   const shown = new Set<string>();
-  if (spec.memories > 0 || spec.docs > 0) {
+  const keys = new Set<string>();
+  const add = (text: string, rkeys: string[]) => {
+    const fresh = rkeys.filter((k) => !keys.has(k));
+    if (rkeys.length && !fresh.length) return;
+    for (const k of rkeys) {
+      keys.add(k);
+      if (k.startsWith("memory:")) shown.add(k.slice(7));
+    }
+    for (const l of text.split("\n").filter((l) => l.startsWith("- ")))
+      if (!lines.includes(l)) lines.push(l);
+  };
+  const budget = { memories: spec.memories, docs: spec.docs };
+  for (const text of texts) {
+    if (!text?.trim() || (budget.memories <= 0 && budget.docs <= 0)) continue;
     try {
       const r = await recallForText(db, text, {
-        maxMemories: spec.memories,
-        maxDocs: spec.docs,
+        maxMemories: budget.memories,
+        maxDocs: budget.docs,
         path: "agent",
       });
-      for (const l of r.text.split("\n").filter((l) => l.startsWith("- "))) lines.push(l);
-      for (const k of r.keys) if (k.startsWith("memory:")) shown.add(k.slice(7));
+      add(r.text, r.keys);
+      budget.memories -= r.keys.filter((k) => k.startsWith("memory:")).length;
+      budget.docs -= r.keys.filter((k) => k.startsWith("doc:")).length;
     } catch {
       // recall is optional
     }
   }
+  for (const f of files.slice(0, 4)) {
+    if (budget.memories <= 0) break;
+    try {
+      const r = memoriesForFile(db, f, { max: Math.min(2, budget.memories) });
+      if (r.text) {
+        add(r.text, r.keys);
+        budget.memories -= r.keys.length;
+      }
+    } catch {
+      // optional
+    }
+  }
   lines.push(...taggedMemories(db, tags, Math.max(1, spec.memories), shown));
   if (!lines.length) return undefined;
-  return `Memories and docs (em_memory {action:"read", name} for the full text):\n${lines.join("\n")}`;
+  return `Memories and docs (em_memory {action:"read", name} for the full text):\n${lines.slice(0, spec.memories + spec.docs + 3).join("\n")}`;
 }
 
 /** Bug-prone files among `paths` (or in `scope`), from the persisted history risk table. */
@@ -133,6 +165,11 @@ function historySection(
   ].join("\n");
 }
 
+/** Source files only: the graph also ranks docs, memories and manifests. */
+function isCode(path: string): boolean {
+  return !path.startsWith(".eminiar/") && !/\.(md|mdx|json|ya?ml|toml|lock|txt)$/i.test(path);
+}
+
 function hotSection(db: StorageAdapter, scope: string[], limit = 6): string | undefined {
   let rows: Array<{ path: string | null; score: number }>;
   try {
@@ -143,7 +180,7 @@ function hotSection(db: StorageAdapter, scope: string[], limit = 6): string | un
   const hot = rows
     .filter(
       (r): r is { path: string; score: number } =>
-        !!r.path && r.score > 0 && inScope(r.path, scope),
+        !!r.path && r.score > 0 && isCode(r.path) && inScope(r.path, scope),
     )
     .slice(0, limit)
     .map((r) => r.path);
@@ -157,7 +194,12 @@ function structureSection(
   budget: number,
 ): string | undefined {
   try {
-    const b = renderProjectBrief(ctx, db, budget).trim();
+    // Hot files and history have their own sections in a swarm brief.
+    const b = renderProjectBrief(ctx, db, budget)
+      .split("\n")
+      .filter((l) => !l.startsWith("Hot files") && !l.startsWith("History (em_history)"))
+      .join("\n")
+      .trim();
     return b ? `Project (eminiar):\n${b}` : undefined;
   } catch {
     return undefined;
@@ -217,12 +259,12 @@ export async function workerBrief(
   const head: string[] = [];
   if (w.task) {
     head.push(
-      `eminiar swarm brief · your task (already claimed for you): ${taskLine(w.task)}. Report it with em_swarm {action:"update", task:${w.task.id}, status:"done"|"failed"|"blocked", result}.`,
+      `eminiar swarm brief · you hold task ${taskLine(w.task)}. Report it with em_swarm {action:"update", task:${w.task.id}, status:"done"|"failed"|"blocked", result}.`,
     );
   } else {
     const open = snap.tasks.filter((t) => eligibility(t, snap.tasks, w.swarm, w.role.role).ok);
     head.push(
-      `eminiar swarm brief · no task was handed to you${w.handoffNote ? ` (${w.handoffNote})` : ""}. If your prompt names "task #N", claim it first with em_swarm {action:"claim", task:N}; otherwise claim the next open one with em_swarm {action:"claim"}.${
+      `eminiar swarm brief · if your prompt names "task #N", claim it first with em_swarm {action:"claim", task:N}; otherwise claim the next open one with em_swarm {action:"claim"}.${
         open.length
           ? ` Claimable now: ${open.slice(0, 6).map(taskLine).join("; ")}.`
           : ' Nothing is claimable yet; check em_swarm {action:"status"}.'
@@ -235,14 +277,21 @@ export async function workerBrief(
   );
   if (w.task?.detail) head.push(clip(w.task.detail, 1200));
   if (w.task?.files.length) head.push(`Files: ${w.task.files.join(", ")}`);
-  const text = [w.run.goal, w.role.description, w.task?.title, w.task?.detail, w.prompt]
-    .filter(Boolean)
-    .join(" ");
   const files = w.task?.files ?? [];
   const sections = [
     head.join("\n"),
     boardSection(snap, now),
-    await memorySection(db, text, spec, w.role.memoryTags),
+    await memorySection(
+      db,
+      [
+        w.task ? `${w.task.title} ${w.task.detail ?? ""}` : undefined,
+        w.run.goal,
+        `${w.role.description} ${w.role.prompt}`,
+      ],
+      spec,
+      w.role.memoryTags,
+      files,
+    ),
     spec.history ? historySection(db, files, w.role.scope) : undefined,
     spec.insights ? hotSection(db, files.length ? files : w.role.scope) : undefined,
     spec.structure
@@ -272,7 +321,13 @@ export async function taskBrief(
     `Task ${taskLine(task)} of run ${run.id} (goal: ${clip(run.goal, 200)})${task.detail ? `\n${clip(task.detail, 1500)}` : ""}${
       task.files.length ? `\nFiles: ${task.files.join(", ")}` : ""
     }${task.deps.length ? `\nAfter: ${task.deps.map((d) => `#${d}`).join(", ")}` : ""}`,
-    await memorySection(db, `${task.title} ${task.detail ?? ""}`, spec, role?.memoryTags ?? []),
+    await memorySection(
+      db,
+      [`${task.title} ${task.detail ?? ""}`, run.goal],
+      spec,
+      role?.memoryTags ?? [],
+      task.files,
+    ),
     spec.history
       ? historySection(db, task.files, task.files.length ? [] : (role?.scope ?? []))
       : undefined,
@@ -316,7 +371,7 @@ export async function coordinatorBrief(
     [
       "Steps:",
       '1. Plan: em_swarm {action:"plan", tasks:[{key, title, detail, role, deps, files}]}: small tasks one worker can finish, each naming its files; deps take task ids or earlier keys.',
-      '2. Spawn a worker per claimable task with the Agent tool: subagent_type from the list, a prompt that names "task #N", run_in_background: true for parallel work. eminiar refuses spawns over capacity and briefs each worker with the task and the project knowledge.',
+      '2. Spawn a worker per claimable task with the Agent tool: subagent_type from the list, a prompt that names "task #N" (the worker claims it), run_in_background: true for parallel work. eminiar refuses spawns over capacity and briefs each worker with the project knowledge.',
       '3. Watch: em_swarm {action:"status"} (or `eminiar swarm watch` under the Monitor tool). Workers post shared facts to the blackboard.',
       '4. Review each result. Reopen with em_swarm {action:"update", task, status:"pending"} or plan follow-ups; tasks marked auto-closed were never reported by their worker, so check them.',
       '5. Finish: em_swarm {action:"finish", status:"done", summary, remember:true}, and record durable decisions with em_remember.',
@@ -337,7 +392,7 @@ export async function coordinatorBrief(
   const tags = [...new Set(swarm.roles.flatMap((r) => r.memoryTags))];
   const knowledge = budgeted(
     [
-      await memorySection(db, `${run.goal} ${swarm.description}`, spec, tags),
+      await memorySection(db, [run.goal, swarm.description], spec, tags),
       spec.history ? historySection(db, [], scope) : undefined,
       spec.insights ? hotSection(db, scope) : undefined,
       spec.structure ? structureSection(ctx, db, 1200) : undefined,

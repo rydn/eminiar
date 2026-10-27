@@ -1,6 +1,7 @@
 import type { JSX } from "preact";
 import type { SwarmEvent, SwarmRunDetail, SwarmTopology, SwarmWorkerUi } from "../api.js";
 import { cls } from "../util.js";
+import { onActivate, pure, useNow } from "./bits.js";
 import { eventIo, GLYPH, roleColor, shortAgent } from "./style.js";
 
 /** Coordination events that light the hub↔worker edge for a while. */
@@ -16,12 +17,32 @@ const EDGE_KINDS = new Set([
 ]);
 const EDGE_HOT_MS = 10_000;
 const FLASH_MS = 2_500;
-/** Above this many worker nodes, finished workers of a role fold into one node. */
+/**
+ * Above this many workers, each role's stale and done workers fold into one "+N" node and
+ * at most RUNNING_CAP of its running workers get their own node (the rest join the fold).
+ */
 const FOLD_AT = 12;
+const RUNNING_CAP = 6;
+/** Hierarchical: nodes per row before the next row. */
+const PER_ROW = 8;
+const ROW_H = 110;
+/**
+ * The canvas never draws smaller than this (labels stay ~10px); a wider one scrolls
+ * sideways inside `.sw-topo-wrap` instead.
+ */
+const MIN_SCALE = 0.95;
 
 type Item =
   | { type: "worker"; id: string; role: string; w: SwarmWorkerUi }
-  | { type: "group"; id: string; role: string; n: number }
+  | {
+      type: "group";
+      id: string;
+      role: string;
+      n: number;
+      running: number;
+      stale: number;
+      done: number;
+    }
   | { type: "idle"; id: string; role: string };
 
 interface Placed {
@@ -43,14 +64,36 @@ function itemsByRole(roles: string[], workers: SwarmWorkerUi[]): Item[][] {
   return roles.map((role) => {
     const mine = workers.filter((w) => w.role === role);
     const out: Item[] = [];
+    // Spawn order, so nodes keep their place between snapshots.
     for (const w of mine)
-      if (!fold || w.status !== "done") out.push({ type: "worker", id: w.agent_id, role, w });
-    const done = fold ? mine.filter((w) => w.status === "done").length : 0;
-    if (done) out.push({ type: "group", id: `done:${role}`, role, n: done });
+      if (!fold || (w.status === "running" && out.length < RUNNING_CAP))
+        out.push({ type: "worker", id: w.agent_id, role, w });
+    if (fold && mine.length > out.length) {
+      const folded = mine.filter((w) => !out.some((it) => it.id === w.agent_id));
+      const count = (s: SwarmWorkerUi["status"]) => folded.filter((w) => w.status === s).length;
+      out.push({
+        type: "group",
+        id: `fold:${role}`,
+        role,
+        n: folded.length,
+        running: count("running"),
+        stale: count("stale"),
+        done: count("done"),
+      });
+    }
     if (!out.length) out.push({ type: "idle", id: `idle:${role}`, role });
     return out;
   });
 }
+
+const groupWords = (g: { running: number; stale: number; done: number }): string =>
+  [
+    g.running ? `${GLYPH.running}${g.running}` : "",
+    g.stale ? `${GLYPH.stale}${g.stale}` : "",
+    g.done ? `${GLYPH.done}${g.done}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
 const SLOT = 116;
 const MARGIN = 56;
@@ -84,7 +127,10 @@ function layout(
       lanes.push({
         x: x0 + i * colW + 6,
         w: colW - 12,
-        label: stages.includes(role) ? `${stages.indexOf(role) + 1} · ${role}` : role,
+        label: clipLabel(
+          stages.includes(role) ? `${stages.indexOf(role) + 1} · ${role}` : role,
+          20,
+        ),
         n: col.length,
       });
     });
@@ -108,13 +154,35 @@ function layout(
         if (n <= 8 || j === i + 1 || (i === 0 && j === n - 1)) peers.push([nodes[i]!, nodes[j]!]);
     return { w, h, hub: { x: cx, y: cy }, nodes, peers, lanes: [] };
   }
-  // hierarchical: the coordinator on top, workers below grouped by role.
-  const n = flat.length;
-  const w = Math.max(640, n * SLOT + 2 * MARGIN);
-  const left = (w - n * SLOT) / 2;
-  const nodes = flat.map((item, i) => ({ item, x: left + SLOT * (i + 0.5), y: 200 }));
-  return { w, h: 286, hub: { x: w / 2, y: 58 }, nodes, peers: [], lanes: [] };
+  // hierarchical: the coordinator on top, workers below grouped by role, in rows of
+  // PER_ROW; a role that does not fit in what is left of a row starts the next one.
+  const rows: Item[][] = [[]];
+  for (const g of groups) {
+    const cur = rows[rows.length - 1]!;
+    if (cur.length && cur.length + g.length > PER_ROW) rows.push([]);
+    for (const item of g) {
+      if (rows[rows.length - 1]!.length >= PER_ROW) rows.push([]);
+      rows[rows.length - 1]!.push(item);
+    }
+  }
+  const widest = Math.max(1, ...rows.map((r) => r.length));
+  const w = Math.max(640, widest * SLOT + 2 * MARGIN);
+  const nodes = rows.flatMap((row, r) => {
+    const left = (w - row.length * SLOT) / 2;
+    return row.map((item, i) => ({ item, x: left + SLOT * (i + 0.5), y: 200 + r * ROW_H }));
+  });
+  return {
+    w,
+    h: 286 + (rows.length - 1) * ROW_H,
+    hub: { x: w / 2, y: 58 },
+    nodes,
+    peers: [],
+    lanes: [],
+  };
 }
+
+/** Clip a label to `n` characters (11px mono is ~6.6px a character: a node slot holds ~17). */
+const clipLabel = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 function spoke(topology: SwarmTopology, a: { x: number; y: number }, b: { x: number; y: number }) {
   if (topology === "hierarchical") {
@@ -128,26 +196,29 @@ function spoke(topology: SwarmTopology, a: { x: number; y: number }, b: { x: num
   return `M${a.x},${a.y} L${b.x},${b.y}`;
 }
 
-export function Topology({
+function TopologyView({
   detail,
   events,
-  now,
+  skew,
   roles,
   picked,
   onPick,
 }: {
   detail: SwarmRunDetail;
   events: SwarmEvent[];
-  /** Server-clock now (client clock corrected by the snapshot's skew). */
-  now: number;
+  /** Server clock minus client clock. */
+  skew: number;
   roles: string[];
   picked: string | null;
   onPick: (agentId: string | null) => void;
 }): JSX.Element {
   const topology = detail.run.topology;
+  const live = detail.run.status === "active";
+  // Flashes and hot edges are short-lived: this canvas alone ticks every second.
+  const now = useNow(1000, live, skew);
   const groups = itemsByRole(roles, detail.workers);
   const L = layout(topology, groups, detail.stages, roles);
-  const live = detail.run.status === "active";
+  const folded = groups.flat().some((it) => it.type === "group");
 
   // Recent activity per worker / role, newest last (events are oldest first).
   const flash = new Map<string, SwarmEvent>();
@@ -170,9 +241,9 @@ export function Topology({
       <svg
         class={cls("sw-topo", `topo-${topology}`)}
         viewBox={`0 0 ${L.w} ${L.h}`}
-        style={{ maxWidth: `${L.w}px` }}
-        role="img"
-        aria-label={`${topology} topology: coordinator and ${detail.workers.length} workers`}
+        style={{ maxWidth: `${L.w}px`, minWidth: `${Math.round(L.w * MIN_SCALE)}px` }}
+        role="group"
+        aria-label={`${topology} topology: coordinator and ${detail.workers.length} workers${folded ? ", quiet workers folded per role" : ""}`}
       >
         {L.lanes.map((lane, i) => (
           <g class="sw-lane">
@@ -198,6 +269,7 @@ export function Topology({
         ))}
         {L.nodes.map((n) => (
           <path
+            key={n.item.id}
             class={cls(
               "sw-edge spoke",
               isHot(n.item) && "hot",
@@ -223,35 +295,59 @@ export function Topology({
         </g>
         {L.nodes.map(({ item, x, y }) => {
           const color = roleColor(item.role, roles);
-          if (item.type !== "worker")
+          if (item.type === "group")
             return (
-              <g class={cls("sw-node", item.type)} transform={`translate(${x},${y})`}>
-                <circle class="sw-core" r={16} style={{ stroke: color }} />
-                <text class="sw-glyph" dy={5} style={{ fill: color }}>
-                  {item.type === "group" ? GLYPH.done : GLYPH.idle}
+              <g key={item.id} class="sw-node group" transform={`translate(${x},${y})`}>
+                <circle class="sw-core" r={17} style={{ stroke: color }} />
+                <text class="sw-glyph sw-plus" dy={4} style={{ fill: color }}>
+                  +{item.n}
                 </text>
-                <text class="sw-l1" y={32} style={{ fill: color }}>
-                  {item.role}
+                <text class="sw-l1" y={33} style={{ fill: color }}>
+                  {clipLabel(item.role, 16)}
                 </text>
-                <text class="sw-l2" y={46}>
-                  {item.type === "group" ? `${GLYPH.done} ${item.n} done` : `${GLYPH.idle} idle`}
+                <text class="sw-l2" y={47}>
+                  {groupWords(item)}
                 </text>
                 <title>
-                  {item.type === "group"
-                    ? `${item.n} finished ${item.role} worker(s)`
-                    : `${item.role}: no worker spawned in this run yet`}
+                  {`${item.n} more ${item.role} worker(s), folded: ${item.running} running · ${item.stale} stale · ${item.done} done. Every worker is listed in the timeline.`}
                 </title>
+              </g>
+            );
+          if (item.type === "idle")
+            return (
+              <g key={item.id} class="sw-node idle" transform={`translate(${x},${y})`}>
+                <circle class="sw-core" r={16} style={{ stroke: color }} />
+                <text class="sw-glyph" dy={5} style={{ fill: color }}>
+                  {GLYPH.idle}
+                </text>
+                <text class="sw-l1" y={32} style={{ fill: color }}>
+                  {clipLabel(item.role, 16)}
+                </text>
+                <text class="sw-l2" y={46}>
+                  {`${GLYPH.idle} idle`}
+                </text>
+                <title>{`${item.role}: no worker spawned in this run yet`}</title>
               </g>
             );
           const w = item.w;
           const f = flash.get(w.agent_id);
           const task = w.task_id ? `#${w.task_id}` : "";
+          const isPicked = picked === w.agent_id;
+          const toggle = () => onPick(isPicked ? null : w.agent_id);
           return (
             <g
-              class={cls("sw-node worker", `st-${w.status}`, picked === w.agent_id && "picked")}
+              key={item.id}
+              class={cls("sw-node worker", `st-${w.status}`, isPicked && "picked")}
               transform={`translate(${x},${y})`}
-              onClick={() => onPick(picked === w.agent_id ? null : w.agent_id)}
+              // lowercase: on SVG, Preact sets attributes verbatim and `tabIndex` is ignored
+              tabindex={0}
+              role="button"
+              aria-pressed={isPicked}
+              aria-label={`${w.role} worker ${shortAgent(w.agent_id)}, ${w.status}${task ? `, task ${task}` : ""}: ${isPicked ? "show every worker's" : "show only its"} activity`}
+              onClick={toggle}
+              onKeyDown={onActivate(toggle)}
             >
+              <circle class="sw-focus" r={27} />
               {w.status === "running" && live ? (
                 <circle class="sw-halo" r={24} style={{ stroke: color }} />
               ) : null}
@@ -261,7 +357,7 @@ export function Topology({
                 {GLYPH[w.status]}
               </text>
               <text class="sw-l1" y={33}>
-                <tspan style={{ fill: color }}>{w.role}</tspan>
+                <tspan style={{ fill: color }}>{clipLabel(w.role, 8)}</tspan>
                 <tspan class="id">·{shortAgent(w.agent_id)}</tspan>
               </text>
               <text class={cls("sw-l2", `sw-s-${w.status}`)} y={47}>
@@ -273,7 +369,7 @@ export function Topology({
                   `${w.role} worker ${w.agent_id}`,
                   `${w.status}${w.task_id ? ` · task #${w.task_id} ${taskTitle.get(w.task_id) ?? ""}` : ""}`,
                   `${w.tool_calls} tool calls · ${w.errors} errors${w.last_tool ? ` · last ${w.last_tool}` : ""}`,
-                  "click to filter the activity feed",
+                  "click (or Enter) to filter the activity feed",
                 ].join("\n")}
               </title>
             </g>
@@ -296,8 +392,12 @@ export function Topology({
         <span class="sep">·</span>
         <span>
           {GLYPH.running} running · {GLYPH.stale} stale · {GLYPH.done} done · {GLYPH.idle} idle
+          {folded ? " · +N folded" : ""}
         </span>
       </div>
     </div>
   );
 }
+
+/** Re-rendered on new events or a new snapshot, and every second while live. */
+export const Topology = pure(TopologyView);

@@ -48,7 +48,9 @@ Agent swarms (opt-in: .eminiar/swarm.yaml)
   swarm validate               Check swarm.yaml; exit 1 with file:line messages on problems
   swarm sync [--dry-run] [--force]   Regenerate .claude/agents/swarm-*.md from swarm.yaml;
                                --force also overwrites generated files edited by hand
-  swarm list | runs [--limit N] | status [run]   Swarms and roles, past runs, one run
+  swarm list | runs [--limit N] | status [run]   Swarms and roles, past runs, one run (in full)
+  swarm release [--run id] [--agent id] [--role r]   Free stuck workers (default: every worker
+                               quiet for 15 min); their tasks go back to pending
   swarm watch [--run id] [--interval 2]          One NDJSON line per change (for the Monitor
                                tool); exits when the run finishes. --json on the others
 `;

@@ -469,18 +469,25 @@ CREATE TABLE IF NOT EXISTS swarm_notes (
   version INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (run_id, key)
 );
+-- A spawn reservation exists from PreToolUse(Agent) until the worker starts or the Agent
+-- call returns; it may precede any run (the run opens at SubagentStart).
 CREATE TABLE IF NOT EXISTS swarm_spawns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL REFERENCES swarm_runs(id) ON DELETE CASCADE,
+  swarm TEXT NOT NULL,
+  run_id TEXT REFERENCES swarm_runs(id) ON DELETE CASCADE,
   session_id TEXT,
   agent_type TEXT NOT NULL,
   prompt TEXT,
   task_id INTEGER,
+  tool_use_id TEXT,
   ts INTEGER NOT NULL,
   consumed INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS swarm_spawns_type ON swarm_spawns(agent_type, consumed, ts);
+CREATE INDEX IF NOT EXISTS swarm_spawns_swarm ON swarm_spawns(swarm, consumed, ts);
 CREATE INDEX IF NOT EXISTS swarm_spawns_run ON swarm_spawns(run_id, consumed, ts);
+CREATE INDEX IF NOT EXISTS swarm_spawns_tool ON swarm_spawns(tool_use_id);
+CREATE INDEX IF NOT EXISTS swarm_agents_session ON swarm_agents(session_id, status);
 `,
   },
 ];

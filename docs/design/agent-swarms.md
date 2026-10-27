@@ -30,10 +30,10 @@ These shape the design and were checked against the Claude Code docs.
 | Project agents live in `.claude/agents/<name>.md` with frontmatter `name, description, tools, disallowedTools, model, skills, hooks, isolation, maxTurns, effort`. | eminiar **generates** one agent file per swarm role from the YAML. |
 | Frontmatter `hooks` are scoped to that subagent (PreToolUse, PostToolUse, Stop). Plugin agents ignore `hooks`. | Per-role hooks pass through to *project* agent files, which honour them. |
 | Frontmatter `skills` preload the full SKILL.md into the subagent. | Per-role skills pass through. |
-| `SubagentStart` gets `agent_id`, `agent_type` and may return `additionalContext`. It cannot block and does not see the prompt. | The worker brief is injected here. |
+| `SubagentStart` gets `agent_id`, `agent_type` and may return `additionalContext` (at most 10,000 characters). It cannot block and does not see the prompt. | The worker brief is injected here. No task is handed over here: parallel spawns of one role cannot be told apart, so the worker claims the task its prompt names. |
 | PreToolUse / PostToolUse fired inside a subagent carry `agent_id` and `agent_type`. | Activity is attributed to a worker; the `em_swarm` call is stamped with its caller. |
 | PreToolUse `updatedInput` replaces the whole input. | Stamping spreads the original input and adds fields. |
-| PreToolUse on `Agent` sees `subagent_type`, `prompt`, `description`. | Capacity limits are enforced and the spawn is recorded before the worker starts. |
+| PreToolUse on `Agent` sees `subagent_type`, `prompt`, `description` and `tool_use_id`. | Capacity limits are enforced and a slot is reserved before the worker starts; the reservation is released when that Agent call returns. |
 | `SubagentStop` gets `last_assistant_message`. | The worker's result is captured even if it never reported. |
 
 ## Opt-in
@@ -141,26 +141,39 @@ Tables (migration 7, project database):
 
 Rules:
 
-- **Run resolution.** Calls name a run or use the newest active run (of the swarm, preferring
-  the caller's session). A worker spawned with no active run gets an ad-hoc run so its
-  activity is never lost.
+- **Run resolution.** Calls name a run, or use the caller's run (a worker's own run; for
+  the coordinator the newest active run of its session). With several active runs the
+  coordinator must name one. A worker spawned with no active run gets an ad-hoc run, which
+  closes itself when its last worker stops.
 - **Claiming** is atomic (`UPDATE … WHERE status='pending'` inside an immediate transaction).
   A task is eligible when its deps are done and the topology allows it:
   - *hierarchical*: the task's role must be the claimer's role (a task with no role fits anyone);
   - *mesh*: any worker may claim any task; its own role is preferred;
   - *pipeline*: the role's stage must be the earliest stage with unfinished tasks.
-- **Capacity.** PreToolUse on `Agent` for a swarm agent counts running workers plus unconsumed
-  spawn reservations (younger than 2 minutes) in one immediate transaction. Over `max_agents`
-  or the role's `count`, the spawn is denied with the reason. Workers with no activity for 30
-  minutes are treated as stale and stop counting.
-- **Task hand-off.** If the spawn prompt names `task #N`, SubagentStart claims it for the new
-  worker and puts the task in its brief.
+  A failed or blocked dependency is reported as such ("reopen or replace it").
+- **Capacity** is per swarm, across all its runs. PreToolUse on `Agent` for a swarm agent
+  counts live workers plus open spawn reservations in one immediate transaction; over
+  `max_agents` or the role's `count`, the spawn is denied with the reason and the workers
+  holding the slots. A busy ledger denies with "retry" instead of letting the spawn past.
+  Reservations carry the Agent call's `tool_use_id` and are released on its
+  PostToolUse/PostToolUseFailure (or after 2 minutes).
+- **No hand-off at start.** SubagentStart cannot see the spawn prompt, and parallel spawns of
+  one role cannot be matched to their reservations, so the worker claims the task its
+  prompt names (`claim {task:N}`); the brief says so.
+- **Ghost workers.** A worker counts as live while it shows activity (PreToolUse pings it);
+  after 15 minutes of silence it is stale and frees its slot. SessionEnd closes the
+  session's workers, `finish` closes the run's workers, and the coordinator can `release`
+  one (by agent id), a role, or every quiet worker; their tasks go back to pending.
 - **Stop.** SubagentStop marks the worker done and stores its last message. A task it still
-  holds is closed as done with `auto_closed=1` and the message as result; the dashboard and
-  `status` flag it so the coordinator can reopen it.
+  holds (in any run) is closed as done with `auto_closed=1` and the message as result, or
+  released to pending when there is no final message.
 - **Finish.** `finish` closes the run; with `remember: true` it writes an eminiar memory
   `swarm/run-<date>-<slug>` (kind `note`) with the goal, outcome and task results, so the
   knowledge outlives the run and is committed with the code.
+- **Identity.** The PreToolUse hook stamps every `em_swarm` call with the caller (main session
+  or a subagent's `agent_id`/`agent_type`) and the session, signed with a per-machine HMAC
+  secret (`~/.eminiar/swarm.key`). The server trusts only verified stamps; an unverified
+  call (hook skipped or timed out, stale settings install) is read-only.
 
 ## Knowledge awareness
 
@@ -190,10 +203,11 @@ One tool, actions in the style of `em_memory`:
 | `post {key, value}` / `read {key?}` | anyone | shared blackboard |
 | `status {run?}` | anyone | tasks by status, workers, recent events, blackboard keys |
 | `finish {status, summary, remember?}` | coordinator | closes the run |
-| `sync` | anyone | regenerates agent files |
+| `release {agent?, role?}` | coordinator | frees stuck workers and releases their tasks |
+| `sync {force?}` | coordinator | regenerates agent files |
 
-The PreToolUse hook stamps `caller_agent_id` / `caller_agent_type` into `em_swarm` calls made
-by a subagent; without them the caller is the coordinator.
+Workers may also `plan` (follow-up tasks, in any topology); other subagents may only `list`,
+`status`, `read` and `post`.
 
 ## Hooks
 
@@ -201,13 +215,21 @@ by a subagent; without them the caller is the coordinator.
 |---|---|
 | SessionStart | when opted in: auto-sync agent files, one context line naming the swarms and any active run |
 | PreToolUse `Agent` | capacity check and spawn reservation for swarm agents (then normal routing) |
-| PreToolUse `em_swarm` | stamp the caller's `agent_id` / `agent_type` |
-| SubagentStart (new) | register the worker, hand off `task #N`, inject the worker brief |
-| PostToolUse / Failure | record the worker's tool activity (async hook) |
+| PreToolUse `em_swarm` | stamp and sign the caller and session |
+| PreToolUse inside a worker | refresh the worker's liveness |
+| SubagentStart (new, matcher `^swarm-`) | register the worker, inject the worker brief |
+| PostToolUse / Failure | record the worker's tool activity (async hook); release the reservation of a returned Agent call |
 | SubagentStop | close the worker, auto-close its task, record the result |
+| SessionEnd | close the session's workers that never stopped |
 
 `hooks/hooks.json` gains a `SubagentStart` entry and `mcp__.*__em_swarm` in the PreToolUse
-matcher. Hook paths stay non-blocking and never throw.
+matcher; settings installs get the same entries from `eminiar install`/`upgrade`. Hook paths
+stay non-blocking and never throw, and `yaml` is loaded only when a swarm file exists.
+
+Worktree-isolated workers share the main checkout's ledger when the worktree belongs to an
+ordinary repository (its git dir's `commondir` names `<main>/.git`, or `git worktree list`
+names a checkout). Worktrees of bare or separate-git-dir repositories keep their own ledger,
+because git cannot name their main checkout.
 
 ## Skill
 
@@ -240,7 +262,7 @@ is active and the tab is visible.
 
 ## CLI
 
-`eminiar swarm init [--force] | validate | sync | list | status [run] | runs`.
+`eminiar swarm init [--force] | validate | sync [--dry-run] [--force] | list | status [run] | runs | release | watch`.
 
 ## Work plan
 

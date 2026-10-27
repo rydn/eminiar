@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,8 @@ import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import { activeSwarmConfig, resetSwarmConfigCache } from "../../src/swarm/config.js";
 import { coordinationRoot } from "../../src/swarm/hooks.js";
-import { addTasks, callerOf, startRun } from "../../src/swarm/runtime.js";
+import { verifyCaller } from "../../src/swarm/identity.js";
+import { addTasks, callerOf, claimTask, startRun } from "../../src/swarm/runtime.js";
 
 const BASIC = `
 version: 1
@@ -198,7 +200,7 @@ describe("swarm hooks for an opted-in project", () => {
     expect(String(again?.hookSpecificOutput?.additionalContext)).not.toContain("regenerated");
   });
 
-  it("reserves the spawn, hands over task #N at SubagentStart and briefs only once", async () => {
+  it("reserves the spawn, briefs the worker at SubagentStart (once) and lets it claim", async () => {
     const cfg = activeSwarmConfig(root)!;
     const run = startRun(db, cfg, { swarm: "feat", goal: "add a widget", sessionId: "s1" });
     runId = run.id;
@@ -213,6 +215,7 @@ describe("swarm hooks for an opted-in project", () => {
         hook_event_name: "PreToolUse",
         tool_name: "Agent",
         tool_input: { subagent_type: "swarm-feat-coder", description: "widget", prompt },
+        tool_use_id: "toolu_spawn1",
       }),
     );
     expect(spawn?.hookSpecificOutput?.permissionDecision).toBe("allow");
@@ -234,10 +237,30 @@ describe("swarm hooks for an opted-in project", () => {
     expect(started?.hookSpecificOutput?.hookEventName).toBe("SubagentStart");
     const brief = String(started?.hookSpecificOutput?.additionalContext);
     expect(brief.split("\n")[0]).toBe(`## eminiar swarm worker: swarm-feat-coder · run ${run.id}`);
-    expect(brief).toContain(`your task (already claimed for you): #${taskId} implement the widget`);
-    expect(db.swarm.taskGet(taskId)).toMatchObject({ status: "active", agent_id: "agent-w1" });
-    expect(db.swarm.workerGet(run.id, "agent-w1")?.task_id).toBe(taskId);
+    // no hand-over at start: the brief tells the worker to claim the task its prompt names
+    expect(brief).toContain('claim it first with em_swarm {action:"claim", task:N}');
+    expect(brief).toContain(`#${taskId} implement the widget`);
+    expect(db.swarm.taskGet(taskId)).toMatchObject({ status: "pending" });
     expect(db.swarm.spawnsPending(run.id, 0)).toBe(0);
+    claimTask(
+      db,
+      run,
+      cfg.swarms[0]!,
+      callerOf(cfg, { agentId: "agent-w1", agentType: "swarm-feat-coder" }),
+      taskId,
+    );
+    expect(db.swarm.workerGet(run.id, "agent-w1")?.task_id).toBe(taskId);
+    // the Agent call returning has nothing left to release
+    await handlers.PostToolUse!(
+      input(root, {
+        hook_event_name: "PostToolUse",
+        tool_name: "Agent",
+        tool_use_id: "toolu_spawn1",
+        tool_input: { subagent_type: "swarm-feat-coder", prompt },
+        tool_response: {},
+      }),
+    );
+    expect(db.swarm.spawnsPendingOfSwarm("feat", 0)).toBe(0);
 
     // a non-swarm subagent gets nothing from SubagentStart
     expect(
@@ -281,20 +304,34 @@ describe("swarm hooks for an opted-in project", () => {
       );
     const stamped = await call(
       { agent_id: "agent-w1", agent_type: "swarm-feat-coder" },
-      { action: "update", task: taskId, status: "done", caller_agent_id: "agent-forged" },
-    );
-    expect(stamped?.hookSpecificOutput).toEqual({
-      hookEventName: "PreToolUse",
-      permissionDecision: "allow",
-      updatedInput: {
+      {
         action: "update",
         task: taskId,
         status: "done",
-        caller_agent_id: "agent-w1",
-        caller_agent_type: "swarm-feat-coder",
+        caller_agent_id: "agent-forged",
+        caller_kind: "main",
       },
+    );
+    expect(stamped?.hookSpecificOutput?.permissionDecision).toBe("allow");
+    const up = stamped?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+    expect(up).toMatchObject({
+      action: "update",
+      task: taskId,
+      status: "done",
+      caller_kind: "agent",
+      caller_agent_id: "agent-w1",
+      caller_agent_type: "swarm-feat-coder",
     });
-    // the settings-install name form is stamped too
+    expect(verifyCaller(up)).toMatchObject({ verified: true, kind: "agent", agentId: "agent-w1" });
+    // a stamp the model writes itself does not verify
+    expect(
+      verifyCaller({
+        caller_kind: "agent",
+        caller_agent_id: "agent-w1",
+        caller_sig: "00".repeat(32),
+      }).verified,
+    ).toBe(false);
+    // the settings-install name form is stamped too; another server's em_swarm is not
     const settings = await handlers.PreToolUse!(
       input(root, {
         hook_event_name: "PreToolUse",
@@ -305,16 +342,25 @@ describe("swarm hooks for an opted-in project", () => {
       }),
     );
     expect(settings?.hookSpecificOutput?.updatedInput?.caller_agent_id).toBe("agent-w1");
+    const foreign = await handlers.PreToolUse!(
+      input(root, {
+        hook_event_name: "PreToolUse",
+        tool_name: "mcp__evil__em_swarm",
+        agent_id: "agent-w1",
+        agent_type: "swarm-feat-coder",
+        tool_input: { action: "status" },
+      }),
+    );
+    expect(foreign?.hookSpecificOutput?.updatedInput).toBeUndefined();
 
-    // the coordinator cannot pose as a worker
+    // the coordinator cannot pose as a worker: its call is stamped as the main session
     const forged = await call(
       {},
       { action: "finish", status: "done", caller_agent_id: "agent-w1", caller_agent_type: "x" },
     );
-    expect(forged?.hookSpecificOutput?.permissionDecision).toBe("allow");
-    expect(forged?.hookSpecificOutput?.updatedInput).toEqual({ action: "finish", status: "done" });
-    // an honest coordinator call is left alone: no routing, no annotation, no denial
-    expect(await call({}, { action: "status" })).toBeUndefined();
+    const fin = forged?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+    expect(fin.caller_agent_id).toBeUndefined();
+    expect(verifyCaller(fin)).toMatchObject({ verified: true, kind: "main", sessionId: "s1" });
     expect(
       db
         .eventsBySession("s1", { categories: ["routing"] })
@@ -427,6 +473,8 @@ describe("swarm hooks in a git worktree", () => {
   beforeAll(() => {
     main = realpathSync(mkdtempSync(join(tmpdir(), "em-swh-main-")));
     mkdirSync(join(main, ".git", "worktrees", "x"), { recursive: true });
+    // git writes commondir into every linked worktree's gitdir
+    writeFileSync(join(main, ".git", "worktrees", "x", "commondir"), "../..\n");
     mkdirSync(join(main, ".eminiar"), { recursive: true });
     writeFileSync(join(main, ".eminiar", "swarm.yaml"), BASIC);
     // what `git worktree add` leaves: a .git file pointing into <main>/.git/worktrees/<name>
@@ -447,6 +495,39 @@ describe("swarm hooks in a git worktree", () => {
     expect(coordinationRoot(sub)).toBe(sub); // a submodule is its own project
     const plain = realpathSync(mkdtempSync(join(tmpdir(), "em-swh-none-")));
     expect(coordinationRoot(plain)).toBe(plain);
+  });
+
+  it("maps real git worktrees; separate git dirs keep their own ledger", () => {
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+        cwd,
+        stdio: "ignore",
+      });
+    try {
+      execFileSync("git", ["--version"], { stdio: "ignore" });
+    } catch {
+      return; // no git on this machine
+    }
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "em-swh-sep-")));
+    const repo = join(base, "repo");
+    mkdirSync(repo);
+    git(repo, "init", "-q", "--separate-git-dir", join(base, "sep.git"));
+    writeFileSync(join(repo, "a.txt"), "a");
+    git(repo, "add", ".");
+    git(repo, "commit", "-qm", "init");
+    git(repo, "worktree", "add", "-q", join(base, "w"));
+    // git cannot name the main checkout of a separate-git-dir repository, so the worktree
+    // keeps its own ledger instead of pointing at the git dir (documented limitation)
+    expect(coordinationRoot(join(base, "w"))).toBe(join(base, "w"));
+    // a worktree of an ordinary repository maps to the main checkout
+    const plainRepo = join(base, "plain");
+    mkdirSync(plainRepo);
+    git(plainRepo, "init", "-q");
+    writeFileSync(join(plainRepo, "a.txt"), "a");
+    git(plainRepo, "add", ".");
+    git(plainRepo, "commit", "-qm", "init");
+    git(plainRepo, "worktree", "add", "-q", join(base, "pw"));
+    expect(coordinationRoot(join(base, "pw"))).toBe(plainRepo);
   });
 
   it("registers an isolated worker in the main checkout's ledger", async () => {

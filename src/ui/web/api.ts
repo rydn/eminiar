@@ -667,7 +667,10 @@ export type {
   Topology as SwarmTopology,
   WorkerStatus as SwarmWorkerStatus,
 };
-export type SwarmTask = TaskRow;
+export type SwarmTask = TaskRow & {
+  /** In a run snapshot: `detail` / `result` were cut; GET /api/swarm/task has them whole. */
+  clipped?: true;
+};
 export type SwarmNote = NoteRow;
 export type SwarmEvent = SwarmEventRow;
 export type SwarmIo = "read" | "write" | "exec" | "swarm" | "other";
@@ -738,7 +741,11 @@ export interface SwarmOverview {
   /** Generated agent files the swarm file no longer produces. */
   orphans: Array<{ path: string; agentType: string; reason: string | null }>;
   syncNeeded: boolean;
+  /** Active runs first (always all of them), then the newest others up to `runsLimit`. */
   runs: SwarmRunSummary[];
+  /** Older runs were left out (newer servers). */
+  runsMore?: boolean;
+  runsLimit?: number;
   /** The starter file, when there is no swarm file yet. */
   starter?: string;
   now: number;
@@ -770,10 +777,14 @@ export interface SwarmSegment {
 }
 export interface SwarmRunDetail {
   run: RunRow;
+  /** Every task, or with `tasksPartial` only those updated since `tasksSince`. */
   tasks: SwarmTask[];
+  /** How many tasks the run has (newer servers). */
+  taskCount?: number;
+  tasksPartial?: boolean;
   workers: SwarmWorkerUi[];
   notes: SwarmNote[];
-  /** The latest events, oldest first. */
+  /** The latest events, oldest first (none when asked with `events=0`). */
   events: SwarmEvent[];
   counts: {
     tasks: Record<TaskStatus, number>;
@@ -793,7 +804,10 @@ export interface SwarmRunDetail {
   timeline: {
     start: number;
     end: number;
+    /** The timeline is drawn from the newest events only; the oldest were cut. */
     cut: boolean;
+    /** With `cut`: the time of the oldest event drawn. */
+    from?: number | null;
     workers: Array<{
       agent_id: string;
       role: string;
@@ -813,6 +827,16 @@ export interface SwarmEventsPage {
   last: number;
   more: boolean;
   now: number;
+}
+export interface SwarmFinishResult {
+  run: RunRow;
+  /** The memory written for the run (with `remember`). */
+  memory: string | null;
+  /** The run closed but its memory could not be written (newer servers). */
+  memoryError?: string | null;
+}
+export interface SwarmTaskFull {
+  task: SwarmTask;
 }
 export interface SwarmSyncResult {
   actions: Array<{ agentType: string; path: string; action: string; reason?: string }>;

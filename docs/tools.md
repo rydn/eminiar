@@ -126,24 +126,30 @@ See [Knowledge graph and history](knowledge-graph.md).
 
 | Tool | Parameters | Use for |
 |---|---|---|
-| `em_swarm` | `action`, `swarm`, `goal`, `run`, `tasks`, `task`, `status`, `result`, `key`, `value`, `summary`, `remember` | Coordinate an opt-in agent swarm: runs, a task board, workers and a shared blackboard |
+| `em_swarm` | `action`, `swarm`, `goal`, `run`, `tasks`, `task`, `status`, `result`, `key`, `value`, `summary`, `remember`, `agent`, `role`, `force` | Coordinate an opt-in agent swarm: runs, a task board, workers and a shared blackboard |
 
 | Action | Who | Does |
 |---|---|---|
 | `list` | anyone | Swarms, roles, agent file state, active runs |
 | `start` | coordinator | Opens a run of `swarm` for `goal` and returns the coordinator brief |
-| `plan` | anyone | Adds `tasks: [{key, title, detail, role, deps, files}]` |
-| `claim` | worker | Claims `task` (or the next eligible one) and returns its brief |
-| `update` | worker or coordinator | Sets a task to `done`, `failed`, `blocked`, or `pending` to reopen |
-| `post`, `read` | anyone | The run's shared blackboard |
-| `status` | anyone | Tasks by status, workers, blackboard keys, recent events |
-| `finish` | coordinator | Closes the run; `remember: true` writes the outcome as a memory |
-| `sync` | anyone | Regenerates `.claude/agents/swarm-*.md` from `.eminiar/swarm.yaml`; `force: true` overwrites generated files edited by hand |
+| `plan` | coordinator, workers | Adds `tasks: [{key, title, detail, role, deps, files}]`; any other key is an error |
+| `claim` | workers, coordinator | Claims `task` (or the next eligible one) and returns its brief |
+| `update` | the task's holder, coordinator | Sets a task to `done`, `failed`, `blocked`, or `pending` to reopen |
+| `post` | coordinator, workers, other subagents | Writes a note to the run's shared blackboard |
+| `read` | anyone | One note by `key`, or every key followed by the values |
+| `status` | anyone | The next step, tasks by status, workers, blackboard keys, recent events |
+| `finish` | coordinator | Closes the run and its running workers; `remember: true` writes the outcome as a memory |
+| `release` | coordinator | Frees stuck workers (`agent` id or prefix, every worker of a `role`, or with neither every worker quiet for 15 minutes); their tasks go back to pending |
+| `sync` | coordinator | Regenerates `.claude/agents/swarm-*.md` from `.eminiar/swarm.yaml`; `force: true` overwrites generated files edited by hand |
 
-Without `.eminiar/swarm.yaml` the tool only explains how to opt in. The `caller_agent_id` and
-`caller_agent_type` fields are set by eminiar's PreToolUse hook to tell workers from the
-coordinator; Claude leaves them empty. Subagents that are not swarm workers can only `list`,
-`status`, `read` and `post`. See [Agent swarms](swarms.md).
+Without `.eminiar/swarm.yaml` the tool only explains how to opt in. Calls without `run` go to
+the one active run of this session (a worker's: its own run; `claim`/`update` with `task`: that
+task's run); when several are active the tool lists them and asks for `run`. The `caller_*`
+fields are a signed stamp that eminiar's PreToolUse hook adds to tell the coordinator from
+workers; Claude leaves them empty, and a call without a valid stamp can only `list`, `status`
+and `read` (settings installed by an eminiar older than 0.12 need `eminiar upgrade`). Subagents
+that are not swarm workers can only `list`, `status`, `read` and `post`. See
+[Agent swarms](swarms.md).
 
 ## Housekeeping
 

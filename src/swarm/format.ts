@@ -9,6 +9,7 @@ import type {
   SwarmEventRow,
   TaskRow,
   TaskStatus,
+  WorkerRow,
   WorkerStatus,
 } from "./types.js";
 
@@ -132,13 +133,20 @@ export function runListItem(run: RunRow, tasks: TaskRow[], workers: WorkerView[]
   };
 }
 
-function runLine(r: RunListItem, now: number): string {
+function runLine(r: RunListItem, now: number, sessionId?: string | undefined): string {
   const { run } = r;
-  return `${RUN_GLYPH[run.status]} ${run.id} ${run.swarm} ${run.status} · tasks ${r.done}/${r.total} done · ${r.running} running · started ${ago(run.created_at, now)}${
+  return `${RUN_GLYPH[run.status]} ${run.id} ${run.swarm} ${run.status}${
+    sessionId && run.session_id === sessionId ? " (this session)" : ""
+  } · tasks ${r.done}/${r.total} done · ${r.running} running · started ${ago(run.created_at, now)}${
     run.status === "active"
       ? ` · updated ${ago(run.updated_at, now)}`
       : ` · ended ${ago(run.ended_at, now)}`
   } — ${clip(firstLine(run.goal), 100)}`;
+}
+
+/** `20261028-abcdef (feature) "add rate limiting"`: how errors and warnings name a run. */
+export function runRef(run: RunRow): string {
+  return `${run.id} (${run.swarm}) "${clip(firstLine(run.goal), 80)}"`;
 }
 
 /** Swarms, their roles and agent files, plus the active runs. */
@@ -146,7 +154,7 @@ export function formatSwarmList(
   config: SwarmConfig,
   plan: SyncAction[],
   active: RunListItem[],
-  opts: { swarm?: string | undefined; now?: number } = {},
+  opts: { swarm?: string | undefined; now?: number; sessionId?: string | undefined } = {},
 ): string {
   const now = opts.now ?? Date.now();
   const byAgent = new Map(plan.map((a) => [a.agentType, a]));
@@ -196,7 +204,7 @@ export function formatSwarmList(
   lines.push("");
   if (active.length) {
     lines.push("Active runs:");
-    for (const r of active.slice(0, 10)) lines.push(`  ${runLine(r, now)}`);
+    for (const r of active.slice(0, 10)) lines.push(`  ${runLine(r, now, opts.sessionId)}`);
   } else lines.push("No active run.");
   lines.push(
     'Start one: em_swarm {action:"start", swarm, goal}; the em-swarm skill has the coordinator playbook.',
@@ -249,10 +257,22 @@ export function formatSync(
 const GROUP_ORDER: TaskStatus[] = ["active", "blocked", "failed", "pending", "done"];
 const PER_GROUP = 12;
 
+/**
+ * The worker holding an active task, when it went quiet (stale) or already stopped: the
+ * task will not move until someone releases it. Holders registered in another run come
+ * from `snap.holders`.
+ */
+function quietHolder(t: TaskRow, workers: Map<string, WorkerView>): WorkerView | undefined {
+  if (t.status !== "active" || !t.agent_id) return undefined;
+  const w = workers.get(t.agent_id);
+  return w && (w.status === "stale" || w.status === "done") ? w : undefined;
+}
+
 function taskLine(
   t: TaskRow,
   byId: Map<number, TaskRow>,
   workers: Map<string, WorkerView>,
+  now: number,
 ): string {
   const parts = [`#${t.id} ${clip(t.title, 120)}${t.role ? ` (${t.role})` : ""}`];
   if (t.agent_id && t.status !== "pending") parts.push(holderName(t.agent_id, workers));
@@ -265,6 +285,11 @@ function taskLine(
       `files ${t.files.slice(0, 3).join(", ")}${t.files.length > 3 ? ` +${t.files.length - 3}` : ""}`,
     );
   let line = parts.join(" · ");
+  const quiet = quietHolder(t, workers);
+  if (quiet?.status === "stale")
+    line += ` · ⚠ holder quiet ${Math.max(1, Math.round((now - quiet.last_ts) / 60_000))}m — release with em_swarm {action:"release", agent:"${shortAgent(quiet.agent_id)}"} or update status:pending`;
+  else if (quiet)
+    line += ` · ⚠ holder stopped — reopen with em_swarm {action:"update", task:${t.id}, status:"pending"}`;
   if (t.auto_closed) line += " · ⚠ auto-closed: the worker never reported; check the result";
   if (t.result && t.status !== "active" && t.status !== "pending")
     line += ` — ${clip(firstLine(t.result), 140)}`;
@@ -298,7 +323,12 @@ function nextStep(snap: RunSnapshot): string | undefined {
   const t = snap.counts.tasks;
   const open = t.pending + t.active + t.blocked;
   const running = snap.counts.workers.running;
+  const stale = snap.counts.staleHeld;
   const hints: string[] = [];
+  if (stale)
+    hints.push(
+      `${stale} active task(s) are held by a worker that went quiet or stopped: em_swarm {action:"release"} frees every quiet worker (agent or role picks one), or reopen a task with em_swarm {action:"update", task, status:"pending"}.`,
+    );
   if (snap.counts.autoClosed)
     hints.push(
       `${snap.counts.autoClosed} task(s) were auto-closed; check them and reopen with em_swarm {action:"update", task, status:"pending"} if the work is not done.`,
@@ -309,24 +339,38 @@ function nextStep(snap: RunSnapshot): string | undefined {
     hints.push(
       'Every task is closed: review the results, then em_swarm {action:"finish", status:"done", summary, remember:true}.',
     );
-  else if (!running && !t.active && t.pending)
+  else if (!running && t.active <= stale && t.pending)
     hints.push(
-      "No worker is running: spawn workers for the claimable tasks (prompt naming task #N).",
+      'No worker is running: spawn workers for the claimable tasks (Agent tool, a prompt naming "task #N"; the worker claims it).',
     );
   if (t.blocked)
     hints.push(`${t.blocked} task(s) blocked: read their results and unblock or re-plan.`);
   return hints.length ? `Next: ${hints.join(" ")}` : undefined;
 }
 
-/** A run's state: tasks by status, workers, blackboard keys and the latest events. */
+/**
+ * A run's state: the next step first, then tasks by status, workers, blackboard keys and the
+ * latest events, so a capped text loses the least useful part. `max` caps the text (the CLI
+ * passes Infinity and prints everything); `lead` lines go right under the header.
+ */
 export function formatRunStatus(
   snap: RunSnapshot,
-  opts: { now?: number; events?: number; perGroup?: number } = {},
+  opts: {
+    now?: number;
+    events?: number;
+    perGroup?: number;
+    workers?: number;
+    max?: number;
+    lead?: string[];
+  } = {},
 ): string {
   const now = opts.now ?? Date.now();
   const perGroup = opts.perGroup ?? PER_GROUP;
+  const maxWorkers = opts.workers ?? 12;
   const { run } = snap;
-  const workers = new Map(snap.workers.map((w) => [w.agent_id, w]));
+  const workers = new Map(
+    [...(snap.holders ?? []), ...snap.workers].map((w) => [w.agent_id, w] as const),
+  );
   const byId = new Map(snap.tasks.map((t) => [t.id, t]));
   const c = snap.counts;
   const lines = [
@@ -335,20 +379,29 @@ export function formatRunStatus(
         ? `updated ${ago(run.updated_at, now)}`
         : `ended ${ago(run.ended_at, now)}`
     }`,
+    ...(opts.lead ?? []),
     `Goal: ${clip(run.goal, 400)}`,
   ];
   if (run.summary) lines.push(`Summary: ${clip(run.summary, 600)}`);
+  const next = nextStep(snap);
+  if (next) lines.push(next);
 
   const taskTally = GROUP_ORDER.filter((s) => c.tasks[s]).map((s) => `${c.tasks[s]} ${s}`);
+  if (c.staleHeld) taskTally.push(`${c.staleHeld} held by a quiet worker`);
   lines.push("", `Tasks (${snap.tasks.length}): ${taskTally.join(" · ") || "none planned"}`);
   for (const status of GROUP_ORDER) {
     const group = snap.tasks
       .filter((t) => t.status === status)
-      // auto-closed tasks need a look, so they lead their group
-      .sort((a, b) => Number(b.auto_closed) - Number(a.auto_closed) || a.id - b.id);
+      // auto-closed tasks and tasks stuck with a quiet holder need a look, so they lead
+      .sort(
+        (a, b) =>
+          Number(!!quietHolder(b, workers)) - Number(!!quietHolder(a, workers)) ||
+          Number(b.auto_closed) - Number(a.auto_closed) ||
+          a.id - b.id,
+      );
     if (!group.length) continue;
     lines.push(`${TASK_GLYPH[status]} ${status}`);
-    for (const t of group.slice(0, perGroup)) lines.push(`  ${taskLine(t, byId, workers)}`);
+    for (const t of group.slice(0, perGroup)) lines.push(`  ${taskLine(t, byId, workers, now)}`);
     if (group.length > perGroup) lines.push(`  … ${group.length - perGroup} more ${status}`);
   }
 
@@ -365,8 +418,8 @@ export function formatRunStatus(
   const shown = [...snap.workers].sort(
     (a, b) => rank[a.status] - rank[b.status] || b.last_ts - a.last_ts,
   );
-  for (const w of shown.slice(0, 12)) lines.push(`  ${workerLine(w, now)}`);
-  if (shown.length > 12) lines.push(`  … ${shown.length - 12} more worker(s)`);
+  for (const w of shown.slice(0, maxWorkers)) lines.push(`  ${workerLine(w, now)}`);
+  if (shown.length > maxWorkers) lines.push(`  … ${shown.length - maxWorkers} more worker(s)`);
 
   if (snap.notes.length)
     lines.push(
@@ -382,9 +435,44 @@ export function formatRunStatus(
     lines.push("", "Recent events (oldest first):");
     for (const e of events) lines.push(eventLine(e, now));
   }
-  const next = nextStep(snap);
-  if (next) lines.push("", next);
-  return capOutput(lines.join("\n"), OUTPUT_MAX, `eminiar swarm status ${run.id} shows the rest`);
+  return capOutput(
+    lines.join("\n"),
+    opts.max ?? OUTPUT_MAX,
+    `\`eminiar swarm status ${run.id}\` prints all of it`,
+  );
+}
+
+/** What `release` did: the workers it closed, or why none matched. */
+export function formatReleased(
+  run: RunRow,
+  released: Array<Pick<WorkerRow, "agent_id" | "role" | "task_id">>,
+  running: Array<Pick<WorkerRow, "agent_id" | "role" | "last_ts">>,
+  opts: { agent?: string | undefined; role?: string | undefined; staleMinutes: number },
+  now = Date.now(),
+): string {
+  if (released.length)
+    return `Released ${released.length} worker(s) of run ${run.id}: ${released
+      .map(
+        (w) =>
+          `${w.role}@${shortAgent(w.agent_id)}${w.task_id !== null ? ` (task #${w.task_id} back to pending)` : ""}`,
+      )
+      .join(
+        ", ",
+      )}. They no longer count against capacity; spawn a worker for each reopened task (a prompt naming "task #N").`;
+  const why = opts.agent
+    ? `no running worker's id starts with "${opts.agent}"`
+    : opts.role
+      ? `no ${opts.role} worker is running`
+      : `no running worker has been quiet for ${opts.staleMinutes} minutes`;
+  const live = running.length
+    ? ` Running: ${running
+        .slice(0, 8)
+        .map((w) => `${w.role}@${shortAgent(w.agent_id)} (last seen ${ago(w.last_ts, now)})`)
+        .join(
+          ", ",
+        )}${running.length > 8 ? ", …" : ""}; name one with agent:"<id>" or role:"<role>".`
+    : " No worker of the run is running.";
+  return `Nothing released in run ${run.id}: ${why}.${live}`;
 }
 
 // --- blackboard ---------------------------------------------------------------------------
@@ -393,10 +481,19 @@ export function formatNote(n: NoteRow, now = Date.now()): string {
   return `${n.key} (v${n.version}, by ${n.author ?? "n/a"}, ${ago(n.ts, now)}):\n${n.value}`;
 }
 
-/** Every note of a run, each value clipped so the whole board stays readable. */
+/**
+ * Every note of a run: all keys first (so a capped text still names every note), then the
+ * values, each clipped so the whole board stays readable.
+ */
 export function formatNotes(runId: string, notes: NoteRow[], now = Date.now(), each = 600): string {
   if (!notes.length)
     return `The blackboard of run ${runId} is empty; share a finding with em_swarm {action:"post", key, value}.`;
+  const keys = clip(
+    notes
+      .map((n) => `${n.key} (v${n.version}, ${n.author ?? "n/a"}, ${ago(n.ts, now)})`)
+      .join(" · "),
+    2500,
+  );
   const body = notes
     .map((n) => {
       const v = n.value.trim();
@@ -408,7 +505,7 @@ export function formatNotes(runId: string, notes: NoteRow[], now = Date.now(), e
     })
     .join("\n\n");
   return capOutput(
-    `Blackboard of run ${runId} (${notes.length} note(s), newest first):\n\n${body}`,
+    `Blackboard of run ${runId} (${notes.length} note(s), newest first). Keys: ${keys}\nRead one in full with em_swarm {action:"read", key}.\n\n${body}`,
     OUTPUT_MAX,
     'read one key at a time with em_swarm {action:"read", key}',
   );
@@ -426,6 +523,9 @@ export interface WatchLine {
   tasks: Record<TaskStatus, number>;
   workers: Record<WorkerStatus, number>;
   auto_closed: number;
+  /** Active tasks held by a worker that went quiet or stopped. */
+  stale_held: number;
+  /** The newest event that moves the run (never a worker's tool call). */
   last_event: {
     id: number;
     kind: string;
@@ -436,17 +536,45 @@ export interface WatchLine {
 }
 
 /**
+ * Events that count as a change for `watch`. Tool calls (`tool`, `tool_error`) are the bulk
+ * of the feed and would wake the Monitor tool on every worker step; `spawn` is followed by
+ * `start` a moment later.
+ */
+const WATCH_EVENT_KINDS = new Set<SwarmEventRow["kind"]>([
+  "run_start",
+  "plan",
+  "claim",
+  "update",
+  "post",
+  "start",
+  "stop",
+  "auto_close",
+  "deny",
+  "run_finish",
+]);
+
+export const isWatchEvent = (e: Pick<SwarmEventRow, "kind">): boolean =>
+  WATCH_EVENT_KINDS.has(e.kind);
+
+/**
  * One watch tick. `prevKey` is the key the previous tick returned (undefined on the first
- * tick). A line comes back only when something changed: the first tick (`swarm.snapshot`),
- * a change while work is in flight (`swarm.changed`), a change that leaves no worker
- * running and no task active (`swarm.idle`, the coordinator's turn), and the end of the
- * run (`swarm.finished`).
+ * tick). `lastEvent` is the newest event that counts (`isWatchEvent`); when omitted it is
+ * looked up in `snap.events`. The key is built from the task and worker counts and that
+ * event only, so worker tool calls never produce a line. A line comes back on the first
+ * tick (`swarm.snapshot`, or `swarm.finished` for a closed run), on a change while work is in
+ * flight (`swarm.changed`), on a change that leaves no worker running and no task active
+ * except ones held by quiet workers (`swarm.idle`, the coordinator's turn), and at the end
+ * of the run (`swarm.finished`).
  */
 export function watchStep(
   prevKey: string | undefined,
   snap: RunSnapshot,
+  lastEvent?: SwarmEventRow | null,
 ): { key: string; line?: WatchLine } {
-  const last = snap.events[snap.events.length - 1];
+  const last =
+    lastEvent !== undefined
+      ? lastEvent
+      : ([...snap.events].reverse().find((e) => isWatchEvent(e)) ?? null);
   const body: Omit<WatchLine, "type"> = {
     run: snap.run.id,
     swarm: snap.run.swarm,
@@ -454,6 +582,7 @@ export function watchStep(
     tasks: { ...snap.counts.tasks },
     workers: { ...snap.counts.workers },
     auto_closed: snap.counts.autoClosed,
+    stale_held: snap.counts.staleHeld,
     last_event: last
       ? {
           id: last.id,
@@ -464,10 +593,17 @@ export function watchStep(
         }
       : null,
   };
-  const key = JSON.stringify(body);
+  const key = JSON.stringify({
+    status: body.status,
+    tasks: body.tasks,
+    workers: body.workers,
+    auto_closed: body.auto_closed,
+    stale_held: body.stale_held,
+    event: last?.id ?? null,
+  });
   if (snap.run.status !== "active") return { key, line: { type: "swarm.finished", ...body } };
   if (prevKey === undefined) return { key, line: { type: "swarm.snapshot", ...body } };
   if (key === prevKey) return { key };
-  const idle = body.workers.running === 0 && body.tasks.active === 0;
+  const idle = body.workers.running === 0 && body.tasks.active <= body.stale_held;
   return { key, line: { type: idle ? "swarm.idle" : "swarm.changed", ...body } };
 }

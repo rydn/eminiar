@@ -381,24 +381,36 @@ export class SqliteSwarmStore implements SwarmStore {
   // --- spawn reservations -----------------------------------------------------------
 
   spawnAdd(s: {
-    run_id: string;
+    swarm: string;
+    run_id?: string | null | undefined;
     session_id?: string | null | undefined;
     agent_type: string;
     prompt?: string | null | undefined;
     task_id?: number | null | undefined;
+    tool_use_id?: string | null | undefined;
   }): number {
     const info = this.prep(
-      `INSERT INTO swarm_spawns (run_id, session_id, agent_type, prompt, task_id, ts)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO swarm_spawns (swarm, run_id, session_id, agent_type, prompt, task_id, tool_use_id, ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      s.run_id,
+      s.swarm,
+      s.run_id ?? null,
       s.session_id ?? null,
       s.agent_type,
       s.prompt ?? null,
       s.task_id ?? null,
+      s.tool_use_id ?? null,
       Date.now(),
     );
     return Number(info.lastInsertRowid);
+  }
+
+  spawnConsumeByToolUse(toolUseId: string): boolean {
+    return (
+      this.prep("UPDATE swarm_spawns SET consumed = 1 WHERE tool_use_id = ? AND consumed = 0").run(
+        toolUseId,
+      ).changes > 0
+    );
   }
 
   spawnTake(agentType: string, sinceTs: number, sessionId?: string | null): SpawnRow | undefined {
@@ -447,9 +459,8 @@ export class SqliteSwarmStore implements SwarmStore {
 
   spawnsPendingOfSwarm(swarm: string, sinceTs: number, agentType?: string): number {
     const r = this.prep(
-      `SELECT COUNT(*) n FROM swarm_spawns s JOIN swarm_runs r ON r.id = s.run_id
-       WHERE r.swarm = ? AND r.status = 'active' AND s.consumed = 0 AND s.ts >= ?
-         AND (? IS NULL OR s.agent_type = ?)`,
+      `SELECT COUNT(*) n FROM swarm_spawns
+       WHERE swarm = ? AND consumed = 0 AND ts >= ? AND (? IS NULL OR agent_type = ?)`,
     ).get(swarm, sinceTs, agentType ?? null, agentType ?? null) as { n: number };
     return r.n;
   }
@@ -459,6 +470,29 @@ export class SqliteSwarmStore implements SwarmStore {
       `SELECT a.* FROM swarm_agents a JOIN swarm_runs r ON r.id = a.run_id
        WHERE r.swarm = ? AND a.status = 'running' AND a.last_ts >= ?`,
     ).all(swarm, sinceTs) as WorkerRow[];
+  }
+
+  tasksHeldBy(agentId: string): TaskRow[] {
+    return (
+      this.prep(
+        "SELECT * FROM swarm_tasks WHERE agent_id = ? AND status = 'active' ORDER BY id",
+      ).all(agentId) as Row[]
+    ).map(toTask);
+  }
+
+  workersOfSession(sessionId: string): WorkerRow[] {
+    return this.prep(
+      "SELECT * FROM swarm_agents WHERE session_id = ? AND status = 'running' ORDER BY spawned_at",
+    ).all(sessionId) as WorkerRow[];
+  }
+
+  eventsPrune(runId: string, keep: number): number {
+    const cut = this.prep(
+      "SELECT id FROM swarm_events WHERE run_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?",
+    ).get(runId, Math.max(0, keep - 1)) as { id: number } | undefined;
+    if (!cut) return 0;
+    return this.prep("DELETE FROM swarm_events WHERE run_id = ? AND id < ?").run(runId, cut.id)
+      .changes;
   }
 
   workerPing(runId: string, agentId: string): void {

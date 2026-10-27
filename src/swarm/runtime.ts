@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import type { ProjectContext } from "../context.js";
 import { relOf, slugify, write as writeMemory } from "../memory/store.js";
@@ -21,11 +21,13 @@ import type {
 } from "./types.js";
 
 /** A running worker silent for this long no longer counts against capacity. */
-export const STALE_MS = 30 * 60_000;
+export const STALE_MS = 15 * 60_000;
 /** A spawn reservation counts against capacity this long before SubagentStart consumes it. */
 export const SPAWN_TTL_MS = 2 * 60_000;
 /** SubagentStart may match a reservation this old (slow starts, permission prompts). */
 const SPAWN_MATCH_MS = 10 * 60_000;
+/** Events kept per run; older ones are pruned as workers add more. */
+const EVENTS_KEEP = 5000;
 /** Repeated identical denials within this window update one feed event instead of adding more. */
 const DENY_COLLAPSE_MS = 5 * 60_000;
 
@@ -401,12 +403,12 @@ export function claimTask(
   });
 }
 
-/** Active tasks whose holder is a worker that went quiet or stopped. */
+/** Active tasks whose holder is a worker that went quiet or stopped (looked up across runs). */
 function staleHeld(db: StorageAdapter, run: RunRow, all: TaskRow[], now = Date.now()): TaskRow[] {
   const workers = new Map(db.swarm.workers(run.id).map((w) => [w.agent_id, w]));
   return all.filter((t) => {
     if (t.status !== "active" || !t.agent_id || t.agent_id === COORDINATOR) return false;
-    const w = workers.get(t.agent_id);
+    const w = workers.get(t.agent_id) ?? db.swarm.workerFind(t.agent_id);
     if (!w) return false;
     return w.status === "done" || now - w.last_ts >= STALE_MS;
   });
@@ -423,7 +425,7 @@ function nothingToClaim(
   const pending = all.filter((t) => t.status === "pending");
   const stale = staleHeld(db, run, all);
   const staleNote = stale.length
-    ? ` ${stale.map((t) => `#${t.id}`).join(", ")} ${stale.length === 1 ? "is" : "are"} held by a worker that went quiet; the coordinator can release ${stale.length === 1 ? "it" : "them"} with em_swarm {action:"update", task, status:"pending"}.`
+    ? ` ${stale.map((t) => `#${t.id}`).join(", ")} ${stale.length === 1 ? "is" : "are"} held by a worker that went quiet; the coordinator can free ${stale.length === 1 ? "it" : "them"} with em_swarm {action:"release"} (or {action:"release", agent}).`
     : "";
   if (!pending.length) {
     const active = all.filter((t) => t.status === "active").length;
@@ -546,15 +548,20 @@ export function finishRun(
   db.swarm.immediate(() => {
     requireActive(db, run);
     const active = db.swarm.tasks(run.id).filter((t) => t.status === "active").length;
-    const running = db.swarm
-      .workers(run.id)
-      .filter((w) => workerStatus(w, now) === "running").length;
+    // The coordinator is done with the run: its workers stop counting against capacity
+    // (a worker that crashed without SubagentStop would otherwise hold its slot). Spawns
+    // still starting keep their reservations, so capacity holds for them.
+    const running = db.swarm.workers(run.id).filter((w) => w.status === "running");
+    for (const w of running)
+      db.swarm.workerUpdate(run.id, w.agent_id, {
+        status: "done",
+        ended_at: now,
+        summary: w.summary ?? "closed when the run finished",
+      });
     db.swarm.runUpdate(run.id, { status: opts.status, summary, ended_at: now });
-    // Spawns reserved for this run and not started yet must not count against later runs.
-    db.swarm.spawnsVoid(run.id);
     const left = [
       active ? `${active} task(s) still active` : "",
-      running ? `${running} worker(s) still running` : "",
+      running.length ? `${running.length} worker(s) still running were closed` : "",
     ].filter(Boolean);
     db.swarm.eventAdd({
       run_id: run.id,
@@ -603,7 +610,15 @@ function rememberRun(ctx: ProjectContext, db: StorageAdapter, run: RunRow): stri
     kind: "note",
     content: lines.join("\n"),
     tags: ["swarm", run.swarm],
-    related: [...new Set(tasks.flatMap((t) => t.files))].slice(0, 20),
+    related: [...new Set(tasks.flatMap((t) => t.files))]
+      .filter((f) => {
+        try {
+          return statSync(join(ctx.root, f)).isFile();
+        } catch {
+          return false;
+        }
+      })
+      .slice(0, 20),
   });
   return r.name;
 }
@@ -613,7 +628,8 @@ function rememberRun(ctx: ProjectContext, db: StorageAdapter, run: RunRow): stri
 export type SpawnDecision =
   | {
       decision: "allow";
-      run: RunRow;
+      /** The run the spawn will likely join; undefined when none is active yet. */
+      run?: RunRow | undefined;
       role: RoleSpec;
       swarm: SwarmSpec;
       taskId?: number | undefined;
@@ -634,16 +650,30 @@ export function taskRef(prompt: string | undefined): number | undefined {
 
 const isLive = (w: WorkerRow, now: number) => w.status === "running" && now - w.last_ts < STALE_MS;
 
-/** Record a denial, folding repeats of the same role into one feed event with a count. */
-function denyEvent(db: StorageAdapter, runId: string, role: string, reason: string): void {
+type DenyType = "max_agents" | "count";
+
+/** Record a denial, folding repeats of the same kind for the same role into one event. */
+function denyEvent(
+  db: StorageAdapter,
+  runId: string,
+  role: string,
+  type: DenyType,
+  reason: string,
+): void {
   const last = db.swarm.eventLast(runId);
   const now = Date.now();
-  if (last && last.kind === "deny" && last.role === role && now - last.ts < DENY_COLLAPSE_MS) {
+  if (
+    last &&
+    last.kind === "deny" &&
+    last.role === role &&
+    last.payload?.type === type &&
+    now - last.ts < DENY_COLLAPSE_MS
+  ) {
     const count = Number(last.payload?.count ?? 1) + 1;
     db.swarm.eventUpdate(last.id, {
       ts: now,
       text: `${reason} (×${count})`,
-      payload: { count, reason },
+      payload: { count, type, reason },
     });
     return;
   }
@@ -652,14 +682,29 @@ function denyEvent(db: StorageAdapter, runId: string, role: string, reason: stri
     kind: "deny",
     role,
     text: reason,
-    payload: { count: 1, reason },
+    payload: { count: 1, type, reason },
   });
+}
+
+function describeBusy(db: StorageAdapter, workers: WorkerRow[], now: number): string {
+  if (!workers.length) return "";
+  const shown = workers
+    .slice(0, 4)
+    .map((w) => {
+      const run = db.swarm.runGet(w.run_id);
+      const where = run && run.status !== "active" ? `, run ${w.run_id} ${run.status}` : "";
+      return `${w.role}@${w.agent_id.replace(/^agent-/, "").slice(0, 8)} (last seen ${Math.round((now - w.last_ts) / 60_000)}m ago${where})`;
+    })
+    .join(", ");
+  return ` Running: ${shown}${workers.length > 4 ? ", …" : ""}; the coordinator can free a stuck one with em_swarm {action:"release", agent}.`;
 }
 
 /**
  * PreToolUse on Agent for a swarm agent: check capacity and reserve a slot, atomically
- * across hook processes. Capacity is per swarm: live workers of every run count (a finished
- * run's workers may still be running). Undefined for agent types that are not swarm workers.
+ * across hook processes. Capacity is per swarm: live workers of every run and every open
+ * reservation count. Nothing is created for a spawn that may never happen: the run opens
+ * at SubagentStart, and the reservation is released when the Agent call returns (or after
+ * SPAWN_TTL_MS). Undefined for agent types that are not swarm workers.
  */
 export function reserveSpawn(
   db: StorageAdapter,
@@ -669,6 +714,7 @@ export function reserveSpawn(
     prompt?: string | undefined;
     description?: string | undefined;
     sessionId?: string | undefined;
+    toolUseId?: string | undefined;
   },
 ): SpawnDecision | undefined {
   const hit = findRole(config, opts.agentType);
@@ -682,43 +728,57 @@ export function reserveSpawn(
     const refRun = refTask ? db.swarm.runGet(refTask.run_id) : undefined;
     const run =
       (refRun && refRun.status === "active" && refRun.swarm === swarm.name ? refRun : undefined) ??
-      db.swarm.runActive(swarm.name, opts.sessionId) ??
-      adhocRun(db, swarm, opts.sessionId, opts.description ?? firstLine(opts.prompt ?? ""));
+      db.swarm.runActive(swarm.name, opts.sessionId);
     const live = db.swarm
       .liveWorkersOfSwarm(swarm.name, now - STALE_MS)
       .filter((w) => isLive(w, now));
     const since = now - SPAWN_TTL_MS;
     const starting = db.swarm.spawnsPendingOfSwarm(swarm.name, since);
+    const roleLive = live.filter((w) => w.role === role.role);
     const roleBusy =
-      live.filter((w) => w.role === role.role).length +
-      db.swarm.spawnsPendingOfSwarm(swarm.name, since, role.agentType);
+      roleLive.length + db.swarm.spawnsPendingOfSwarm(swarm.name, since, role.agentType);
     let reason: string | undefined;
+    let type: DenyType = "max_agents";
     if (live.length + starting >= swarm.maxAgents)
-      reason = `swarm "${swarm.name}" is at capacity: ${live.length} worker(s) running and ${starting} starting, max_agents is ${swarm.maxAgents}. Wait for a worker to finish (em_swarm {action:"status"}) or raise max_agents in ${config.rel}.`;
-    else if (roleBusy >= role.count)
-      reason = `role "${role.role}" of swarm "${swarm.name}" already has ${roleBusy} worker(s) running or starting and its count is ${role.count}. Wait for one to finish or raise count in ${config.rel}.`;
+      reason = `swarm "${swarm.name}" is at capacity: ${live.length} worker(s) running and ${starting} starting, max_agents is ${swarm.maxAgents}.${describeBusy(db, live, now)} Otherwise wait for a worker to finish (em_swarm {action:"status"}) or raise max_agents in ${config.rel}.`;
+    else if (roleBusy >= role.count) {
+      type = "count";
+      reason = `role "${role.role}" of swarm "${swarm.name}" already has ${roleBusy} worker(s) running or starting and its count is ${role.count}.${describeBusy(db, roleLive, now)} Otherwise wait for one to finish or raise count in ${config.rel}.`;
+    }
     if (reason) {
-      denyEvent(db, run.id, role.role, reason);
+      if (run) denyEvent(db, run.id, role.role, type, reason);
       return { decision: "deny" as const, reason };
     }
-    const taskId = refTask && refTask.run_id === run.id ? refTask.id : undefined;
+    const taskId = refTask && run && refTask.run_id === run.id ? refTask.id : undefined;
     db.swarm.spawnAdd({
-      run_id: run.id,
+      swarm: swarm.name,
+      run_id: run?.id ?? null,
       session_id: opts.sessionId,
       agent_type: role.agentType,
       prompt: opts.prompt ? clip(opts.prompt, 4000) : null,
       task_id: taskId,
+      tool_use_id: opts.toolUseId,
     });
-    db.swarm.eventAdd({
-      run_id: run.id,
-      kind: "spawn",
-      role: role.role,
-      task_id: taskId,
-      text: clip(opts.description || firstLine(opts.prompt ?? "") || role.agentType, 160),
-    });
-    db.swarm.runTouch(run.id);
+    if (run) {
+      db.swarm.eventAdd({
+        run_id: run.id,
+        kind: "spawn",
+        role: role.role,
+        task_id: taskId,
+        text: clip(opts.description || firstLine(opts.prompt ?? "") || role.agentType, 160),
+      });
+      db.swarm.runTouch(run.id);
+    }
     return { decision: "allow" as const, run, role, swarm, taskId };
   });
+}
+
+/**
+ * PostToolUse / PostToolUseFailure of the Agent call that reserved a slot: the worker has
+ * started (and counts as running) or never will, so the reservation is done either way.
+ */
+export function releaseSpawn(db: StorageAdapter, toolUseId: string | undefined): boolean {
+  return toolUseId ? db.swarm.spawnConsumeByToolUse(toolUseId) : false;
 }
 
 export interface WorkerStart {
@@ -726,19 +786,36 @@ export interface WorkerStart {
   swarm: SwarmSpec;
   role: RoleSpec;
   worker: WorkerRow;
+  /** A task the worker already holds (a resumed worker). */
   task?: TaskRow | undefined;
-  /** Why the task named in the spawn prompt was not handed over. */
+  /** Kept for compatibility; SubagentStart no longer hands tasks over. */
   handoffNote?: string | undefined;
-  /** The spawn prompt, only when the reservation is known to be this worker's. */
   prompt?: string | undefined;
 }
 
 /**
- * SubagentStart: register the worker in its run. A resumed worker keeps its run and task.
- * A new one consumes a spawn reservation (for capacity); the task its prompt names is
- * handed over only when the match is unambiguous (exactly one open reservation of this
- * agent type in this session) and the task is claimable by the role. Otherwise the brief
- * tells the worker to claim the task its prompt names. Undefined for non-swarm agents.
+ * Consume the oldest open reservation of an agent type in this session: a worker has
+ * started, so it now counts as running instead. Which reservation it was cannot be told
+ * (SubagentStart does not see the spawn prompt), so only the count matters here.
+ */
+function consumeReservation(
+  db: StorageAdapter,
+  agentType: string,
+  sessionId: string | undefined,
+  now: number,
+): SpawnRow | undefined {
+  const open = db.swarm.spawnsOpen(agentType, now - SPAWN_MATCH_MS, sessionId);
+  const spawn = open[0];
+  if (spawn) db.swarm.spawnConsume(spawn.id);
+  return spawn;
+}
+
+/**
+ * SubagentStart: register the worker. A resumed worker keeps its run and task. A new one
+ * joins the newest active run of its swarm in this session (else the run its reservation
+ * was made for, else a new ad-hoc run) and consumes one reservation for capacity. No task is
+ * handed over: parallel spawns of one role cannot be told apart here, so the worker claims
+ * the task its prompt names itself. Undefined for non-swarm agents.
  */
 export function registerWorker(
   db: StorageAdapter,
@@ -751,78 +828,31 @@ export function registerWorker(
   return db.swarm.immediate(() => {
     const now = Date.now();
     const prior = db.swarm.workerFind(opts.agentId);
-    const priorRun = prior ? db.swarm.runGet(prior.run_id) : undefined;
-    let spawn: SpawnRow | undefined;
-    let unambiguous = false;
-    if (!prior) {
-      const open = db.swarm.spawnsOpen(role.agentType, now - SPAWN_MATCH_MS, opts.sessionId);
-      spawn = open[0];
-      if (spawn) db.swarm.spawnConsume(spawn.id);
-      unambiguous = open.length === 1;
-    }
-    const spawnRun = spawn ? db.swarm.runGet(spawn.run_id) : undefined;
     const usable = (r: RunRow | undefined) =>
       r && r.status === "active" && r.swarm === swarm.name ? r : undefined;
-    const prompt = unambiguous ? (spawn?.prompt ?? undefined) : undefined;
+    const spawn = prior ? undefined : consumeReservation(db, role.agentType, opts.sessionId, now);
     const run =
-      usable(priorRun) ??
-      usable(spawnRun) ??
+      usable(prior ? db.swarm.runGet(prior.run_id) : undefined) ??
       db.swarm.runActive(swarm.name, opts.sessionId) ??
-      adhocRun(db, swarm, opts.sessionId, firstLine(prompt ?? ""));
+      usable(spawn?.run_id ? db.swarm.runGet(spawn.run_id) : undefined) ??
+      adhocRun(db, swarm, opts.sessionId, "");
     db.swarm.workerUpsert({
       run_id: run.id,
       agent_id: opts.agentId,
       agent_type: role.agentType,
       role: role.role,
       session_id: opts.sessionId,
-      prompt: prompt ?? null,
     });
     db.swarm.eventAdd({
       run_id: run.id,
       kind: "start",
       role: role.role,
       agent_id: opts.agentId,
-      text: prior ? "worker resumed" : prompt ? clip(firstLine(prompt), 160) : "worker started",
+      text: prior ? "worker resumed" : "worker started",
     });
-    let task: TaskRow | undefined;
-    let handoffNote: string | undefined;
-    const ref = unambiguous ? (spawn?.task_id ?? taskRef(prompt)) : undefined;
-    if (ref !== undefined) {
-      const all = db.swarm.tasks(run.id);
-      const t = all.find((x) => x.id === ref);
-      if (!t) handoffNote = `task #${ref} is not in run ${run.id}`;
-      else if (t.status === "active" && t.agent_id === opts.agentId) task = t;
-      else {
-        const e = eligibility(t, all, swarm, role.role);
-        if (!e.ok) handoffNote = `task #${ref} cannot be claimed: ${e.why}`;
-        else if (db.swarm.taskClaim(t.id, opts.agentId)) {
-          task = db.swarm.taskGet(t.id);
-          db.swarm.workerUpdate(run.id, opts.agentId, { task_id: t.id });
-          db.swarm.eventAdd({
-            run_id: run.id,
-            kind: "claim",
-            role: role.role,
-            agent_id: opts.agentId,
-            task_id: t.id,
-            text: `${t.title} (handed over at spawn)`,
-          });
-        } else handoffNote = `task #${ref} was claimed by someone else`;
-      }
-    } else if (prior) {
-      task = db.swarm
-        .tasks(run.id)
-        .find((t) => t.status === "active" && t.agent_id === opts.agentId);
-    }
+    const task = prior ? db.swarm.tasksHeldBy(opts.agentId)[0] : undefined;
     db.swarm.runTouch(run.id);
-    return {
-      run,
-      swarm,
-      role,
-      worker: db.swarm.workerGet(run.id, opts.agentId)!,
-      task,
-      handoffNote,
-      prompt,
-    };
+    return { run, swarm, role, worker: db.swarm.workerGet(run.id, opts.agentId)!, task };
   });
 }
 
@@ -898,12 +928,16 @@ export function recordActivity(
     const hit = findRole(config, opts.agentType);
     const run = hit ? db.swarm.runActive(hit.swarm.name, opts.sessionId) : undefined;
     if (!hit || !run) return;
-    w = db.swarm.workerUpsert({
-      run_id: run.id,
-      agent_id: opts.agentId,
-      agent_type: hit.role.agentType,
-      role: hit.role.role,
-      session_id: opts.sessionId,
+    const unseen = run;
+    w = db.swarm.immediate(() => {
+      consumeReservation(db, hit.role.agentType, opts.sessionId, Date.now());
+      return db.swarm.workerUpsert({
+        run_id: unseen.id,
+        agent_id: opts.agentId,
+        agent_type: hit.role.agentType,
+        role: hit.role.role,
+        session_id: opts.sessionId,
+      });
     });
     db.swarm.eventAdd({
       run_id: run.id,
@@ -917,7 +951,7 @@ export function recordActivity(
   const io = toolIo(opts.tool);
   // em_swarm calls already leave claim/post/update events; a tool line would repeat them.
   if (io === "swarm" && !opts.failed) return;
-  db.swarm.eventAdd({
+  const id = db.swarm.eventAdd({
     run_id: w.run_id,
     kind: opts.failed ? "tool_error" : "tool",
     role: w.role,
@@ -926,6 +960,8 @@ export function recordActivity(
     text: `${toolHead(root, opts.tool, opts.input)}${opts.failed && opts.error ? ` ✗ ${clip(firstLine(opts.error), 120)}` : ""}`,
     payload: { tool: opts.tool.replace(/^mcp__.*__/, ""), io },
   });
+  // Tool events are the bulk of the ledger: keep each run's newest EVENTS_KEEP.
+  if (id % 250 === 0) db.swarm.eventsPrune(w.run_id, EVENTS_KEEP);
 }
 
 /**
@@ -948,8 +984,8 @@ export function closeWorker(
   return db.swarm.immediate(() => {
     const now = Date.now();
     const closed: TaskRow[] = [];
-    for (const t of db.swarm.tasks(worker.run_id)) {
-      if (t.status !== "active" || t.agent_id !== worker.agent_id) continue;
+    // Tasks it holds in any run (a worker can claim a task of another run by id).
+    for (const t of db.swarm.tasksHeldBy(worker.agent_id)) {
       if (message) {
         db.swarm.taskUpdate(t.id, {
           status: "done",
@@ -957,7 +993,7 @@ export function closeWorker(
           auto_closed: true,
         });
         db.swarm.eventAdd({
-          run_id: worker.run_id,
+          run_id: t.run_id,
           kind: "auto_close",
           role: worker.role,
           agent_id: worker.agent_id,
@@ -968,7 +1004,7 @@ export function closeWorker(
         // No final message: the worker was interrupted. Release the task for someone else.
         db.swarm.taskUpdate(t.id, { status: "pending", agent_id: null, auto_closed: false });
         db.swarm.eventAdd({
-          run_id: worker.run_id,
+          run_id: t.run_id,
           kind: "auto_close",
           role: worker.role,
           agent_id: worker.agent_id,
@@ -992,11 +1028,111 @@ export function closeWorker(
       text: message ? clip(firstLine(message), 200) : "stopped without a final message",
     });
     db.swarm.runTouch(worker.run_id);
+    closeIdleAdhoc(db, worker.run_id, now);
     return {
       run: db.swarm.runGet(worker.run_id)!,
       worker: db.swarm.workerGet(worker.run_id, worker.agent_id)!,
       closed,
     };
+  });
+}
+
+/**
+ * An ad-hoc run (opened for a worker spawned outside `em_swarm start`) closes itself once
+ * its last worker stopped and no task is left open, so it does not linger as "active".
+ */
+function closeIdleAdhoc(db: StorageAdapter, runId: string, now: number): void {
+  const run = db.swarm.runGet(runId);
+  if (run?.status !== "active" || !run.goal.startsWith("(ad hoc)")) return;
+  if (db.swarm.workers(runId).some((w) => w.status === "running")) return;
+  if (db.swarm.tasks(runId).some((t) => t.status === "pending" || t.status === "active")) return;
+  db.swarm.runUpdate(runId, {
+    status: "done",
+    ended_at: now,
+    summary: "ad-hoc run closed after its last worker stopped",
+  });
+  db.swarm.eventAdd({
+    run_id: runId,
+    kind: "run_finish",
+    role: COORDINATOR,
+    text: "done: closed after its last worker stopped",
+  });
+}
+
+/** Mark workers done and release the tasks they hold back to pending. */
+function stopWorkers(
+  db: StorageAdapter,
+  workers: WorkerRow[],
+  why: string,
+  now: number,
+): WorkerRow[] {
+  for (const w of workers) {
+    for (const t of db.swarm.tasksHeldBy(w.agent_id)) {
+      db.swarm.taskUpdate(t.id, { status: "pending", agent_id: null, auto_closed: false });
+      db.swarm.eventAdd({
+        run_id: t.run_id,
+        kind: "auto_close",
+        role: w.role,
+        agent_id: w.agent_id,
+        task_id: t.id,
+        text: `released back to pending: ${why}`,
+      });
+    }
+    db.swarm.workerUpdate(w.run_id, w.agent_id, { status: "done", ended_at: now, task_id: null });
+    db.swarm.eventAdd({
+      run_id: w.run_id,
+      kind: "stop",
+      role: w.role,
+      agent_id: w.agent_id,
+      text: why,
+    });
+    db.swarm.runTouch(w.run_id);
+  }
+  return workers;
+}
+
+/**
+ * SessionEnd: subagents do not outlive their session, so its workers that never got
+ * SubagentStop (killed, interrupted) are closed and their tasks released.
+ */
+export function closeSessionWorkers(db: StorageAdapter, sessionId: string | undefined): number {
+  if (!sessionId) return 0;
+  return db.swarm.immediate(() => {
+    const now = Date.now();
+    const ws = db.swarm.workersOfSession(sessionId);
+    stopWorkers(db, ws, "its Claude Code session ended", now);
+    for (const runId of new Set(ws.map((w) => w.run_id))) closeIdleAdhoc(db, runId, now);
+    return ws.length;
+  });
+}
+
+/**
+ * Coordinator: free workers that are stuck (no SubagentStop came). Matches one worker by
+ * agent id (a prefix is enough), all running workers of a role, or every quiet worker of
+ * the run. Their tasks go back to pending.
+ */
+export function releaseWorkers(
+  db: StorageAdapter,
+  run: RunRow,
+  caller: Caller,
+  opts: { agent?: string | undefined; role?: string | undefined },
+): WorkerRow[] {
+  if (!isCoordinator(caller))
+    throw new SwarmError("only the coordinator (the main session) can release workers");
+  const now = Date.now();
+  return db.swarm.immediate(() => {
+    const running = db.swarm.workers(run.id).filter((w) => w.status === "running");
+    const agent = opts.agent?.trim().replace(/^agent-/, "");
+    const pick = agent
+      ? running.filter((w) => w.agent_id.replace(/^agent-/, "").startsWith(agent))
+      : opts.role
+        ? running.filter((w) => w.role === opts.role)
+        : running.filter((w) => now - w.last_ts >= STALE_MS);
+    if (agent && pick.length > 1)
+      throw new SwarmError(
+        `"${opts.agent}" matches ${pick.length} workers (${pick.map((w) => w.agent_id).join(", ")}); give more of the id`,
+      );
+    return stopWorkers(db, pick, "released by the coordinator", now);
   });
 }
 
@@ -1010,6 +1146,8 @@ export interface RunSnapshot {
   run: RunRow;
   tasks: TaskRow[];
   workers: WorkerView[];
+  /** Holders of this run's active tasks that are registered in another run. */
+  holders: WorkerView[];
   notes: NoteRow[];
   events: SwarmEventRow[];
   counts: {
@@ -1047,10 +1185,20 @@ export function runSnapshot(db: StorageAdapter, run: RunRow, events = 40): RunSn
   for (const t of tasks) taskCounts[t.status] = (taskCounts[t.status] ?? 0) + 1;
   const workerCounts: Record<WorkerStatus, number> = { running: 0, done: 0, stale: 0 };
   for (const w of workers) workerCounts[w.status]++;
+  const mine = new Set(workers.map((w) => w.agent_id));
+  const holders: WorkerView[] = [];
+  for (const t of tasks) {
+    if (t.status !== "active" || !t.agent_id || mine.has(t.agent_id) || t.agent_id === COORDINATOR)
+      continue;
+    const w = db.swarm.workerFind(t.agent_id);
+    if (w && !holders.some((h) => h.agent_id === w.agent_id))
+      holders.push({ ...w, status: workerStatus(w, now) });
+  }
   return {
     run,
     tasks,
     workers,
+    holders,
     notes: db.swarm.notes(run.id),
     events: events > 0 ? db.swarm.events(run.id, { limit: events }) : [],
     counts: {

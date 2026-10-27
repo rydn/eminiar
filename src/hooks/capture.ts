@@ -13,7 +13,12 @@ import { globalDb } from "../stats/global.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import type { EventInput } from "../storage/types.js";
-import { swarmActivity, swarmSubagentStop } from "../swarm/hooks.js";
+import {
+  swarmActivity,
+  swarmAgentReturned,
+  swarmSessionEnd,
+  swarmSubagentStop,
+} from "../swarm/hooks.js";
 import { budgetWarnings } from "../usage/brief.js";
 import { ingestSession, ingestTranscript, usageEnabled } from "../usage/ingest.js";
 import { hookLog } from "./log.js";
@@ -163,6 +168,9 @@ export const postToolUse: HookHandler = (input) => {
   if (!input.tool_name) return undefined;
   // A swarm worker's call feeds the swarm ledger too (a no-op for every other caller).
   if (input.agent_id) swarmActivity(getContext(input.cwd), input, false);
+  // A swarm worker's Agent call returned: its spawn reservation is done.
+  if (input.tool_name === "Agent" || input.tool_name === "Task")
+    swarmAgentReturned(getContext(input.cwd), input);
   const { db, root, sessionId } = open(input);
   const drafts = classifyToolCall({
     toolName: input.tool_name,
@@ -190,6 +198,8 @@ export const postToolUse: HookHandler = (input) => {
 export const postToolUseFailure: HookHandler = async (input) => {
   if (!input.tool_name) return undefined;
   if (input.agent_id) swarmActivity(getContext(input.cwd), input, true);
+  if (input.tool_name === "Agent" || input.tool_name === "Task")
+    swarmAgentReturned(getContext(input.cwd), input);
   const { db, root, sessionId } = open(input);
   // Look the error up before it is persisted, so it does not find itself.
   let recalled: string | undefined;
@@ -252,6 +262,8 @@ export const stop: HookHandler = (input) => {
 };
 
 export const sessionEnd: HookHandler = (input) => {
+  // Workers of this session that never sent SubagentStop are closed (no-op without swarms).
+  swarmSessionEnd(getContext(input.cwd), input);
   const { db, sessionId } = open(input);
   db.sessionUpsert({ id: sessionId, ended_at: Date.now() });
   db.eventInsert({

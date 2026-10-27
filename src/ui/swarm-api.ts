@@ -1,6 +1,9 @@
 /**
  * Dashboard API for agent swarms (the Swarms tab). Reads the swarm file and the run ledger;
- * the only writes are creating the starter file, syncing agent files and finishing a run.
+ * the only writes are creating the starter file, syncing agent files, finishing a run and
+ * releasing a stuck worker.
+ * A run snapshot cuts long task text (GET /api/swarm/task has a whole task) and can send
+ * only the tasks changed since the client's last snapshot, so a big run stays cheap to poll.
  * Spec: docs/design/agent-swarms.md ("Dashboard: Swarms tab").
  */
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -16,6 +19,7 @@ import {
   callerOf,
   finishRun,
   type RunSnapshot,
+  releaseWorkers,
   runSnapshot,
   STALE_MS,
   SwarmError,
@@ -28,6 +32,7 @@ import type {
   RunStatus,
   SwarmEventRow,
   SwarmSpec,
+  TaskRow,
   TaskStatus,
   WorkerStatus,
 } from "../swarm/types.js";
@@ -37,9 +42,18 @@ export const RUN_ID_RE = /^\d{8}-[0-9a-f]{6}$/;
 /** Events closer together than this belong to one busy segment of the timeline. */
 export const SEGMENT_GAP_MS = 60_000;
 const EVENTS_PAGE = 200;
-/** Events read to build the timeline (pages of 1000); a longer run is cut at the start. */
-const TIMELINE_EVENTS_MAX = 20_000;
+/** The store's largest page. */
+const READ_PAGE = 1000;
+/** The timeline is drawn from the newest this many events; older ones are cut. */
+export const TIMELINE_EVENTS_MAX = 20_000;
 const SNAPSHOT_EVENTS = 200;
+/** Task `detail` / `result` in a run snapshot are cut to this; GET /api/swarm/task has it all. */
+export const TASK_TEXT_MAX = 300;
+/** A task delta (`tasksSince`) re-sends this much before it: clock and commit skew. */
+const TASKS_SINCE_OVERLAP_MS = 5_000;
+/** Runs listed by default and at most (active runs are always listed, on top). */
+const RUNS_LIMIT = 30;
+const RUNS_LIMIT_MAX = 500;
 const FINISH_STATUSES: RunStatus[] = ["done", "failed", "cancelled"];
 
 export interface Reply {
@@ -115,12 +129,28 @@ function swarmView(
   };
 }
 
-export function swarmOverview(ctx: ProjectContext, limit = 30) {
+/**
+ * Active runs first (all of them, whatever the limit), then the newest others up to
+ * `limit` runs in all; `more` when older runs were left out.
+ */
+function listRuns(db: StorageAdapter, limit: number): { runs: RunRow[]; more: boolean } {
+  const active = db.swarm.runs({ status: "active", limit: RUNS_LIMIT_MAX });
+  const room = Math.max(0, limit - active.length);
+  // One more than fits shows whether there are more; active runs among them are skipped.
+  const rest = db.swarm
+    .runs({ limit: Math.min(RUNS_LIMIT_MAX, room + active.length + 1) })
+    .filter((r) => r.status !== "active");
+  return { runs: [...active, ...rest.slice(0, room)], more: rest.length > room };
+}
+
+export function swarmOverview(ctx: ProjectContext, limit = RUNS_LIMIT) {
   const loaded = loadSwarmConfig(ctx.root);
   const now = Date.now();
   const db = getStorage(ctx);
+  const runsLimit = Math.max(1, Math.min(Math.floor(limit) || RUNS_LIMIT, RUNS_LIMIT_MAX));
   // Runs are listed whatever the file's state: the ledger outlives a deleted or broken file.
-  const runs = db.swarm.runs({ limit: Math.max(1, Math.min(limit, 200)) }).map((r) => ({
+  const listed = listRuns(db, runsLimit);
+  const runs = listed.runs.map((r) => ({
     id: r.id,
     swarm: r.swarm,
     goal: r.goal,
@@ -131,6 +161,7 @@ export function swarmOverview(ctx: ProjectContext, limit = 30) {
     ended_at: r.ended_at,
     counts: runCounts(db, r, now),
   }));
+  const runsMore = listed.more;
   if (loaded.state === "absent")
     return {
       state: "absent" as const,
@@ -141,6 +172,8 @@ export function swarmOverview(ctx: ProjectContext, limit = 30) {
       orphans: [],
       syncNeeded: false,
       runs,
+      runsMore,
+      runsLimit,
       starter: STARTER_YAML,
       now,
     };
@@ -154,6 +187,8 @@ export function swarmOverview(ctx: ProjectContext, limit = 30) {
       orphans: [],
       syncNeeded: false,
       runs,
+      runsMore,
+      runsLimit,
       now,
     };
   const config = loaded.config;
@@ -182,6 +217,8 @@ export function swarmOverview(ctx: ProjectContext, limit = 30) {
       (a) => a.action === "create" || a.action === "update" || a.action === "delete",
     ),
     runs,
+    runsMore,
+    runsLimit,
     now,
   };
 }
@@ -245,25 +282,96 @@ export function busySegments(
   return out;
 }
 
-/** Every event of a run, oldest first (bounded), for the timeline. */
-function allEvents(ctx: ProjectContext, runId: string): { events: SwarmEventRow[]; cut: boolean } {
-  const db = getStorage(ctx);
-  const out: SwarmEventRow[] = [];
-  let after = 0;
-  for (;;) {
-    const page = db.swarm.events(runId, { after, limit: 1000 });
-    out.push(...page);
-    if (page.length < 1000) return { events: out, cut: false };
-    after = page[page.length - 1]!.id;
-    if (out.length >= TIMELINE_EVENTS_MAX) return { events: out, cut: true };
+/**
+ * The newest `max` events of a run, oldest first, for the timeline; `cut` when older ones
+ * were left out. The store reads forward from an id or returns the latest page, so each
+ * older window is sized from how many ids the events read so far took (ids are shared by
+ * every run, so concurrent runs interleave) and read forward.
+ */
+export function newestEvents(
+  db: StorageAdapter,
+  runId: string,
+  max = TIMELINE_EVENTS_MAX,
+): { events: SwarmEventRow[]; cut: boolean } {
+  const latest = db.swarm.events(runId, { limit: READ_PAGE });
+  if (latest.length < READ_PAGE)
+    return latest.length > max
+      ? { events: latest.slice(-max), cut: true }
+      : { events: latest, cut: false };
+  const first = db.swarm.events(runId, { after: 0, limit: 1 })[0]!;
+  const chunks: SwarmEventRow[][] = [latest];
+  let have = latest.length;
+  // Every event with an id at or above `upper` has been read.
+  let upper = latest[0]!.id;
+  let idsPerEvent = Math.max(1, (latest[latest.length - 1]!.id - upper + 1) / latest.length);
+  while (have < max && upper > first.id) {
+    const want = Math.min(max - have, 5 * READ_PAGE);
+    let lower = Math.max(first.id - 1, Math.floor(upper - want * idsPerEvent) - 1);
+    let win: SwarmEventRow[] = [];
+    let after = lower;
+    for (;;) {
+      const page = db.swarm.events(runId, { after, limit: READ_PAGE });
+      let end = page.length < READ_PAGE;
+      for (const e of page) {
+        if (e.id >= upper) {
+          end = true;
+          break;
+        }
+        win.push(e);
+      }
+      if (end) break;
+      after = page[page.length - 1]!.id;
+      if (win.length > 2 * want + READ_PAGE) {
+        // Far denser than estimated: start the window again nearer `upper`.
+        const dense = Math.max(1, (after - lower) / win.length);
+        lower = Math.max(after, Math.floor(upper - want * dense) - 1);
+        win = [];
+        after = lower;
+      }
+    }
+    chunks.unshift(win);
+    have += win.length;
+    // An empty window means the run was quiet there: look twice as far next time.
+    idsPerEvent = win.length ? Math.max(1, (upper - lower) / win.length) : idsPerEvent * 2;
+    upper = lower + 1;
   }
+  const all = chunks.flat();
+  return {
+    events: all.length > max ? all.slice(-max) : all,
+    cut: all.length > max || upper > first.id,
+  };
 }
 
-export function runDetail(ctx: ProjectContext, run: RunRow) {
+export type TaskView = TaskRow & {
+  /** `detail` / `result` were cut to TASK_TEXT_MAX; GET /api/swarm/task has the whole task. */
+  clipped?: true;
+};
+
+const clipText = (s: string | null) =>
+  s !== null && s.length > TASK_TEXT_MAX ? s.slice(0, TASK_TEXT_MAX) : s;
+
+function clipTask(t: TaskRow): TaskView {
+  if ((t.detail?.length ?? 0) <= TASK_TEXT_MAX && (t.result?.length ?? 0) <= TASK_TEXT_MAX)
+    return t;
+  return { ...t, detail: clipText(t.detail), result: clipText(t.result), clipped: true };
+}
+
+export interface RunDetailOpts {
+  /**
+   * Only tasks updated at or after this (ms; minus a few seconds of skew), for a client
+   * that merges them by id into the tasks it has. Tasks are never deleted, and
+   * `taskCount` lets the client check that it has them all.
+   */
+  tasksSince?: number | undefined;
+  /** false: leave out the snapshot's latest events (the client follows the event feed). */
+  events?: boolean | undefined;
+}
+
+export function runDetail(ctx: ProjectContext, run: RunRow, opts: RunDetailOpts = {}) {
   const db = getStorage(ctx);
-  const snap: RunSnapshot = runSnapshot(db, run, SNAPSHOT_EVENTS);
+  const snap: RunSnapshot = runSnapshot(db, run, opts.events === false ? 0 : SNAPSHOT_EVENTS);
   const now = Date.now();
-  const { events: all, cut } = allEvents(ctx, run.id);
+  const { events: all, cut } = newestEvents(db, run.id);
   const byAgent = new Map<string, SwarmEventRow[]>();
   for (const e of all) {
     if (!e.agent_id) continue;
@@ -282,9 +390,19 @@ export function runDetail(ctx: ProjectContext, run: RunRow) {
       ...snap.tasks.map((t) => t.role).filter((r): r is string => !!r),
     ]),
   ];
-  const lastEventId = all.length ? all[all.length - 1]!.id : 0;
+  const since = opts.tasksSince;
+  const tasks = (
+    since === undefined
+      ? snap.tasks
+      : snap.tasks.filter((t) => t.updated_at >= since - TASKS_SINCE_OVERLAP_MS)
+  ).map(clipTask);
   return {
     ...snap,
+    tasks,
+    /** Every task of the run, whether or not `tasks` holds them all. */
+    taskCount: snap.tasks.length,
+    /** `tasks` holds only the tasks updated since `tasksSince`. */
+    tasksPartial: since !== undefined,
     roles,
     stages: spec?.stages ?? [],
     maxAgents: spec?.maxAgents ?? null,
@@ -293,6 +411,8 @@ export function runDetail(ctx: ProjectContext, run: RunRow) {
       start: run.created_at,
       end: run.ended_at ?? (run.status === "active" ? now : run.updated_at),
       cut,
+      /** With `cut`: the time of the oldest event drawn; activity before it is not shown. */
+      from: cut ? (all[0]?.ts ?? null) : null,
       workers: snap.workers.map((w) => ({
         agent_id: w.agent_id,
         role: w.role,
@@ -305,7 +425,8 @@ export function runDetail(ctx: ProjectContext, run: RunRow) {
         }),
       })),
     },
-    lastEventId,
+    /** The run's newest event id (the snapshot's own events may stop short of it). */
+    lastEventId: db.swarm.eventLast(run.id)?.id ?? 0,
     staleMs: STALE_MS,
     now,
   };
@@ -367,7 +488,29 @@ function finishSwarmRun(ctx: ProjectContext, body: Record<string, unknown>): Rep
       summary: typeof body.summary === "string" ? body.summary : undefined,
       remember: body.remember === true,
     });
-    return ok({ run: r.run, memory: r.memory ?? null });
+    // The run is closed either way; a failed memory write is reported, not an error.
+    return ok({ run: r.run, memory: r.memory ?? null, memoryError: r.memoryError ?? null });
+  } catch (err) {
+    if (err instanceof SwarmError) return fail(409, err.message);
+    throw err;
+  }
+}
+
+/** Free one stuck worker (no SubagentStop came): it stops and its task goes back to pending. */
+function releaseSwarmWorker(ctx: ProjectContext, body: Record<string, unknown>): Reply {
+  const { run, error } = runFromId(ctx, body.id);
+  if (error || !run) return error ?? fail(400, "id required");
+  const agent = body.agent;
+  if (typeof agent !== "string" || !agent.trim() || agent.length > 200)
+    return fail(400, "agent must be a worker's agent id");
+  if (run.status !== "active") return fail(409, `run ${run.id} is already ${run.status}`);
+  const loaded = loadSwarmConfig(ctx.root);
+  const caller: Caller =
+    loaded.state === "ok" ? callerOf(loaded.config, {}) : { label: COORDINATOR };
+  try {
+    const released = releaseWorkers(getStorage(ctx), run, caller, { agent });
+    if (!released.length) return fail(404, `no running worker ${agent.slice(0, 80)} in this run`);
+    return ok({ released: released.map((w) => w.agent_id) });
   } catch (err) {
     if (err instanceof SwarmError) return fail(409, err.message);
     throw err;
@@ -396,12 +539,30 @@ export async function swarmRoute(
 
   if (path === "/api/swarm") {
     if (!isGet) return fail(405, "GET only");
-    return ok(swarmOverview(ctx, Number(query.get("limit")) || 30));
+    return ok(swarmOverview(ctx, Number(query.get("limit")) || RUNS_LIMIT));
   }
   if (path === "/api/swarm/run") {
     if (!isGet) return fail(405, "GET only");
     const { run, error } = runFromId(ctx, query.get("id"));
-    return error ?? ok(runDetail(ctx, run!));
+    if (error || !run) return error ?? fail(400, "id required");
+    const since = query.get("tasksSince");
+    if (since !== null && !/^\d{1,15}$/.test(since))
+      return fail(400, "tasksSince must be a non-negative integer (ms)");
+    return ok(
+      runDetail(ctx, run, {
+        tasksSince: since === null ? undefined : Number(since),
+        events: query.get("events") !== "0",
+      }),
+    );
+  }
+  if (path === "/api/swarm/task") {
+    if (!isGet) return fail(405, "GET only");
+    const raw = query.get("id") ?? "";
+    if (!/^\d{1,15}$/.test(raw)) return fail(400, "id must be a task id");
+    const task = getStorage(ctx).swarm.taskGet(Number(raw));
+    const runId = query.get("run");
+    if (!task || (runId && task.run_id !== runId)) return fail(404, `task ${raw} not found`);
+    return ok({ task });
   }
   if (path === "/api/swarm/events") {
     if (!isGet) return fail(405, "GET only");
@@ -438,6 +599,16 @@ export async function swarmRoute(
       return fail(400, "invalid JSON body");
     }
     return finishSwarmRun(ctx, body);
+  }
+  if (path === "/api/swarm/release") {
+    if (method !== "POST") return fail(405, "POST only");
+    let body: Record<string, unknown>;
+    try {
+      body = await readBody();
+    } catch {
+      return fail(400, "invalid JSON body");
+    }
+    return releaseSwarmWorker(ctx, body);
   }
   return fail(404, "not found");
 }

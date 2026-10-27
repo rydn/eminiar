@@ -2,26 +2,32 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import type { SwarmEvent } from "../api.js";
 import { cls } from "../util.js";
-import { Head, RoleChip } from "./bits.js";
+import { Head, pure, RoleChip, useNow } from "./bits.js";
 import { eventIo, KIND_GLYPH, KIND_GROUPS, rel, shortAgent } from "./style.js";
 
 const SHOWN = 300;
 
-export function Feed({
+function FeedView({
   events,
   roles,
-  now,
+  live,
+  skew,
+  behind,
   agent,
   onAgent,
 }: {
   /** Oldest first, as the API returns them. */
   events: SwarmEvent[];
   roles: string[];
-  now: number;
+  live: boolean;
+  skew: number;
+  /** Newer events exist that the feed has not read yet (a burst it is paging through). */
+  behind: boolean;
   /** Only this worker's events (picked on the topology canvas). */
   agent: string | null;
   onAgent: (a: string | null) => void;
 }): JSX.Element {
+  const now = useNow(5_000, live, skew);
   const [role, setRole] = useState("");
   const [group, setGroup] = useState("");
   const kinds = KIND_GROUPS.find(([id]) => id === group)?.[2];
@@ -60,11 +66,20 @@ export function Feed({
         ) : null}
       </div>
       <div class="sw-feed" role="log" aria-live="polite">
+        {behind ? (
+          <div class="sw-ev sw-gap" role="status">
+            <span class="t">▲</span>
+            <span class="x">
+              catching up: newer events are still loading; the rows below are not the latest yet
+            </span>
+          </div>
+        ) : null}
         {rows.length ? (
           rows.slice(0, SHOWN).map((e) => {
             const io = eventIo(e);
             return (
               <div
+                key={e.id}
                 class={cls("sw-ev", `k-${e.kind}`, `io-${io}`)}
                 title={`${new Date(e.ts).toLocaleString()} · ${e.kind}${e.agent_id ? ` · ${e.agent_id}` : ""}`}
               >
@@ -92,3 +107,6 @@ export function Feed({
     </div>
   );
 }
+
+/** Re-rendered when its events or filters change and every 5 s while live. */
+export const Feed = pure(FeedView);

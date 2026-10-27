@@ -201,11 +201,13 @@ export interface NoteRow {
 
 export interface SpawnRow {
   id: number;
-  run_id: string;
+  swarm: string;
+  run_id: string | null;
   session_id: string | null;
   agent_type: string;
   prompt: string | null;
   task_id: number | null;
+  tool_use_id: string | null;
   ts: number;
   consumed: boolean;
 }
@@ -310,12 +312,16 @@ export interface SwarmStore {
   notes(runId: string): NoteRow[];
 
   spawnAdd(s: {
-    run_id: string;
+    swarm: string;
+    run_id?: string | null | undefined;
     session_id?: string | null | undefined;
     agent_type: string;
     prompt?: string | null | undefined;
     task_id?: number | null | undefined;
+    tool_use_id?: string | null | undefined;
   }): number;
+  /** Consume the open reservation made for one Agent tool call; false if none was open. */
+  spawnConsumeByToolUse(toolUseId: string): boolean;
   /** Oldest unconsumed reservation for `agentType` newer than `sinceTs`, marked consumed. */
   spawnTake(agentType: string, sinceTs: number, sessionId?: string | null): SpawnRow | undefined;
   /** Unconsumed reservations for `agentType` newer than `sinceTs` (same session when given), oldest first. */
@@ -324,10 +330,16 @@ export interface SwarmStore {
   spawnConsume(id: number): boolean;
   /** Void every open reservation of a run (it finished). */
   spawnsVoid(runId: string): number;
-  /** Unconsumed reservations across every active run of a swarm, optionally of one agent type. */
+  /** Unconsumed reservations of a swarm (any run, or none yet), optionally of one agent type. */
   spawnsPendingOfSwarm(swarm: string, sinceTs: number, agentType?: string): number;
   /** Workers of a swarm (any run) still marked running with activity since `sinceTs`. */
   liveWorkersOfSwarm(swarm: string, sinceTs: number): WorkerRow[];
+  /** Active tasks held by one agent, across runs. */
+  tasksHeldBy(agentId: string): TaskRow[];
+  /** Workers still marked running that belong to a Claude Code session. */
+  workersOfSession(sessionId: string): WorkerRow[];
+  /** Keep only the newest `keep` events of a run; returns how many were deleted. */
+  eventsPrune(runId: string, keep: number): number;
   /** Stamp a worker's last activity without counting a tool call. */
   workerPing(runId: string, agentId: string): void;
   /** The newest event of a run. */

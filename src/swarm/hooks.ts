@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { getContext, type ProjectContext } from "../context.js";
@@ -8,11 +9,14 @@ import { getStorage } from "../storage/index.js";
 import { syncAgents } from "./agents.js";
 import { workerBrief } from "./brief.js";
 import { activeSwarmConfig, findRole, isSwarmAgentType, loadSwarmConfig } from "./config.js";
+import { STAMP_FIELDS, signCaller } from "./identity.js";
 import {
   clip,
+  closeSessionWorkers,
   closeWorker,
   recordActivity,
   registerWorker,
+  releaseSpawn,
   reserveSpawn,
   touchWorker,
 } from "./runtime.js";
@@ -26,15 +30,18 @@ import type { SwarmConfig, TaskStatus } from "./types.js";
  * logged to ~/.eminiar/hook.log and Claude carries on.
  */
 
-/** em_swarm under either MCP name form (plugin install or settings install). */
-const EM_SWARM_TOOL = /^mcp__.+__em_swarm$/;
+/** em_swarm under its two MCP names (plugin install, settings install) and no other server's. */
+const EM_SWARM_TOOLS = new Set(["mcp__plugin_eminiar_eminiar__em_swarm", "mcp__eminiar__em_swarm"]);
 
 export function isSwarmTool(name: string | undefined): boolean {
-  return !!name && EM_SWARM_TOOL.test(name);
+  return !!name && EM_SWARM_TOOLS.has(name);
 }
 
 /** Fields the PreToolUse hook owns on em_swarm calls; a model can never set them itself. */
-export const CALLER_FIELDS = ["caller_agent_id", "caller_agent_type"] as const;
+export const CALLER_FIELDS = STAMP_FIELDS;
+
+/** Claude Code caps hook additionalContext at 10,000 characters (longer goes to a file). */
+const CONTEXT_MAX = 9500;
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
 
@@ -59,10 +66,32 @@ export function coordinationRoot(root: string): string {
     const m = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"));
     if (!m) return root;
     const gitdir = resolve(root, m[1]!);
-    const worktrees = dirname(gitdir);
-    const git = dirname(worktrees);
-    if (basename(worktrees) !== "worktrees" || basename(git) !== ".git") return root;
-    return realpathSync(dirname(git));
+    // A linked worktree's gitdir has a `commondir` file naming the repository's git dir.
+    let common: string;
+    try {
+      common = resolve(gitdir, readFileSync(join(gitdir, "commondir"), "utf8").trim());
+    } catch {
+      return root; // a submodule checkout (its gitdir has no commondir): its own project
+    }
+    // The usual layout: <main>/.git is the common dir, so <main> is the main checkout.
+    if (basename(common) === ".git") return realpathSync(dirname(common));
+    // Otherwise (a worktree of a submodule, of a bare repository, of a repository with a
+    // separate git dir) ask git for the main worktree, its first entry. Only a real checkout
+    // is usable: the ledger shares the project database with the memories and the graph,
+    // and for bare or separate-git-dir repositories git names the git dir instead, so such
+    // a worktree keeps its own ledger (a documented limitation).
+    const out = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const first = /^worktree (.+)$/m.exec(out)?.[1];
+    if (!first || /^bare$/m.test(out.split("\n\n")[0] ?? "")) return root;
+    const main = realpathSync(first);
+    return main !== realpathSync(common) && statSync(join(main, ".git"), { throwIfNoEntry: false })
+      ? main
+      : root;
   } catch {
     return root;
   }
@@ -128,6 +157,7 @@ export function swarmPreAgent(ctx: ProjectContext, input: HookInput): SwarmSpawn
       prompt: str(ti.prompt),
       description: str(ti.description),
       sessionId: input.session_id || undefined,
+      toolUseId: input.tool_use_id || undefined,
     });
     if (!d) return { kind: "worker", agentType };
     if (d.decision === "deny") {
@@ -143,7 +173,7 @@ export function swarmPreAgent(ctx: ProjectContext, input: HookInput): SwarmSpawn
         },
       };
     }
-    return { kind: "worker", agentType, runId: d.run.id, taskId: d.taskId };
+    return { kind: "worker", agentType, runId: d.run?.id, taskId: d.taskId };
   } catch (err) {
     fail("reserveSpawn", err);
     // A busy database is transient: refuse the spawn with a retry hint rather than let it
@@ -196,72 +226,133 @@ function allowWith(updatedInput: Record<string, unknown>): HookOutput {
 }
 
 /**
- * PreToolUse on em_swarm: tell the tool who is calling. Inside a subagent the hook stamps
- * `caller_agent_id` / `caller_agent_type` from the hook payload (overriding whatever the
- * model passed); from the main session it strips them, so the coordinator cannot pose as a
- * worker. `updatedInput` replaces the whole input, so the original is spread first.
+ * PreToolUse on em_swarm: tell the tool who is calling. The hook knows the caller (main
+ * session, or a subagent's `agent_id` / `agent_type`) and the session; it drops any stamp
+ * fields the model passed and adds its own, signed (src/swarm/identity.ts), so the server
+ * can trust them. `updatedInput` replaces the whole input, so the original is spread first.
  */
 export function swarmStampCaller(input: HookInput): HookOutput | undefined {
   try {
     if (!isSwarmTool(input.tool_name) || !input.tool_input) return undefined;
-    const ti = input.tool_input;
-    const passed = CALLER_FIELDS.some((f) => f in ti);
-    const rest: Record<string, unknown> = { ...ti };
-    for (const f of CALLER_FIELDS) delete rest[f];
-    if (input.agent_id)
-      return allowWith({
-        ...rest,
-        caller_agent_id: input.agent_id,
-        ...(input.agent_type ? { caller_agent_type: input.agent_type } : {}),
-      });
-    return passed ? allowWith(rest) : undefined;
+    const rest: Record<string, unknown> = { ...input.tool_input };
+    for (const f of STAMP_FIELDS) delete rest[f];
+    const stamp = input.agent_id
+      ? signCaller({
+          kind: "agent",
+          agentId: input.agent_id,
+          agentType: input.agent_type || undefined,
+          sessionId: input.session_id || undefined,
+        })
+      : signCaller({ kind: "main", sessionId: input.session_id || undefined });
+    return allowWith({ ...rest, ...stamp });
   } catch (err) {
     return fail("stampCaller", err);
   }
 }
 
+/**
+ * PostToolUse / PostToolUseFailure of an Agent call for a swarm worker: its reservation is
+ * done (the worker started and counts as running, or it never will).
+ */
+export function swarmAgentReturned(ctx: ProjectContext, input: HookInput): void {
+  if (input.tool_name !== "Agent" && input.tool_name !== "Task") return;
+  const agentType = input.tool_input?.subagent_type;
+  if (!isSwarmAgentType(agentType) || !input.tool_use_id) return;
+  try {
+    const s = swarmScope(ctx, agentType);
+    if (s) releaseSpawn(s.db, input.tool_use_id);
+  } catch (err) {
+    fail("agentReturned", err);
+  }
+}
+
+/** SessionEnd: close the session's workers that never sent SubagentStop. */
+export function swarmSessionEnd(ctx: ProjectContext, input: HookInput): void {
+  if (!input.session_id) return;
+  try {
+    const s = swarmScope(ctx);
+    if (s) closeSessionWorkers(s.db, input.session_id);
+  } catch (err) {
+    fail("sessionEnd", err);
+  }
+}
+
 // --- SubagentStart ------------------------------------------------------------------------
 
-/** SubagentStart for a swarm worker: register it, hand over `task #N`, inject its brief. */
+/** Block the hook process briefly (it is short-lived and has nothing else to do). */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** SubagentStart for a swarm worker: register it and inject its brief. */
 export async function swarmSubagentStart(
   ctx: ProjectContext,
   input: HookInput,
 ): Promise<HookOutput | undefined> {
   const agentType = input.agent_type;
   if (!isSwarmAgentType(agentType) || !input.agent_id) return undefined;
+  let s: SwarmScope | undefined;
   try {
-    const s = swarmScope(ctx, agentType);
-    if (!s) return undefined;
-    const started = registerWorker(s.db, s.config, {
-      agentId: input.agent_id,
-      agentType,
-      sessionId: input.session_id || undefined,
-    });
-    if (!started) return undefined;
-    let brief: string;
-    try {
-      brief = await workerBrief(s.ctx, s.db, started);
-    } catch (err) {
-      fail("workerBrief", err);
-      brief = [
-        `You are the "${started.role.role}" worker of swarm "${started.swarm.name}", run ${started.run.id}. Goal: ${started.run.goal}`,
-        started.task
-          ? `Your task (already claimed for you): #${started.task.id} ${started.task.title}`
-          : 'Claim a task with em_swarm {action:"claim"}.',
-      ].join("\n");
-    }
-    const lines = [`## eminiar swarm worker: ${agentType} · run ${started.run.id}`];
-    if (s.root !== s.ctx.root)
-      lines.push(
-        `You work in a git worktree (${s.root}); the swarm ledger is shared with the main checkout ${s.ctx.root}.`,
-      );
-    lines.push(brief);
-    return {
-      hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: lines.join("\n") },
-    };
+    s = swarmScope(ctx, agentType);
   } catch (err) {
     return fail("subagentStart", err);
   }
+  if (!s) return undefined;
+  const scope = s;
+  const role = findRole(scope.config, agentType);
+  if (!role) return undefined;
+  // The ledger may be busy for a moment (another hook's transaction): retry within the
+  // hook's 10 s budget rather than start the worker without a brief.
+  let started: ReturnType<typeof registerWorker>;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      started = registerWorker(scope.db, scope.config, {
+        agentId: input.agent_id,
+        agentType,
+        sessionId: input.session_id || undefined,
+      });
+      break;
+    } catch (err) {
+      if (!isBusy(err) || attempt >= 2) {
+        fail("registerWorker", err);
+        started = undefined;
+        break;
+      }
+      pause(400);
+    }
+  }
+  let brief: string;
+  try {
+    brief = started
+      ? await workerBrief(scope.ctx, scope.db, started)
+      : fallbackBrief(role.role.role, role.swarm.name);
+  } catch (err) {
+    fail("workerBrief", err);
+    brief = fallbackBrief(role.role.role, role.swarm.name, started?.run.id);
+  }
+  const lines = [
+    `## eminiar swarm worker: ${agentType}${started ? ` · run ${started.run.id}` : ""}`,
+  ];
+  if (scope.root !== scope.ctx.root)
+    lines.push(
+      `You work in a git worktree (${scope.root}); the swarm ledger is shared with the main checkout ${scope.ctx.root}.`,
+    );
+  lines.push(brief);
+  return {
+    hookSpecificOutput: {
+      hookEventName: "SubagentStart",
+      additionalContext: clip(lines.join("\n"), CONTEXT_MAX),
+    },
+  };
+}
+
+/** The brief when the ledger could not be read: enough to work and to coordinate. */
+function fallbackBrief(role: string, swarm: string, runId?: string): string {
+  return [
+    `You are the "${role}" worker of the eminiar swarm "${swarm}"${runId ? `, run ${runId}` : ""}. The swarm ledger was busy when you started, so this brief is short.`,
+    'If your prompt names "task #N", claim it with em_swarm {action:"claim", task:N}; otherwise claim the next open task with em_swarm {action:"claim"}. Report with em_swarm {action:"update", task, status, result}.',
+    'Ask eminiar before acting: em_recall {query}, em_history {action:"file", path}, em_graph_impact {node}.',
+  ].join("\n");
 }
 
 /** The SubagentStart handler: swarm workers get their brief; every other agent nothing. */

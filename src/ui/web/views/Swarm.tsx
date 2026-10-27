@@ -6,16 +6,17 @@ import {
   type SwarmDefUi,
   type SwarmEvent,
   type SwarmEventsPage,
+  type SwarmFinishResult,
   type SwarmIssue,
   type SwarmOverview,
   type SwarmRunDetail,
   type SwarmRunSummary,
   type SwarmSyncResult,
+  type SwarmTask,
 } from "../api.js";
 import { ErrorBox, Spinner, toast, useAsync } from "../components.js";
-import { navigate } from "../router.js";
 import { Blackboard } from "../swarm/Blackboard.js";
-import { Head, RoleChip, State } from "../swarm/bits.js";
+import { Head, RoleChip, State, useNow } from "../swarm/bits.js";
 import { Feed } from "../swarm/Feed.js";
 import { dur, FILE_STATE, GLYPH, TOPOLOGY_GLYPH } from "../swarm/style.js";
 import { TaskBoard } from "../swarm/TaskBoard.js";
@@ -28,6 +29,12 @@ const LIST_POLL_MS = 15_000;
 const EVENTS_POLL_MS = 2_000;
 const SNAPSHOT_POLL_MS = 5_000;
 const KEEP_EVENTS = 800;
+/** Event pages (200 each) read per poll; a bigger burst is read over the next polls. */
+const EVENT_PAGES_PER_TICK = 5;
+/** Runs in the rail per "show more". */
+const RUNS_STEP = 30;
+const RETRY_MIN_MS = 1_000;
+const RETRY_MAX_MS = 30_000;
 
 const visible = () => document.visibilityState === "visible";
 
@@ -109,7 +116,32 @@ function SyncButton({ needed, onDone }: { needed: boolean; onDone: () => void })
   );
 }
 
-function FinishForm({ id, onDone }: { id: string; onDone: () => void }): JSX.Element {
+/** What finishing the run from this tab did, shown under the run header once it closed. */
+interface Finished {
+  status: string;
+  memory: string | null;
+  memoryError: string | null;
+  remember: boolean;
+}
+
+function FinishNote({ f }: { f: Finished }): JSX.Element | null {
+  if (f.memoryError)
+    return (
+      <div class="sw-note-box warn small" role="alert">
+        <State s="blocked" word="memory not written" /> The run closed as <b>{f.status}</b>, but its
+        outcome was not saved as a memory: {f.memoryError}. Record it with <code>em_remember</code>.
+      </div>
+    );
+  if (f.remember && f.memory)
+    return (
+      <div class="sw-note-box small">
+        <State s="done" word="memory written" /> <code>{f.memory}</code>
+      </div>
+    );
+  return null;
+}
+
+function FinishForm({ id, onDone }: { id: string; onDone: (f: Finished) => void }): JSX.Element {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<"done" | "failed" | "cancelled">("done");
   const [summary, setSummary] = useState("");
@@ -130,15 +162,21 @@ function FinishForm({ id, onDone }: { id: string; onDone: () => void }): JSX.Ele
         setBusy(true);
         setErr(undefined);
         try {
-          const r = await post<{ memory: string | null }>("/api/swarm/finish", {
+          const r = await post<SwarmFinishResult>("/api/swarm/finish", {
             id,
             status,
             summary: summary.trim() || undefined,
             remember,
           });
-          toast(`run finished as ${status}${r.memory ? ` · memory ${r.memory}` : ""}`);
+          const memoryError = r.memoryError ?? null;
+          toast(
+            memoryError
+              ? `run finished as ${status} · its memory was NOT written`
+              : `run finished as ${status}${r.memory ? ` · memory ${r.memory}` : ""}`,
+            !!memoryError,
+          );
           setOpen(false);
-          onDone();
+          onDone({ status, memory: r.memory, memoryError, remember });
         } catch (ex) {
           setErr((ex as Error).message);
         } finally {
@@ -211,7 +249,13 @@ function SwarmCard({ s }: { s: SwarmDefUi }): JSX.Element {
   for (const r of s.roles) byState.set(r.file.action, (byState.get(r.file.action) ?? 0) + 1);
   return (
     <div class={cls("sw-swarm", open && "open")}>
-      <div class="h" onClick={() => setOpen((o) => !o)}>
+      <button
+        type="button"
+        class="sw-btn h"
+        aria-expanded={open}
+        title={open ? "hide the roles" : "show the roles, models and tools"}
+        onClick={() => setOpen((o) => !o)}
+      >
         <span class="topo" title={s.topology}>
           {TOPOLOGY_GLYPH[s.topology]}
         </span>
@@ -219,8 +263,10 @@ function SwarmCard({ s }: { s: SwarmDefUi }): JSX.Element {
         <span class="muted small">
           {s.topology} · max {s.maxAgents}
         </span>
-        <span class="caret">{open ? "▾" : "▸"}</span>
-      </div>
+        <span class="caret" aria-hidden="true">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
       <div class="d small muted">{s.description}</div>
       <div class="chips">
         {s.roles.map((r) => {
@@ -350,24 +396,36 @@ function ConfigPanel({ o, onChanged }: { o: SwarmOverview; onChanged: () => void
 function RunList({
   runs,
   selected,
+  more,
+  loading,
+  onMore,
 }: {
   runs: SwarmRunSummary[];
   selected: string | undefined;
+  /** Older runs exist that the list leaves out. */
+  more: boolean;
+  loading: boolean;
+  onMore: () => void;
 }): JSX.Element {
   const active = runs.filter((r) => r.status === "active").length;
   return (
     <div class="card flush">
       <div class="sw-pad">
-        <Head title="Runs" meta={runs.length ? `${active} active · ${runs.length}` : "none"} />
+        <Head
+          title="Runs"
+          meta={runs.length ? `${active} active · ${runs.length}${more ? "+" : ""}` : "none"}
+        />
       </div>
       {runs.length ? (
         <div class="list sw-runs">
           {runs.map((r) => {
             const t = r.counts.tasks;
             return (
-              <div
+              <a
+                key={r.id}
                 class={cls("item", r.id === selected && "sel")}
-                onClick={() => navigate("swarm", { run: r.id })}
+                href={`#/swarm?run=${encodeURIComponent(r.id)}`}
+                aria-current={r.id === selected ? "page" : undefined}
               >
                 <div class="row tight">
                   <State s={r.status} />
@@ -395,9 +453,16 @@ function RunList({
                     />
                   </div>
                 ) : null}
-              </div>
+              </a>
             );
           })}
+          {more ? (
+            <div class="sw-more">
+              <button type="button" class="ghost sm" disabled={loading} onClick={onMore}>
+                {loading ? "Loading…" : `Show ${RUNS_STEP} older runs`}
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : (
         <div class="empty small">No runs yet.</div>
@@ -495,54 +560,156 @@ function Stat({
   );
 }
 
+/** The elapsed tile, the only part of the run view that ticks every second. */
+function Elapsed({ run, skew }: { run: SwarmRunDetail["run"]; skew: number }): JSX.Element {
+  const live = run.status === "active";
+  const now = useNow(1000, live, skew);
+  const elapsed = live ? now - run.created_at : run.ended_at ? run.ended_at - run.created_at : null;
+  return (
+    <Stat
+      label="elapsed"
+      value={dur(elapsed)}
+      sub={
+        live
+          ? `since ${new Date(run.created_at).toLocaleTimeString()}`
+          : run.ended_at
+            ? `ended ${ago(run.ended_at)}`
+            : "end time not recorded"
+      }
+    />
+  );
+}
+
+const sameList = (a: string[] | undefined, b: string[]): boolean =>
+  !!a && a.length === b.length && a.every((x, i) => x === b[i]);
+
 function RunView({ id, onChanged }: { id: string; onChanged: () => void }): JSX.Element {
   const [detail, setDetail] = useState<SwarmRunDetail>();
   const [error, setError] = useState<string>();
+  const [retryIn, setRetryIn] = useState<number | null>(null);
   const [events, setEvents] = useState<SwarmEvent[]>([]);
-  const [clock, setClock] = useState(Date.now());
+  const [behind, setBehind] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
+  const [skew, setSkew] = useState(0);
+  const [finished, setFinished] = useState<Finished>();
+  /** The feed's cursor: every event of the run up to this id has been read, in order. */
   const lastId = useRef(0);
-  const skew = useRef(0);
+  const loaded = useRef(false);
+  /** Tasks by id, merged from full snapshots and deltas (`tasksSince`). */
+  const tasks = useRef(new Map<number, SwarmTask>());
+  const tasksList = useRef<SwarmTask[]>([]);
+  const tasksMax = useRef(0);
+  const roles = useRef<string[]>();
   const status = useRef("");
+  const behindRef = useRef(false);
   const busy = useRef(false);
   const alive = useRef(true);
 
-  const load = useCallback(async () => {
-    try {
-      const d = await api<SwarmRunDetail>("/api/swarm/run", { id });
-      if (!alive.current) return;
-      skew.current = d.now - Date.now();
+  /** Fetch the snapshot; false when it failed (the error is shown). */
+  const load = useCallback(
+    async (full = false): Promise<boolean> => {
+      // After the first snapshot: only the tasks changed since, and no events (the feed
+      // follows /api/swarm/events, which never skips any).
+      const delta = loaded.current && !full && tasksMax.current > 0;
+      let d: SwarmRunDetail;
+      try {
+        d = await api<SwarmRunDetail>("/api/swarm/run", {
+          id,
+          tasksSince: delta ? tasksMax.current : undefined,
+          events: loaded.current ? 0 : undefined,
+        });
+      } catch (e) {
+        if (alive.current) setError((e as Error).message);
+        return false;
+      }
+      if (!alive.current) return true;
+      let changed = !d.tasksPartial;
+      if (d.tasksPartial) {
+        for (const t of d.tasks) {
+          const had = tasks.current.get(t.id);
+          if (!had || had.updated_at !== t.updated_at || had.status !== t.status) changed = true;
+          tasks.current.set(t.id, t);
+        }
+        // A task missed by the delta (should not happen): take them all again.
+        if (d.taskCount !== undefined && tasks.current.size !== d.taskCount) return load(true);
+      } else tasks.current = new Map(d.tasks.map((t) => [t.id, t]));
+      if (changed) {
+        tasksList.current = [...tasks.current.values()].sort((a, b) => a.id - b.id);
+        tasksMax.current = tasksList.current.reduce((m, t) => Math.max(m, t.updated_at), 0);
+      }
+      if (!sameList(roles.current, d.roles)) roles.current = d.roles;
+      const s = d.now - Date.now();
+      setSkew((old) => (Math.abs(old - s) > 1000 ? s : old));
       const was = status.current;
       status.current = d.run.status;
-      lastId.current = Math.max(lastId.current, d.lastEventId);
-      setDetail(d);
-      setEvents((prev) => mergeEvents(prev, d.events));
-      setClock(Date.now());
+      if (!loaded.current) {
+        loaded.current = true;
+        lastId.current = d.events.length ? d.events[d.events.length - 1]!.id : 0;
+        setEvents(d.events);
+      }
+      setDetail({ ...d, tasks: tasksList.current, roles: roles.current ?? d.roles });
       setError(undefined);
-      if (was === "active" && d.run.status !== "active") onChanged();
-    } catch (e) {
-      if (alive.current) setError((e as Error).message);
-    }
-  }, [id]);
+      setRetryIn(null);
+      if (was === "active" && d.run.status !== "active") {
+        // Read the feed to its end once more (the finish event and anything before it).
+        behindRef.current = true;
+        onChanged();
+      }
+      return true;
+    },
+    [id],
+  );
+
+  const release = useCallback(
+    async (agent: string) => {
+      try {
+        const r = await post<{ released: string[] }>("/api/swarm/release", { id, agent });
+        toast(`released ${r.released.join(", ")}; its task is pending again`);
+        void load(true);
+      } catch (e) {
+        toast(`release failed: ${(e as Error).message}`, true);
+      }
+    },
+    [id, load],
+  );
 
   useEffect(() => {
     alive.current = true;
-    void load();
+    // A failed first load is retried with backoff until a snapshot arrives.
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let delay = RETRY_MIN_MS;
+    const first = async () => {
+      if ((await load()) || !alive.current || loaded.current) return;
+      setRetryIn(delay);
+      retry = setTimeout(first, delay);
+      delay = Math.min(delay * 2, RETRY_MAX_MS);
+    };
+    void first();
     const poll = setInterval(async () => {
-      if (status.current !== "active" || !visible() || busy.current) return;
+      if (!loaded.current || busy.current || !visible()) return;
+      // A finished run is still read to its end if a burst was being paged through.
+      if (status.current !== "active" && !behindRef.current) return;
       busy.current = true;
       try {
-        const page = await api<SwarmEventsPage>("/api/swarm/events", {
-          id,
-          after: lastId.current,
-        });
-        if (!alive.current) return;
-        skew.current = page.now - Date.now();
-        if (page.events.length) {
-          lastId.current = page.last;
-          setEvents((prev) => mergeEvents(prev, page.events));
+        let more = true;
+        let over = false;
+        // Contiguous pages from the cursor, a few per tick: a burst is caught up in order.
+        for (let i = 0; i < EVENT_PAGES_PER_TICK && more; i++) {
+          const page = await api<SwarmEventsPage>("/api/swarm/events", {
+            id,
+            after: lastId.current,
+          });
+          if (!alive.current) return;
+          if (page.events.length) {
+            lastId.current = page.last;
+            setEvents((prev) => mergeEvents(prev, page.events));
+          }
+          more = page.more;
+          over = page.run.status !== "active";
         }
-        if (page.run.status !== "active" || page.more) void load();
+        behindRef.current = more;
+        setBehind(more);
+        if (over && !more && status.current === "active") void load();
       } catch {
         // transient; the snapshot refresh reports lasting errors
       } finally {
@@ -550,33 +717,34 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }): JSX.
       }
     }, EVENTS_POLL_MS);
     const snap = setInterval(() => {
-      if (status.current === "active" && visible()) void load();
+      if (loaded.current && status.current === "active" && visible()) void load();
     }, SNAPSHOT_POLL_MS);
-    const tick = setInterval(() => {
-      if (status.current === "active" && visible()) setClock(Date.now());
-    }, 1000);
     return () => {
       alive.current = false;
+      clearTimeout(retry);
       clearInterval(poll);
       clearInterval(snap);
-      clearInterval(tick);
     };
   }, [id]);
 
-  if (error && !detail) return <ErrorBox error={error} />;
   if (!detail)
-    return (
+    return error ? (
+      <div class="card">
+        <ErrorBox error={error} />
+        <div class="small muted sw-retry">
+          {retryIn ? `retrying in ${Math.round(retryIn / 1000)} s…` : "retrying…"}
+        </div>
+      </div>
+    ) : (
       <div class="empty">
         <Spinner />
       </div>
     );
-  const now = clock + skew.current;
   const { run, counts } = detail;
   const live = run.status === "active";
-  const roles = detail.roles;
+  const runRoles = detail.roles;
   const workersTotal = detail.workers.length;
   const tasksTotal = detail.tasks.length;
-  const elapsed = live ? now - run.created_at : run.ended_at ? run.ended_at - run.created_at : null;
   return (
     <div class="sw-run">
       {error ? <div class="sw-note-box bad small">refresh failed: {error}</div> : null}
@@ -588,8 +756,9 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }): JSX.
           {live ? (
             <FinishForm
               id={run.id}
-              onDone={() => {
-                void load();
+              onDone={(f) => {
+                setFinished(f);
+                void load(true);
                 onChanged();
               }}
             />
@@ -612,6 +781,7 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }): JSX.
           ) : null}
         </div>
         {run.summary ? <div class="sw-summary-text">{run.summary}</div> : null}
+        {finished ? <FinishNote f={finished} /> : null}
       </div>
 
       <div class="sw-stats">
@@ -664,17 +834,7 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }): JSX.
           sub="failed tool calls"
           tone={counts.errors > 0 && "bad"}
         />
-        <Stat
-          label="elapsed"
-          value={dur(elapsed)}
-          sub={
-            live
-              ? `since ${new Date(run.created_at).toLocaleTimeString()}`
-              : run.ended_at
-                ? `ended ${ago(run.ended_at)}`
-                : "end time not recorded"
-          }
-        />
+        <Elapsed run={run} skew={skew} />
       </div>
 
       <div class="card">
@@ -685,19 +845,39 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }): JSX.
         <Topology
           detail={detail}
           events={events}
-          now={now}
-          roles={roles}
+          skew={skew}
+          roles={runRoles}
           picked={picked}
           onPick={setPicked}
         />
       </div>
 
-      <TaskBoard tasks={detail.tasks} workers={detail.workers} roles={roles} now={now} />
-      <Timeline detail={detail} roles={roles} now={now} />
+      <TaskBoard
+        tasks={detail.tasks}
+        workers={detail.workers}
+        roles={runRoles}
+        live={live}
+        skew={skew}
+      />
+      <Timeline
+        timeline={detail.timeline}
+        live={live}
+        roles={runRoles}
+        skew={skew}
+        onRelease={release}
+      />
 
       <div class="sw-two">
-        <Feed events={events} roles={roles} now={now} agent={picked} onAgent={setPicked} />
-        <Blackboard notes={detail.notes} roles={roles} now={now} />
+        <Feed
+          events={events}
+          roles={runRoles}
+          live={live}
+          skew={skew}
+          behind={behind}
+          agent={picked}
+          onAgent={setPicked}
+        />
+        <Blackboard notes={detail.notes} roles={runRoles} live={live} skew={skew} />
       </div>
     </div>
   );
@@ -706,7 +886,8 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }): JSX.
 // --- the tab --------------------------------------------------------------------------
 
 export function Swarm({ params }: { params: Record<string, string> }): JSX.Element {
-  const ov = useAsync(() => api<SwarmOverview>("/api/swarm"), []);
+  const [limit, setLimit] = useState(RUNS_STEP);
+  const ov = useAsync(() => api<SwarmOverview>("/api/swarm", { limit }), [limit]);
   useEffect(() => {
     const t = setInterval(() => {
       if (visible()) ov.reload();
@@ -716,6 +897,7 @@ export function Swarm({ params }: { params: Record<string, string> }): JSX.Eleme
   const o = ov.data;
   if (!o) return <div class="page">{ov.error ? <ErrorBox error={ov.error} /> : <Spinner />}</div>;
   const runs = o.runs;
+  // Active runs come first, so the default is the newest active run, else the newest one.
   const selected = params.run || (runs.find((r) => r.status === "active") ?? runs[0])?.id;
   return (
     <div class="page sw-page">
@@ -723,7 +905,13 @@ export function Swarm({ params }: { params: Record<string, string> }): JSX.Eleme
       <div class="sw-layout">
         <aside class="sw-rail">
           <ConfigPanel o={o} onChanged={ov.reload} />
-          <RunList runs={runs} selected={selected} />
+          <RunList
+            runs={runs}
+            selected={selected}
+            more={!!o.runsMore}
+            loading={ov.loading}
+            onMore={() => setLimit((n) => n + RUNS_STEP)}
+          />
         </aside>
         <section class="sw-main">
           {selected ? (

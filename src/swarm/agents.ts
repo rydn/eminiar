@@ -10,8 +10,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { join, relative } from "node:path";
-import { stringify } from "yaml";
 import type { RoleSpec, SwarmConfig, SwarmSpec, Topology } from "./types.js";
 
 /**
@@ -41,6 +41,16 @@ export const WORKER_EM_TOOLS = [
   "em_fetch_and_index",
 ] as const;
 
+/**
+ * `yaml` is loaded on first use: hooks import this module in every project, and only
+ * projects with a swarm file ever render an agent file.
+ */
+let yamlLib: typeof import("yaml") | undefined;
+function yaml(): typeof import("yaml") {
+  yamlLib ??= createRequire(import.meta.url)("yaml") as typeof import("yaml");
+  return yamlLib;
+}
+
 /** MCP tool name prefixes: plugin install and `install --method settings`. */
 export const EM_MCP_PREFIXES = ["mcp__plugin_eminiar_eminiar__", "mcp__eminiar__"] as const;
 
@@ -64,7 +74,8 @@ const TOPOLOGY_RULE: Record<Topology, string> = {
 
 /** The role's tool allowlist with the eminiar tools added under both MCP name forms. */
 export function workerTools(tools: string[]): string[] {
-  const out = [...tools];
+  // ToolSearch loads deferred MCP tools; without it an allowlisted worker may not reach em_*.
+  const out = tools.includes("ToolSearch") ? [...tools] : [...tools, "ToolSearch"];
   for (const prefix of EM_MCP_PREFIXES)
     for (const t of WORKER_EM_TOOLS) if (!out.includes(prefix + t)) out.push(prefix + t);
   return out;
@@ -97,7 +108,7 @@ const hashOf = (fm: string, rest: string) =>
 
 /** The full agent file for one role. Deterministic, so sync can compare by content. */
 export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: RoleSpec): string {
-  const fm = stringify(frontmatter(swarm, role), { lineWidth: 0 }).trimEnd();
+  const fm = yaml().stringify(frontmatter(swarm, role), { lineWidth: 0 }).trimEnd();
   // Validation rejects "---" in every frontmatter value; this guards against a gap there,
   // because Claude Code would cut the frontmatter at the first "---" and drop the agent.
   if (fm.includes("---"))
@@ -114,7 +125,7 @@ export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: Rol
     ...(role.prompt ? [role.prompt, ""] : []),
     "## Swarm protocol",
     "",
-    '1. eminiar starts you with a swarm brief: the run goal, your task, the shared notes and what the project knows (memories, history, structure). If the brief says a task was claimed for you, work on it. Otherwise claim the task your prompt names with `em_swarm {action:"claim", task:N}`, or the next open one with `em_swarm {action:"claim"}`.',
+    '1. eminiar starts you with a swarm brief: the run goal, the open tasks, the shared notes and what the project knows (memories, history, structure). First claim the task your prompt names with `em_swarm {action:"claim", task:N}` (or the next open one with `em_swarm {action:"claim"}`); if the brief says you already hold a task, continue it.',
     '2. Ask eminiar before acting: `em_recall {query}` for decisions and constraints, `em_history {action:"file", path}` before editing a file, `em_graph_impact {node}` before changing a symbol, `em_symbols` / `em_search` instead of grepping.',
     '3. Share what other workers need with `em_swarm {action:"post", key, value}` and read theirs with `em_swarm {action:"read"}`.',
     '4. Close every task with `em_swarm {action:"update", task, status, result}`: status `done`, `failed` or `blocked`; the result says what changed and how you verified it.',
@@ -129,7 +140,9 @@ export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: Rol
 /** How a file on disk relates to sync: ours untouched, ours but edited by hand, or not ours. */
 export type GeneratedState = "generated" | "edited" | "foreign";
 
-export function generatedState(content: string): GeneratedState {
+export function generatedState(raw: string): GeneratedState {
+  // A checkout with autocrlf turns the file into CRLF; it is still ours and unedited.
+  const content = raw.replace(/\r\n/g, "\n");
   if (!content.startsWith("---\n")) return "foreign";
   const end = content.indexOf("\n---\n", 3);
   if (end === -1) return "foreign";
@@ -191,15 +204,26 @@ function inspect(file: string): Entry {
   }
 }
 
-/** Why the agents directory must not be written, or undefined when it is safe. */
+/**
+ * Why the agents directory must not be written, or undefined when it is safe. The nearest
+ * existing ancestor is resolved, so a symlinked `.claude` without an `agents/` folder yet
+ * is caught before mkdir would create the folder outside the project.
+ */
 function unsafeDir(root: string, dir: string): string | undefined {
-  try {
-    const real = realpathSync(dir);
-    const rel = relative(realpathSync(root), real);
-    if (rel.startsWith("..") || rel === "" || /^[A-Za-z]:/.test(rel))
-      return `${AGENTS_REL} resolves outside the project (${real}); swarm sync only writes inside the project`;
-  } catch {
-    // missing directory: it is created inside the project
+  let probe = dir;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const real = realpathSync(probe);
+      const rel = relative(realpathSync(root), real);
+      if (rel.startsWith("..") || /^[A-Za-z]:/.test(rel) || (rel === "" && probe !== root))
+        return `${AGENTS_REL} resolves outside the project (${real}); swarm sync only writes inside the project`;
+      return undefined;
+    } catch {
+      // missing: check its parent
+      const parent = join(probe, "..");
+      if (parent === probe) break;
+      probe = parent;
+    }
   }
   return undefined;
 }

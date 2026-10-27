@@ -409,7 +409,7 @@ describe("swarm runtime", () => {
     finishRun(getContext(root), db, run, coordinator(), { status: "cancelled" });
   });
 
-  it("hands over task #N at start, records activity and auto-closes on stop", async () => {
+  it("registers a worker, which claims its task, records activity and auto-closes on stop", async () => {
     const swarm = cfg.swarms[0]!;
     const run = startRun(db, cfg, { swarm: "feat", goal: "lifecycle", sessionId: "LC" });
     const [t1, t2] = addTasks(db, { root }, run, swarm, coordinator(), [
@@ -430,12 +430,20 @@ describe("swarm runtime", () => {
       sessionId: "LC",
     });
     expect(started?.run.id).toBe(run.id);
-    expect(started?.task?.id).toBe(t1!.id);
-    expect(db.swarm.taskGet(t1!.id)!.agent_id).toBe("agent-w1");
-
+    // no hand-over at start: the worker claims the task its prompt names
+    expect(started?.task).toBeUndefined();
     const brief = await workerBrief(getContext(root), db, started!);
     expect(brief).toMatch(/you are the "coder" worker/i);
+    expect(brief).toContain('claim it first with em_swarm {action:"claim", task:N}');
     expect(brief).toContain(`#${t1!.id} first`);
+    claimTask(
+      db,
+      run,
+      swarm,
+      callerOf(cfg, { agentId: "agent-w1", agentType: "swarm-feat-coder" }),
+      t1!.id,
+    );
+    expect(db.swarm.taskGet(t1!.id)!.agent_id).toBe("agent-w1");
     expect(brief.length).toBeLessThanOrEqual(4000);
 
     recordActivity(db, cfg, root, {

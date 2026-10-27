@@ -1928,6 +1928,34 @@ svg.glyph {
 .sw-note-box.bad {
   border-color: var(--bad);
 }
+.sw-note-box.warn {
+  border-color: var(--warn);
+  border-style: solid;
+  margin: 10px 0 0;
+}
+/* a summary row that toggles its details: a real button, drawn as plain content */
+.sw-btn {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+.sw-page :is(a, button, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* SVG nodes: a ring of their own instead of the box outline */
+.sw-page svg [tabindex]:focus-visible {
+  outline: none;
+}
 /* rail: configured swarms */
 .sw-swarm {
   border-top: 1px solid var(--line);
@@ -1943,6 +1971,9 @@ svg.glyph {
   gap: 8px;
   cursor: pointer;
   user-select: none;
+}
+.sw-swarm .h:hover b {
+  color: var(--accent);
 }
 .sw-swarm .h b {
   font: 600 13px var(--mono);
@@ -2011,6 +2042,14 @@ table.sw-roles th {
 /* rail: runs */
 .sw-runs {
   max-height: 60vh;
+}
+.sw-runs a.item {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+.sw-runs a.item:focus-visible {
+  outline-offset: -2px;
 }
 .sw-runs .sw-goal {
   font-weight: 500;
@@ -2263,6 +2302,19 @@ text.sw-l2 {
 .sw-node.worker:hover .sw-core {
   stroke-width: 3;
 }
+.sw-focus {
+  fill: none;
+  stroke: none;
+}
+.sw-node:focus-visible .sw-focus {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+}
+.sw-glyph.sw-plus {
+  font-size: 12px;
+  font-weight: 600;
+}
 .sw-node.picked .sw-core {
   stroke-width: 3.5;
   fill: var(--accent-soft);
@@ -2403,6 +2455,15 @@ text.sw-l2 {
   padding: 6px;
   min-height: 70px;
   min-width: 0;
+  /* a long column scrolls on its own so the timeline and feed stay near */
+  max-height: 760px;
+  overflow-y: auto;
+}
+.sw-col .ch {
+  position: sticky;
+  top: -6px;
+  background: var(--bg);
+  z-index: 1;
 }
 .sw-col .ch {
   display: flex;
@@ -2420,11 +2481,18 @@ text.sw-l2 {
   border-radius: 6px;
   padding: 6px 8px;
   margin-bottom: 6px;
-  cursor: pointer;
   min-width: 0;
 }
 .sw-task:hover {
   background: var(--hover);
+}
+.sw-task-sum:focus-visible {
+  outline-offset: 4px;
+}
+.sw-col-more {
+  display: block;
+  width: 100%;
+  margin-top: 2px;
 }
 .sw-task.st-active {
   border-left-color: var(--accent);
@@ -2504,6 +2572,11 @@ text.sw-l2 {
 .sw-tl-row .who .id {
   color: var(--muted);
 }
+button.sw-release {
+  margin-left: auto;
+  padding: 0 6px;
+  font: 11px / 18px var(--mono);
+}
 .sw-tl .track {
   position: relative;
   height: 16px;
@@ -2527,6 +2600,17 @@ text.sw-l2 {
 }
 .sw-tl .seg.err {
   box-shadow: inset 0 -3px 0 var(--bad);
+}
+/* before the oldest event drawn: activity there is not shown */
+.sw-tl .cut {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent 0 4px,
+    color-mix(in srgb, var(--muted) 22%, transparent) 4px 6px
+  );
 }
 .sw-tl .seg.open {
   animation: sw-breathe 1.6s ease-in-out infinite;
@@ -2635,10 +2719,22 @@ text.sw-l2 {
   padding: 6px;
   text-align: center;
 }
+/* the feed is behind a burst: shown on top until it has caught up */
+.sw-ev.sw-gap {
+  grid-template-columns: 34px minmax(0, 1fr);
+  color: var(--warn);
+  border-bottom: 1px dashed var(--warn);
+}
+.sw-ev.sw-gap .t {
+  color: var(--warn);
+}
+.sw-retry {
+  text-align: center;
+  padding-bottom: 10px;
+}
 .sw-notes .sw-note-row {
   padding: 6px 4px;
   border-bottom: 1px solid var(--line);
-  cursor: pointer;
 }
 .sw-notes .sw-note-row:hover {
   background: var(--hover);

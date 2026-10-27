@@ -4,6 +4,7 @@
  */
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,7 +17,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getContext, resetContextCache } from "../../src/context.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
-import { generatedState, renderAgentFile, syncAgents } from "../../src/swarm/agents.js";
+import {
+  generatedState,
+  renderAgentFile,
+  syncAgents,
+  workerTools,
+} from "../../src/swarm/agents.js";
 import { workerBrief } from "../../src/swarm/brief.js";
 import {
   activeSwarmConfig,
@@ -29,10 +35,13 @@ import {
   addTasks,
   callerOf,
   claimTask,
+  closeSessionWorkers,
   closeWorker,
   finishRun,
   recordActivity,
   registerWorker,
+  releaseSpawn,
+  releaseWorkers,
   reserveSpawn,
   runSnapshot,
   startRun,
@@ -230,6 +239,47 @@ describe("agent file review", () => {
   });
 });
 
+describe("second review round", () => {
+  it("refuses a symlinked .claude without an agents folder yet", () => {
+    const outside = mkdtempSync(join(tmpdir(), "em-swarm-out-"));
+    const root = mkdtempSync(join(tmpdir(), "em-swarm-dotclaude-"));
+    symlinkSync(outside, join(root, ".claude"));
+    const c = ok(
+      "swarms:\n  feat:\n    description: d\n    agents:\n      coder: { description: x }\n",
+    );
+    expect(syncAgents(root, c).conflicts).toBe(1);
+    expect(existsSync(join(outside, "agents"))).toBe(false);
+  });
+
+  it("recognises a generated file checked out with CRLF line endings", () => {
+    const c = ok(
+      "swarms:\n  feat:\n    description: d\n    agents:\n      coder: { description: x }\n",
+    );
+    const text = renderAgentFile(c, c.swarms[0]!, c.swarms[0]!.roles[0]!);
+    expect(generatedState(text.replace(/\n/g, "\r\n"))).toBe("generated");
+  });
+
+  it("accepts Claude model ids only, case-sensitively, and caps max_chars", () => {
+    for (const m of [
+      "sonnet",
+      "opus[1m]",
+      "inherit",
+      "claude-sonnet-5-5",
+      "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "claude-opus-4-1@20250805",
+    ])
+      ok(one(`        description: x\n        model: "${m}"\n`));
+    for (const m of ["SONNET", "inherit[1m]", "claude", "gpt-4o"])
+      invalid(one(`        description: x\n        model: "${m}"\n`));
+    invalid(one("        description: x\n        context: { max_chars: 12000 }\n"));
+  });
+
+  it("adds ToolSearch to an allowlist so deferred em_* tools can load", () => {
+    expect(workerTools(["Read"])).toContain("ToolSearch");
+    expect(workerTools(["Read", "ToolSearch"]).filter((t) => t === "ToolSearch")).toHaveLength(1);
+  });
+});
+
 describe("ledger review", () => {
   let root: string;
   let db: StorageAdapter;
@@ -273,95 +323,92 @@ describe("ledger review", () => {
       finishRun(getContext(root), db, r, coord(), { status: "cancelled" });
     for (const w of db.swarm.liveWorkersOfSwarm("feat", 0))
       db.swarm.workerUpdate(w.run_id, w.agent_id, { status: "done" });
+    // reservations left open by earlier tests (no PostToolUse came) would count as starting
+    (db as unknown as { db: { prepare(s: string): { run(): void } } }).db
+      .prepare("UPDATE swarm_spawns SET consumed = 1")
+      .run();
     return startRun(db, cfg, { swarm: "feat", goal, sessionId: session });
   };
 
-  it("#1 does not hand over a task when reservations are ambiguous", () => {
-    const run = fresh("ambiguous");
+  it("#1 never hands a task over at start (parallel spawns cannot be told apart)", () => {
+    const run = fresh("no hand-over");
     const [t1, t2] = addTasks(db, { root }, run, cfg.swarms[0]!, coord(), [
       { title: "one", role: "coder" },
       { title: "two", role: "coder" },
     ]);
-    // first spawn's permission is denied by the user: its reservation is never used
     reserveSpawn(db, cfg, {
       agentType: "swarm-feat-coder",
       prompt: `task #${t1!.id}`,
       sessionId: "S",
+      toolUseId: "tu1",
     });
     reserveSpawn(db, cfg, {
       agentType: "swarm-feat-coder",
       prompt: `task #${t2!.id}`,
       sessionId: "S",
+      toolUseId: "tu2",
     });
-    const w = registerWorker(db, cfg, {
-      agentId: "A1",
-      agentType: "swarm-feat-coder",
-      sessionId: "S",
-    });
-    expect(w?.task).toBeUndefined();
-    expect(w?.prompt).toBeUndefined();
-    expect(db.swarm.taskGet(t1!.id)!.status).toBe("pending");
-    expect(taskRef(`Unlike task #${t1!.id}, do task #${t2!.id}`)).toBeUndefined();
-  });
-
-  it("#1 never matches another session's reservation", () => {
-    const run = fresh("sessions", "A");
-    const [t] = addTasks(db, { root }, run, cfg.swarms[0]!, coord(), [
-      { title: "a's", role: "coder" },
-    ]);
-    reserveSpawn(db, cfg, {
-      agentType: "swarm-feat-coder",
-      prompt: `task #${t!.id}`,
-      sessionId: "A",
-    });
-    const b = registerWorker(db, cfg, {
-      agentId: "B1",
-      agentType: "swarm-feat-coder",
-      sessionId: "B",
-    });
-    expect(b?.task).toBeUndefined();
-    const a = registerWorker(db, cfg, {
+    // the #2 worker starts first
+    const w2 = registerWorker(db, cfg, {
       agentId: "A2",
       agentType: "swarm-feat-coder",
-      sessionId: "A",
+      sessionId: "S",
     });
-    expect(a?.task?.id).toBe(t!.id);
+    expect(w2?.task).toBeUndefined();
+    expect(db.swarm.taskGet(t1!.id)!.status).toBe("pending");
+    expect(db.swarm.taskGet(t2!.id)!.status).toBe("pending");
+    expect(claimTask(db, run, cfg.swarms[0]!, worker("A2"), t2!.id).task?.id).toBe(t2!.id);
+    expect(taskRef(`Unlike task #${t1!.id}, do task #${t2!.id}`)).toBeUndefined();
+    // both Agent calls return (PostToolUse): whatever reservation is left is released
+    releaseSpawn(db, "tu1");
+    releaseSpawn(db, "tu2");
+    expect(db.swarm.spawnsPendingOfSwarm("feat", 0)).toBe(0);
   });
 
-  it("#2 a resumed or never-registered worker takes no reservation; #12 stop makes no run", () => {
+  it("#4 the Agent call returning releases its reservation; a never-started spawn frees its slot", () => {
+    const run = fresh("release spawn");
+    // max_agents 3: hold two slots with reservations whose Agent calls fail
+    for (const tu of ["x1", "x2"])
+      expect(
+        reserveSpawn(db, cfg, { agentType: "swarm-feat-coder", sessionId: "S", toolUseId: tu })
+          ?.decision,
+      ).toBe("allow");
+    expect(db.swarm.spawnsPendingOfSwarm("feat", 0)).toBe(2);
+    expect(releaseSpawn(db, "x1")).toBe(true);
+    expect(releaseSpawn(db, "x1")).toBe(false);
+    releaseSpawn(db, "x2");
+    expect(db.swarm.spawnsPendingOfSwarm("feat", 0)).toBe(0);
+    expect(run.id).toBeTruthy();
+  });
+
+  it("#6 a spawn or denial with no active run opens no run", () => {
+    for (const r of db.swarm.runs({ status: "active" }))
+      finishRun(getContext(root), db, r, coord(), { status: "cancelled" });
+    const before = db.swarm.runs({ limit: 500 }).length;
+    const d = reserveSpawn(db, cfg, {
+      agentType: "swarm-feat-coder",
+      sessionId: "S",
+      toolUseId: "n1",
+    });
+    expect(d?.decision).toBe("allow");
+    expect(d?.decision === "allow" && d.run).toBeUndefined();
+    expect(db.swarm.runs({ limit: 500 }).length).toBe(before);
+    releaseSpawn(db, "n1");
+  });
+
+  it("#2 a resumed worker keeps its task; a never-registered one makes no run", () => {
     const run = fresh("resume");
-    const [t1, t2] = addTasks(db, { root }, run, cfg.swarms[0]!, coord(), [
+    const [t1] = addTasks(db, { root }, run, cfg.swarms[0]!, coord(), [
       { title: "one", role: "coder" },
-      { title: "two", role: "coder" },
     ]);
-    reserveSpawn(db, cfg, {
-      agentType: "swarm-feat-coder",
-      prompt: `task #${t1!.id}`,
-      sessionId: "S",
-    });
-    const w1 = registerWorker(db, cfg, {
-      agentId: "R1",
-      agentType: "swarm-feat-coder",
-      sessionId: "S",
-    });
-    expect(w1?.task?.id).toBe(t1!.id);
-    reserveSpawn(db, cfg, {
-      agentType: "swarm-feat-coder",
-      prompt: `task #${t2!.id}`,
-      sessionId: "S",
-    });
+    registerWorker(db, cfg, { agentId: "R1", agentType: "swarm-feat-coder", sessionId: "S" });
+    claimTask(db, run, cfg.swarms[0]!, worker("R1"), t1!.id);
     const again = registerWorker(db, cfg, {
       agentId: "R1",
       agentType: "swarm-feat-coder",
       sessionId: "S",
     });
     expect(again?.task?.id).toBe(t1!.id);
-    const w2 = registerWorker(db, cfg, {
-      agentId: "R2",
-      agentType: "swarm-feat-coder",
-      sessionId: "S",
-    });
-    expect(w2?.task?.id).toBe(t2!.id);
     const before = db.swarm.runs({ limit: 500 }).length;
     expect(
       closeWorker(db, cfg, { agentId: "GHOST", agentType: "swarm-feat-coder", message: "x" }),
@@ -388,22 +435,88 @@ describe("ledger review", () => {
       prompt: `task #${t!.id}`,
       sessionId: "S",
     });
-    expect(d?.decision === "allow" && d.run.id).toBe(current.id);
+    expect(d?.decision === "allow" && d.run?.id).toBe(current.id);
     expect(db.swarm.runActive("feat", "S")?.id).toBe(current.id);
   });
 
-  it("#5 capacity counts workers of finished runs and finish voids reservations", () => {
+  it("#5 capacity spans runs; finish closes the run's workers; reservations keep counting", () => {
     const run = fresh("capacity");
     for (const id of ["C1", "C2"]) {
       reserveSpawn(db, cfg, { agentType: "swarm-feat-coder", sessionId: "S" });
       registerWorker(db, cfg, { agentId: id, agentType: "swarm-feat-coder", sessionId: "S" });
     }
-    reserveSpawn(db, cfg, { agentType: "swarm-feat-tester", sessionId: "S" });
-    finishRun(getContext(root), db, run, coord(), { status: "done" });
-    expect(db.swarm.spawnsPending(run.id, 0)).toBe(0);
-    startRun(db, cfg, { swarm: "feat", goal: "next", sessionId: "S" });
-    const d = reserveSpawn(db, cfg, { agentType: "swarm-feat-coder", sessionId: "S" });
+    // a second run of the same swarm still sees the two coders
+    const other = startRun(db, cfg, { swarm: "feat", goal: "parallel", sessionId: "S2" });
+    const d = reserveSpawn(db, cfg, { agentType: "swarm-feat-coder", sessionId: "S2" });
     expect(d?.decision).toBe("deny");
+    if (d?.decision === "deny") expect(d.reason).toMatch(/coder@C1/);
+    // a spawn still starting keeps its slot across finish
+    reserveSpawn(db, cfg, { agentType: "swarm-feat-tester", sessionId: "S", toolUseId: "late" });
+    finishRun(getContext(root), db, run, coord(), { status: "done" });
+    expect(db.swarm.workers(run.id).every((w) => w.status === "done")).toBe(true);
+    expect(db.swarm.spawnsPendingOfSwarm("feat", 0)).toBe(1);
+    expect(
+      reserveSpawn(db, cfg, { agentType: "swarm-feat-coder", sessionId: "S2" })?.decision,
+    ).toBe("allow");
+    releaseSpawn(db, "late");
+    finishRun(getContext(root), db, other, coord(), { status: "cancelled" });
+  });
+
+  it("#1 SessionEnd and release free workers that never stopped", () => {
+    const run = fresh("ghosts", "G");
+    const [t] = addTasks(db, { root }, run, cfg.swarms[0]!, coord(), [
+      { title: "x", role: "coder" },
+    ]);
+    registerWorker(db, cfg, { agentId: "G1", agentType: "swarm-feat-coder", sessionId: "G" });
+    registerWorker(db, cfg, { agentId: "G2", agentType: "swarm-feat-coder", sessionId: "G" });
+    claimTask(db, run, cfg.swarms[0]!, worker("G1"), t!.id);
+    expect(() => releaseWorkers(db, run, worker("G2"), { agent: "G1" })).toThrow(/coordinator/);
+    expect(releaseWorkers(db, run, coord(), { agent: "G1" }).map((w) => w.agent_id)).toEqual([
+      "G1",
+    ]);
+    expect(db.swarm.taskGet(t!.id)).toMatchObject({ status: "pending", agent_id: null });
+    expect(closeSessionWorkers(db, "G")).toBe(1);
+    expect(db.swarm.workerGet(run.id, "G2")!.status).toBe("done");
+  });
+
+  it("an ad-hoc run closes itself when its last worker stops", () => {
+    for (const r of db.swarm.runs({ status: "active" }))
+      finishRun(getContext(root), db, r, coord(), { status: "cancelled" });
+    const w = registerWorker(db, cfg, {
+      agentId: "AH1",
+      agentType: "swarm-feat-tester",
+      sessionId: "AH",
+    });
+    expect(w?.run.goal).toMatch(/^\(ad hoc\)/);
+    closeWorker(db, cfg, { agentId: "AH1", agentType: "swarm-feat-tester", message: "done" });
+    expect(db.swarm.runGet(w!.run.id)?.status).toBe("done");
+  });
+
+  it("keeps distinct denial kinds apart and prunes old events", () => {
+    const run = fresh("deny kinds");
+    for (const id of ["K1", "K2"])
+      db.swarm.workerUpsert({
+        run_id: run.id,
+        agent_id: id,
+        agent_type: "swarm-feat-coder",
+        role: "coder",
+      });
+    reserveSpawn(db, cfg, { agentType: "swarm-feat-coder", sessionId: "S" }); // count
+    db.swarm.workerUpsert({
+      run_id: run.id,
+      agent_id: "K3",
+      agent_type: "swarm-feat-tester",
+      role: "tester",
+    });
+    reserveSpawn(db, cfg, { agentType: "swarm-feat-coder", sessionId: "S" }); // max_agents now
+    const kinds = db.swarm
+      .events(run.id, { limit: 100 })
+      .filter((e) => e.kind === "deny")
+      .map((e) => e.payload?.type);
+    expect(kinds).toEqual(["count", "max_agents"]);
+    for (let i = 0; i < 30; i++) db.swarm.eventAdd({ run_id: run.id, kind: "tool", text: `t${i}` });
+    expect(db.swarm.eventsPrune(run.id, 10)).toBeGreaterThan(0);
+    expect(db.swarm.events(run.id, { limit: 100 })).toHaveLength(10);
   });
 
   it("#13 repeated denials collapse into one event", () => {
@@ -419,28 +532,6 @@ describe("ledger review", () => {
     const denies = db.swarm.events(run.id, { limit: 100 }).filter((e) => e.kind === "deny");
     expect(denies).toHaveLength(1);
     expect(denies[0]!.payload?.count).toBe(10);
-  });
-
-  it("#7 hand-over respects deps and pipeline stages", () => {
-    fresh("unused");
-    const line = cfg.swarms.find((s) => s.name === "line")!;
-    const run = startRun(db, cfg, { swarm: "line", goal: "pipe", sessionId: "P" });
-    const [, b] = addTasks(db, { root }, run, line, coord(), [
-      { title: "plan", role: "plan" },
-      { title: "build", role: "build" },
-    ]);
-    reserveSpawn(db, cfg, {
-      agentType: "swarm-line-build",
-      prompt: `task #${b!.id}`,
-      sessionId: "P",
-    });
-    const w = registerWorker(db, cfg, {
-      agentId: "PB",
-      agentType: "swarm-line-build",
-      sessionId: "P",
-    });
-    expect(w?.task).toBeUndefined();
-    expect(w?.handoffNote).toMatch(/earlier stages/);
   });
 
   it("#8 foreign agents cannot change the board; workers only update what they hold", () => {

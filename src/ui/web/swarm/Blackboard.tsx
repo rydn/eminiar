@@ -2,18 +2,21 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import type { SwarmNote } from "../api.js";
 import { cls } from "../util.js";
-import { Head, RoleChip } from "./bits.js";
+import { Head, pure, RoleChip, useNow } from "./bits.js";
 import { rel } from "./style.js";
 
-export function Blackboard({
+function BlackboardView({
   notes,
   roles,
-  now,
+  live,
+  skew,
 }: {
   notes: SwarmNote[];
   roles: string[];
-  now: number;
+  live: boolean;
+  skew: number;
 }): JSX.Element {
+  const now = useNow(15_000, live, skew);
   const [open, setOpen] = useState<string | null>(null);
   return (
     <div class="card">
@@ -24,26 +27,27 @@ export function Blackboard({
             const isOpen = open === n.key;
             const author = n.author ?? "n/a";
             return (
-              <div
-                class={cls("sw-note-row", isOpen && "open")}
-                onClick={() => setOpen(isOpen ? null : n.key)}
-                title={isOpen ? undefined : "show the value"}
-              >
-                <div class="h">
-                  <code class="k">{n.key}</code>
-                  <span class="v">v{n.version}</span>
-                  <RoleChip role={author.split("@")[0]} roles={roles} label={author} />
-                  <span class="age" title={new Date(n.ts).toLocaleString()}>
-                    {rel(n.ts, now)}
-                  </span>
-                </div>
-                {isOpen ? (
-                  <pre class="sw-pre" onClick={(e) => e.stopPropagation()}>
-                    {n.value}
-                  </pre>
-                ) : (
-                  <div class="p">{n.value.trim().split("\n")[0]?.slice(0, 160)}</div>
-                )}
+              <div key={n.key} class={cls("sw-note-row", isOpen && "open")}>
+                <button
+                  type="button"
+                  class="sw-btn sw-note-sum"
+                  aria-expanded={isOpen}
+                  title={isOpen ? "hide the value" : "show the value"}
+                  onClick={() => setOpen(isOpen ? null : n.key)}
+                >
+                  <div class="h">
+                    <code class="k">{n.key}</code>
+                    <span class="v">v{n.version}</span>
+                    <RoleChip role={author.split("@")[0]} roles={roles} label={author} />
+                    <span class="age" title={new Date(n.ts).toLocaleString()}>
+                      {rel(n.ts, now)}
+                    </span>
+                  </div>
+                  {isOpen ? null : (
+                    <div class="p">{n.value.trim().split("\n")[0]?.slice(0, 160)}</div>
+                  )}
+                </button>
+                {isOpen ? <pre class="sw-pre">{n.value}</pre> : null}
               </div>
             );
           })}
@@ -57,3 +61,5 @@ export function Blackboard({
     </div>
   );
 }
+
+export const Blackboard = pure(BlackboardView);

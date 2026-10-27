@@ -1,9 +1,20 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
-import { isNode, LineCounter, parseDocument } from "yaml";
 import { z } from "zod";
 import { checkGlob, GlobError } from "./glob.js";
+
+/**
+ * `yaml` is loaded on first use: every hook process imports this module, and only projects
+ * that have a swarm file ever parse one (it cost ~7 ms per hook otherwise).
+ */
+let yamlLib: typeof import("yaml") | undefined;
+function yaml(): typeof import("yaml") {
+  yamlLib ??= createRequire(import.meta.url)("yaml") as typeof import("yaml");
+  return yamlLib;
+}
+
 import {
   type ConfigIssue,
   type ContextSpec,
@@ -32,7 +43,7 @@ const noFence = (s: string) => !s.includes("---");
 const FENCE_MSG = 'must not contain "---" (Claude Code would end the agent frontmatter there)';
 /** Model aliases Claude Code accepts, or a Claude model id (incl. Bedrock/Vertex forms). */
 const MODEL_RE =
-  /^(?:(?:inherit|sonnet|opus|haiku|fable|opusplan)(?:\[1m\])?|[a-z0-9.:@-]*claude[a-z0-9.:@-]*(?:\[1m\])?)$/i;
+  /^(?:inherit|opusplan|(?:sonnet|opus|haiku|fable)(?:\[1m\])?|(?:[a-z0-9-]+\.)*claude-[a-z0-9.:@-]+(?:\[1m\])?)$/;
 const TOP_KEYS = new Set(["version", "enabled", "sync", "defaults", "swarms"]);
 
 export const DEFAULT_CONTEXT: ContextSpec = {
@@ -102,7 +113,8 @@ const RawContext = z.strictObject({
   history: z.boolean().optional(),
   structure: z.boolean().optional(),
   insights: z.boolean().optional(),
-  max_chars: z.number().int().min(500).max(20_000).optional(),
+  // SubagentStart context over 10,000 characters is moved to a file Claude may never read.
+  max_chars: z.number().int().min(500).max(9000).optional(),
 });
 type RawContext = z.infer<typeof RawContext>;
 
@@ -214,7 +226,8 @@ export function swarmFile(root: string): { file: string; rel: string; exists: bo
 
 /** Parse and validate swarm YAML text. `rel`/`file` only label the result. */
 export function parseSwarmYaml(text: string, file: string, rel: string): LoadResult {
-  const lines = new LineCounter();
+  const Y = yaml();
+  const lines = new Y.LineCounter();
   if (text.length > MAX_FILE_CHARS)
     return {
       state: "invalid",
@@ -222,7 +235,7 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
       rel,
       issues: [{ path: "", message: `the file is larger than ${MAX_FILE_CHARS / 1000} KB` }],
     };
-  const doc = parseDocument(text, {
+  const doc = Y.parseDocument(text, {
     lineCounter: lines,
     prettyErrors: false,
     uniqueKeys: true,
@@ -249,7 +262,7 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
     const keys = path.filter((k): k is string | number => typeof k !== "symbol");
     for (let n = keys.length; n >= 0; n--) {
       const node = n === 0 ? doc.contents : doc.getIn(keys.slice(0, n), true);
-      if (isNode(node) && node.range) return lineAt(node.range[0]);
+      if (Y.isNode(node) && node.range) return lineAt(node.range[0]);
     }
     return undefined;
   };
@@ -484,9 +497,9 @@ defaults:
   context:            # what eminiar tells each worker when it starts
     memories: 4       # project memories matching the role and task
     docs: 2           # documentation pages matching the task
-    history: true     # bug-prone files and recent fixes in the work area
-    structure: true   # project brief and hot files
-    insights: true    # history lessons and hotspots
+    history: true     # bug-prone files, recent fixes and history lessons in the work area
+    insights: true    # hot files (fan-in × churn) in the work area
+    structure: true   # the project brief: overview, decisions, constraints
     max_chars: 4000
 
 swarms:

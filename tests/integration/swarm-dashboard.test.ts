@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +17,7 @@ import { activeSwarmConfig, resetSwarmConfigCache } from "../../src/swarm/config
 import {
   addTasks,
   callerOf,
+  claimTask,
   closeWorker,
   postNote,
   recordActivity,
@@ -17,7 +26,13 @@ import {
   startRun,
 } from "../../src/swarm/runtime.js";
 import type { SwarmEventRow } from "../../src/swarm/types.js";
-import { busySegments, type runDetail } from "../../src/ui/swarm-api.js";
+import {
+  busySegments,
+  newestEvents,
+  type runDetail,
+  TASK_TEXT_MAX,
+  TIMELINE_EVENTS_MAX,
+} from "../../src/ui/swarm-api.js";
 
 /** The run payload after a JSON round trip. */
 type Detail = ReturnType<typeof runDetail>;
@@ -171,7 +186,19 @@ describe("swarm dashboard API", () => {
         sessionId: "S1",
       })?.decision,
     ).toBe("allow");
-    registerWorker(db, cfg, { agentId: "agent-c0ffee01", agentType: "swarm-feature-coder" });
+    registerWorker(db, cfg, {
+      agentId: "agent-c0ffee01",
+      agentType: "swarm-feature-coder",
+      sessionId: "S1",
+    });
+    // no hand-over at start: the worker claims the task its prompt names
+    claimTask(
+      db,
+      run,
+      swarm,
+      callerOf(cfg, { agentId: "agent-c0ffee01", agentType: "swarm-feature-coder" }),
+      impl!.id,
+    );
     for (const [tool, input] of [
       ["Read", { file_path: join(root, "src/w.ts") }],
       ["Edit", { file_path: join(root, "src/w.ts") }],
@@ -299,6 +326,238 @@ describe("swarm dashboard API", () => {
     expect(bad.runs[0]?.id).toBe(runId);
     expect((await post("/api/swarm/sync", {})).status).toBe(400);
     rmSync(yamlPath());
+  });
+
+  // The runs below go straight into the ledger: the swarm file is gone by now, and the
+  // dashboard must work from the ledger alone.
+  const ledger = () => getStorage(getContext(root));
+  let seq = 0;
+  const newRun = (goal: string) =>
+    ledger().swarm.runCreate({
+      id: `20261028-${(0xa00000 + ++seq).toString(16)}`,
+      swarm: "feature",
+      goal,
+      topology: "hierarchical",
+    });
+
+  it("reports a memory that could not be written when finishing with remember", async () => {
+    const run = newRun("finish with a broken memories dir");
+    // A file where the memory's folder should be: the run closes, the memory write fails.
+    const blocker = join(root, ".eminiar", "memories", "swarm");
+    mkdirSync(join(root, ".eminiar", "memories"), { recursive: true });
+    writeFileSync(blocker, "not a folder");
+    try {
+      const r = await post("/api/swarm/finish", { id: run.id, status: "done", remember: true });
+      expect(r.status).toBe(200);
+      expect(r.body.run).toMatchObject({ id: run.id, status: "done" });
+      expect(r.body.memory).toBeNull();
+      expect(typeof r.body.memoryError).toBe("string");
+      expect(String(r.body.memoryError).length).toBeGreaterThan(0);
+    } finally {
+      rmSync(blocker);
+    }
+    const ok = await post("/api/swarm/finish", {
+      id: newRun("finish and remember").id,
+      status: "done",
+      remember: true,
+    });
+    expect(ok.status).toBe(200);
+    expect(String(ok.body.memory)).toMatch(/^swarm\/run-/);
+    expect(ok.body.memoryError).toBeNull();
+  });
+
+  it("releases a stuck worker as the coordinator", async () => {
+    const db = ledger().swarm;
+    const run = newRun("a worker never stopped");
+    const agent = "agent-57a1e001";
+    db.workerUpsert({
+      run_id: run.id,
+      agent_id: agent,
+      agent_type: "swarm-feature-coder",
+      role: "coder",
+    });
+    expect((await post("/api/swarm/release", { id: run.id })).status).toBe(400);
+    expect((await get(`/api/swarm/release?id=${run.id}&agent=${agent}`)).status).toBe(405);
+    const r = await post("/api/swarm/release", { id: run.id, agent });
+    expect(r.status).toBe(200);
+    expect(r.body.released).toEqual([agent]);
+    expect(db.workerGet(run.id, agent)?.status).toBe("done");
+    expect((await post("/api/swarm/release", { id: run.id, agent })).status).toBe(404);
+    db.runUpdate(run.id, { status: "done", ended_at: Date.now() });
+    expect((await post("/api/swarm/release", { id: run.id, agent })).status).toBe(409);
+  });
+
+  it("lists active runs first whatever the limit, and says when older runs are left out", async () => {
+    const db = ledger().swarm;
+    const oldActive = newRun("an old run still active");
+    for (let i = 0; i < 12; i++) {
+      const r = newRun(`finished ${i}`);
+      db.runUpdate(r.id, { status: "done", ended_at: Date.now() });
+    }
+    const newActive = newRun("the newest active run");
+    const all = db.runs({ limit: 500 });
+
+    const five = (await get("/api/swarm?limit=5")).body as unknown as Overview & {
+      runsMore: boolean;
+      runsLimit: number;
+    };
+    expect(five.runs).toHaveLength(5);
+    expect(five.runs.slice(0, 2).map((r) => r.id)).toEqual([newActive.id, oldActive.id]);
+    expect(five.runs.slice(2).every((r) => r.status !== "active")).toBe(true);
+    // the newest finished runs, newest first
+    expect(five.runs.slice(2).map((r) => r.id)).toEqual(
+      all
+        .filter((r) => r.status !== "active")
+        .slice(0, 3)
+        .map((r) => r.id),
+    );
+    expect(five.runsMore).toBe(true);
+    expect(five.runsLimit).toBe(5);
+
+    // a limit below the active count still lists every active run
+    const one = (await get("/api/swarm?limit=1")).body as unknown as Overview & {
+      runsMore: boolean;
+    };
+    expect(one.runs.map((r) => r.id)).toEqual([newActive.id, oldActive.id]);
+    expect(one.runsMore).toBe(true);
+
+    const every = (await get("/api/swarm?limit=500")).body as unknown as Overview & {
+      runsMore: boolean;
+    };
+    expect(every.runs).toHaveLength(all.length);
+    expect(every.runsMore).toBe(false);
+    // the default page
+    expect(((await get("/api/swarm")).body as { runsLimit: number }).runsLimit).toBe(30);
+    for (const r of [oldActive, newActive])
+      db.runUpdate(r.id, { status: "cancelled", ended_at: Date.now() });
+  });
+
+  it("draws the timeline from the newest events of a long run and cuts the oldest", async () => {
+    const db = ledger().swarm;
+    const run = newRun("a long run");
+    const other = newRun("a run whose events interleave");
+    for (const [agent, role] of [
+      ["agent-ea41e001", "architect"],
+      ["agent-1a7e0002", "coder"],
+    ] as const)
+      db.workerUpsert({
+        run_id: run.id,
+        agent_id: agent,
+        agent_type: `swarm-feature-${role}`,
+        role,
+      });
+    const t0 = Date.now() - 3_600_000;
+    const early = 600;
+    const late = TIMELINE_EVENTS_MAX + 500;
+    let newest = 0;
+    db.immediate(() => {
+      for (let i = 0; i < early; i++)
+        db.eventAdd({
+          run_id: run.id,
+          kind: "tool",
+          agent_id: "agent-ea41e001",
+          role: "architect",
+          ts: t0 + i,
+          payload: { tool: "Read", io: "read" },
+        });
+      for (let i = 0; i < late; i++) {
+        newest = db.eventAdd({
+          run_id: run.id,
+          kind: "tool",
+          agent_id: "agent-1a7e0002",
+          role: "coder",
+          ts: t0 + 1_000_000 + i,
+          payload: { tool: "Edit", io: "write" },
+        });
+        // another run writing at the same time: the run's ids are not contiguous
+        if (i % 3 === 0) db.eventAdd({ run_id: other.id, kind: "tool", ts: t0 + 1_000_000 + i });
+      }
+    });
+    const d = (await get(`/api/swarm/run?id=${run.id}`)).body as unknown as Detail;
+    expect(d.timeline.cut).toBe(true);
+    expect(d.lastEventId).toBe(newest);
+    const byAgent = (a: string) => d.timeline.workers.find((w) => w.agent_id === a)!;
+    // the oldest events (the early worker's and the first late ones) are the ones cut
+    expect(byAgent("agent-ea41e001").segments).toEqual([]);
+    const segs = byAgent("agent-1a7e0002").segments;
+    expect(segs).toHaveLength(1);
+    expect(segs[0]).toMatchObject({
+      n: TIMELINE_EVENTS_MAX,
+      start: t0 + 1_000_000 + 500,
+      end: t0 + 1_000_000 + late - 1,
+    });
+    expect(d.timeline.from).toBe(t0 + 1_000_000 + 500);
+    for (const r of [run, other]) db.runUpdate(r.id, { status: "done", ended_at: Date.now() });
+  });
+
+  it("cuts long task text in a snapshot, serves the whole task and sends task deltas", async () => {
+    const db = ledger().swarm;
+    const run = newRun("task text");
+    const long = "y".repeat(TASK_TEXT_MAX + 200);
+    const t = db.taskAdd({ run_id: run.id, title: "long one", detail: long, created_by: "test" });
+    db.taskAdd({ run_id: run.id, title: "short one", detail: "short", created_by: "test" });
+    const d = (await get(`/api/swarm/run?id=${run.id}`)).body as unknown as Detail;
+    const cut = d.tasks.find((x) => x.id === t.id)!;
+    expect(cut.detail).toHaveLength(TASK_TEXT_MAX);
+    expect(cut.clipped).toBe(true);
+    expect(d.tasks.find((x) => x.title === "short one")?.clipped).toBeUndefined();
+    expect(d.taskCount).toBe(2);
+    expect(d.tasksPartial).toBe(false);
+
+    const full = await get(`/api/swarm/task?id=${t.id}&run=${run.id}`);
+    expect(full.status).toBe(200);
+    expect((full.body.task as { detail: string }).detail).toBe(long);
+    expect((await get(`/api/swarm/task?id=${t.id}&run=20991231-abcdef`)).status).toBe(404);
+    expect((await get("/api/swarm/task?id=x")).status).toBe(400);
+    expect((await get("/api/swarm/task?id=999999999")).status).toBe(404);
+
+    // nothing changed since: an empty delta, and no events with events=0
+    const later = Date.now() + 60_000;
+    const none = (await get(`/api/swarm/run?id=${run.id}&tasksSince=${later}&events=0`))
+      .body as unknown as Detail;
+    expect(none.tasks).toEqual([]);
+    expect(none.tasksPartial).toBe(true);
+    expect(none.taskCount).toBe(2);
+    expect(none.events).toEqual([]);
+    expect((await get(`/api/swarm/run?id=${run.id}&tasksSince=-1`)).status).toBe(400);
+    db.runUpdate(run.id, { status: "done", ended_at: Date.now() });
+  });
+});
+
+describe("newestEvents", () => {
+  it("returns the newest events in order, however the run's ids interleave", () => {
+    const db = getStorage(getContext(root)).swarm;
+    const ids = ["20261028-b00001", "20261028-b00002"];
+    for (const id of ids) db.runCreate({ id, swarm: "x", goal: id, topology: "mesh" });
+    const [p, q] = ids as [string, string];
+    db.immediate(() => {
+      // dense at first, then sparse: the newest page alone misjudges the older density
+      for (let i = 0; i < 8000; i++) db.eventAdd({ run_id: p, kind: "tool", text: `d${i}` });
+      for (let i = 0; i < 1000; i++) {
+        db.eventAdd({ run_id: p, kind: "tool", text: `s${i}` });
+        for (let k = 0; k < 20; k++) db.eventAdd({ run_id: q, kind: "tool" });
+      }
+    });
+    const every: number[] = [];
+    for (let after = 0; ; ) {
+      const page = db.events(p, { after, limit: 1000 });
+      every.push(...page.map((e) => e.id));
+      if (page.length < 1000) break;
+      after = page[page.length - 1]!.id;
+    }
+    expect(every).toHaveLength(9000);
+    const store = getStorage(getContext(root));
+    for (const max of [500, 1000, 1500, 3000, 8999]) {
+      const r = newestEvents(store, p, max);
+      expect(r.events.map((e) => e.id)).toEqual(every.slice(-max));
+      expect(r.cut).toBe(true);
+    }
+    for (const max of [9000, 20_000]) {
+      const r = newestEvents(store, p, max);
+      expect(r.events.map((e) => e.id)).toEqual(every);
+      expect(r.cut).toBe(false);
+    }
+    expect(newestEvents(store, "20261028-b00009", 100)).toEqual({ events: [], cut: false });
   });
 });
 
