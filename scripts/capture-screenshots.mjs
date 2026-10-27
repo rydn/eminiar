@@ -47,6 +47,7 @@ const SHOTS = [
   { name: "hotspots", hash: "#/architecture?tab=hotspots", schemes: ["dark"] },
   { name: "history", hash: "#/history?tab=timeline", schemes: ["dark"] },
   { name: "history-risk", hash: "#/history?tab=risk", schemes: ["dark"] },
+  { name: "history-graph", hash: "#/history?tab=graph", schemes: ["dark"] },
   {
     name: "memory",
     hash: "#/memory?name=decision/proactive-recall-in-hooks",

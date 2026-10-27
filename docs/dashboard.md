@@ -85,6 +85,8 @@ The interactive version of [`em_history`](knowledge-graph.md#git-history).
 - Branch comparison.
 - The lessons the history teaches: changes that later needed fixing.
 
+![History graph: branches, their commits, and the files, memories and docs they touched](images/dashboard-history-graph-dark.webp)
+
 The **Graph** tab links the history to the knowledge base. Branches (hexagons) point at their
 own commits (triangles, coloured by commit kind), commits at the files they changed, and those
 files at the memories (diamonds) and doc sources (squares) about them. A commit that wrote or
@@ -108,6 +110,8 @@ Lockfiles are left out, and each commit shows its 12 biggest file changes.
 
 Browse and edit `.eminiar/memories`. Shows decision status and `supersedes` links, and compiles
 a decision record.
+
+![Memory graph: memories linked to the files, tags and topics they are about](images/dashboard-memory-graph-dark.webp)
 
 The **Graph** tab is a knowledge galaxy: memories (diamonds), the files they mention, the
 memories they link to, and hub nodes for tags (triangles) and topics (hexagons). Chips switch
