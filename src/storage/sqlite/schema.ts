@@ -393,6 +393,95 @@ CREATE INDEX IF NOT EXISTS statusline_snapshots_ts ON statusline_snapshots(ts);
         db.exec("ALTER TABLE transcript_files ADD COLUMN head_hash TEXT");
     },
   },
+  {
+    // Agent swarms (src/swarm): the coordination ledger. Runs own everything else, so a
+    // deleted run cascades to its tasks, workers, events, blackboard notes and spawns.
+    version: 7,
+    sql: `
+CREATE TABLE IF NOT EXISTS swarm_runs (
+  id TEXT PRIMARY KEY,
+  swarm TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  topology TEXT NOT NULL,
+  session_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  summary TEXT
+);
+CREATE INDEX IF NOT EXISTS swarm_runs_status ON swarm_runs(status, updated_at);
+CREATE TABLE IF NOT EXISTS swarm_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES swarm_runs(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  detail TEXT,
+  role TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  agent_id TEXT,
+  deps TEXT NOT NULL DEFAULT '[]',
+  files TEXT NOT NULL DEFAULT '[]',
+  result TEXT,
+  auto_closed INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS swarm_tasks_run ON swarm_tasks(run_id, status);
+CREATE TABLE IF NOT EXISTS swarm_agents (
+  run_id TEXT NOT NULL REFERENCES swarm_runs(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL,
+  agent_type TEXT NOT NULL,
+  role TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  task_id INTEGER,
+  prompt TEXT,
+  session_id TEXT,
+  spawned_at INTEGER NOT NULL,
+  last_ts INTEGER NOT NULL,
+  ended_at INTEGER,
+  tool_calls INTEGER NOT NULL DEFAULT 0,
+  errors INTEGER NOT NULL DEFAULT 0,
+  last_tool TEXT,
+  summary TEXT,
+  PRIMARY KEY (run_id, agent_id)
+);
+CREATE INDEX IF NOT EXISTS swarm_agents_agent ON swarm_agents(agent_id, spawned_at);
+CREATE TABLE IF NOT EXISTS swarm_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES swarm_runs(id) ON DELETE CASCADE,
+  ts INTEGER NOT NULL,
+  agent_id TEXT,
+  role TEXT,
+  kind TEXT NOT NULL,
+  task_id INTEGER,
+  text TEXT,
+  payload TEXT
+);
+CREATE INDEX IF NOT EXISTS swarm_events_run ON swarm_events(run_id, id);
+CREATE TABLE IF NOT EXISTS swarm_notes (
+  run_id TEXT NOT NULL REFERENCES swarm_runs(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  author TEXT,
+  ts INTEGER NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (run_id, key)
+);
+CREATE TABLE IF NOT EXISTS swarm_spawns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES swarm_runs(id) ON DELETE CASCADE,
+  session_id TEXT,
+  agent_type TEXT NOT NULL,
+  prompt TEXT,
+  task_id INTEGER,
+  ts INTEGER NOT NULL,
+  consumed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS swarm_spawns_type ON swarm_spawns(agent_type, consumed, ts);
+CREATE INDEX IF NOT EXISTS swarm_spawns_run ON swarm_spawns(run_id, consumed, ts);
+`,
+  },
 ];
 
 /** vec0 lives outside the migration list: it needs the extension loaded first and takes the dimension. */

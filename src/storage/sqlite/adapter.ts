@@ -44,6 +44,7 @@ import type {
   VocabTerm,
 } from "../types.js";
 import { migrations, vecTableSql } from "./schema.js";
+import { SqliteSwarmStore } from "./swarm.js";
 
 export interface SqliteOptions {
   /** Embedding dimension for the vec0 table. */
@@ -120,6 +121,7 @@ function usageWhere(
 export class SqliteAdapter implements StorageAdapter {
   readonly db: Database.Database;
   readonly vectors: boolean;
+  readonly swarm: SqliteSwarmStore;
   private readonly stmts = new Map<string, Database.Statement<unknown[], unknown>>();
 
   /**
@@ -143,6 +145,8 @@ export class SqliteAdapter implements StorageAdapter {
     opts: SqliteOptions = {},
   ) {
     this.db = new Database(path, { timeout: 2000 });
+    // Statements are prepared lazily, so the tables only need to exist by the first call.
+    this.swarm = new SqliteSwarmStore(this.db);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
@@ -1630,6 +1634,8 @@ export class SqliteAdapter implements StorageAdapter {
         this.db.exec(
           "DELETE FROM events; DELETE FROM snapshots; DELETE FROM sessions; DELETE FROM stats;",
         );
+        // Swarm runs are session activity; deleting runs cascades to the rest of the ledger.
+        this.db.exec("DELETE FROM swarm_runs;");
       }
       if (scope === "graph" || scope === "all") {
         this.db.exec(
