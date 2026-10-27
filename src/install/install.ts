@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigSchema } from "../config.js";
 import { formatDoctor } from "../doctor.js";
@@ -14,6 +14,7 @@ import {
   writeInstallRecord,
   writeJsonWithBackup,
 } from "./claude-config.js";
+import { cursorPresent, registerCursor } from "./cursor.js";
 import { fullDoctor } from "./doctor.js";
 import { downloadModel, materialize, nativeCheck, rebuildNative } from "./materialize.js";
 import { pinNode, pinRoot } from "./node-resolve.js";
@@ -28,6 +29,8 @@ export interface InstallOptions {
   node?: string | undefined;
   yes?: boolean;
   statusline?: boolean | undefined;
+  /** Also register with Cursor (~/.cursor/hooks.json, mcp.json, skills/). */
+  cursor?: boolean;
   /** Registry spec to install instead of packing the running copy (upgrade uses this). */
   spec?: string | undefined;
   /** Re-pack and reinstall the stable copy even when its version number is unchanged. */
@@ -81,11 +84,20 @@ export async function install(opts: InstallOptions): Promise<number> {
     else log.ok("ready");
   }
 
-  log.step("register with Claude Code");
-  const method = opts.method ?? (claudeCli() ? "plugin" : "settings");
+  // Claude Code is the default client. With --cursor and no `claude` CLI (and no explicit
+  // --method), the machine is treated as Cursor-only rather than writing unused settings.
+  const claude = claudeCli();
+  const wantClaude = !opts.cursor || !!claude || !!opts.method;
+  const method = opts.method ?? (claude ? "plugin" : "settings");
+  const targets = [wantClaude ? `Claude Code (${method} method)` : "", opts.cursor ? "Cursor" : ""]
+    .filter(Boolean)
+    .join(" and ");
+  log.step(`register with ${targets}`);
+  if (opts.cursor && !cursorPresent())
+    log.warn(`${cursorDirHint()} not found; Cursor files are written anyway for its first launch`);
   if (
     !(await confirm(
-      `Register eminiar with Claude Code using the ${method} method? This edits your user-level Claude config.`,
+      `Register eminiar with ${targets}? This edits your user-level ${[wantClaude ? "Claude" : "", opts.cursor ? "Cursor" : ""].filter(Boolean).join(" and ")} config.`,
       !!opts.yes,
     ))
   ) {
@@ -93,8 +105,8 @@ export async function install(opts: InstallOptions): Promise<number> {
     return 1;
   }
   let wrote: Parameters<typeof writeInstallRecord>[0]["wrote"] = {};
-  let usedMethod: "plugin" | "settings" = method;
-  if (method === "plugin") {
+  let usedMethod: "plugin" | "settings" | "none" = wantClaude ? method : "none";
+  if (usedMethod === "plugin") {
     const r = registerPlugin(stable);
     if (r.ok) {
       log.ok(r.detail);
@@ -110,17 +122,29 @@ export async function install(opts: InstallOptions): Promise<number> {
       "hooks written to ~/.claude/settings.json, MCP server to ~/.claude.json, skills to ~/.claude/skills",
     );
   }
-  // A previous launch that died (e.g. the cache copy before root-path existed) is remembered
-  // by Claude Code for ~15 minutes. Forget it so the next session connects straight away.
-  if (needsAuthEntry() && clearNeedsAuthEntry())
-    log.ok("cleared Claude Code's cached connection failure for the plugin server");
-  // Fresh `--yes` installs opt in; an explicit value (upgrade replays the previous choice) wins.
-  const wantStatusline = opts.statusline ?? (!!opts.yes && !opts.team);
-  if (wantStatusline) {
-    if (setStatusline(stable)) {
-      wrote.statusline = true;
-      log.ok("statusLine set to `eminiar statusline`");
+  if (wantClaude) {
+    // A previous launch that died (e.g. the cache copy before root-path existed) is remembered
+    // by Claude Code for ~15 minutes. Forget it so the next session connects straight away.
+    if (needsAuthEntry() && clearNeedsAuthEntry())
+      log.ok("cleared Claude Code's cached connection failure for the plugin server");
+    // Fresh `--yes` installs opt in; an explicit value (upgrade replays the previous choice) wins.
+    const wantStatusline = opts.statusline ?? (!!opts.yes && !opts.team);
+    if (wantStatusline) {
+      if (setStatusline(stable)) {
+        wrote.statusline = true;
+        log.ok("statusLine set to `eminiar statusline`");
+      }
     }
+  }
+  if (opts.cursor) {
+    wrote.cursor = registerCursor(stable);
+    log.ok(
+      `hooks written to ${cursorDirHint()}/hooks.json, MCP server to ${cursorDirHint()}/mcp.json, skills to ${cursorDirHint()}/skills`,
+    );
+    if (usedMethod === "settings")
+      log.warn(
+        "Cursor also imports Claude Code hooks from ~/.claude/settings.json (Settings → Agents → Third-Party Imports); turn that off or each event fires twice in Cursor",
+      );
   }
 
   writeInstallRecord({
@@ -135,20 +159,31 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   if (opts.team) {
     log.step("team defaults");
-    writeTeamFiles(resolveProjectRoot(), opts.marketplace);
+    writeTeamFiles(resolveProjectRoot(), opts.marketplace, { cursor: !!opts.cursor, stable });
   }
 
   log.step("doctor");
   const checks = await fullDoctor();
   console.log(formatDoctor(checks));
+  const restart = [wantClaude ? "Claude Code" : "", opts.cursor ? "Cursor" : ""]
+    .filter(Boolean)
+    .join(" and ");
   console.log(
-    `\nRestart Claude Code to load eminiar. Try /em-doctor, then em_execute with an intent.`,
+    `\nRestart ${restart} to load eminiar. Try ${wantClaude ? "/em-doctor, then " : ""}em_execute with an intent.`,
   );
   return checks.every((c) => c.ok) ? 0 : 1;
 }
 
+function cursorDirHint(): string {
+  return process.env.CURSOR_CONFIG_DIR || "~/.cursor";
+}
+
 /** Commit-able defaults so teammates get the same behaviour from `npx eminiar install`. */
-export function writeTeamFiles(root: string, marketplace?: string): void {
+export function writeTeamFiles(
+  root: string,
+  marketplace?: string,
+  extra: { cursor?: boolean; stable?: string } = {},
+): void {
   const cfg = join(root, "eminiar.config.json");
   if (!existsSync(cfg)) {
     writeFileSync(
@@ -195,6 +230,20 @@ export function writeTeamFiles(root: string, marketplace?: string): void {
       `${file}: marketplace + enabledPlugins added — teammates are prompted to install on next launch`,
     );
   } else {
-    log.info("teammates: `npx eminiar install` (reads the committed eminiar.config.json)");
+    log.info(
+      `teammates: \`npx eminiar install${extra.cursor ? " --cursor" : ""}\` (reads the committed eminiar.config.json)`,
+    );
+  }
+  if (extra.cursor) {
+    // Cursor reads project rules from .cursor/rules/*.mdc; this one keeps the agent aware of
+    // the em_* tools even in a session where the sessionStart hook did not run.
+    const src = join(extra.stable ?? "", "rules", "eminiar.mdc");
+    const dst = join(root, ".cursor", "rules", "eminiar.mdc");
+    if (existsSync(dst)) log.ok(`${dst} already exists`);
+    else if (existsSync(src)) {
+      mkdirSync(join(root, ".cursor", "rules"), { recursive: true });
+      copyFileSync(src, dst);
+      log.ok(`wrote ${dst} — commit it`);
+    }
   }
 }

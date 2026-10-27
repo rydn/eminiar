@@ -153,6 +153,7 @@ See [Usage insights](usage.md) for the sources, the privacy notes and the saving
 | `EMINIAR_ROUTING_MODE` | Overrides `routing.mode` |
 | `EMINIAR_EMBEDDINGS=0` | Turns off embeddings |
 | `EMINIAR_HOME` | Moves the data directory (default `~/.eminiar`) |
+| `CURSOR_CONFIG_DIR` | Where `install --cursor` writes Cursor's `hooks.json`, `mcp.json` and `skills/` (default `~/.cursor`) |
 | `EMINIAR_PROJECT_ROOT` | Sets the project root. Otherwise `CLAUDE_PROJECT_DIR`, then the current directory |
 | `EMINIAR_DEBUG` | Prints stack traces from the CLI |
 | `EMINIAR_CLAUDE_DIR` | Where Claude Code keeps its transcripts (default `~/.claude`) |

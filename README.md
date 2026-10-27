@@ -2,13 +2,14 @@
 
 # eminiar
 
-**A memory, a code map and a clean context window for Claude Code — all on your machine.**
+**A memory, a code map and a clean context window for Claude Code and Cursor — all on your machine.**
 
 *Pronounced ee-MIN-ee-ar*
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6.svg)](#license)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.12-64748b.svg)](https://nodejs.org)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-3b82f6.svg)](https://docs.claude.com/en/docs/claude-code)
+[![Cursor](https://img.shields.io/badge/Cursor-hooks%20%2B%20MCP-3b82f6.svg)](docs/getting-started.md#cursor)
 [![Local-first](https://img.shields.io/badge/local--first-no%20cloud-64748b.svg)](docs/how-it-works.md#privacy-and-data)
 
 [Quick start](#quick-start) · [Features](#what-you-get) · [How it works](docs/how-it-works.md) · [Tools](docs/tools.md) · [Docs](docs/README.md)
@@ -39,7 +40,8 @@ Claude Code is very capable, but three things slow it down on a real project:
 
 ## The solution
 
-eminiar is a Claude Code plugin. It adds an MCP server with 23 `em_*` tools and a set of hooks.
+eminiar is a Claude Code plugin that also installs into Cursor. It adds an MCP server with 23
+`em_*` tools and a set of hooks.
 Everything runs locally in one SQLite database per project.
 
 | | Without eminiar | With eminiar |
@@ -137,21 +139,23 @@ relevant again.
 
 ## Quick start
 
-**Requirements:** Node.js 22.12 or later, and Claude Code.
+**Requirements:** Node.js 22.12 or later, and Claude Code or Cursor.
 
 ```sh
-npx eminiar install     # registers the plugin, installs a stable copy, downloads the model
-npx eminiar doctor      # checks every part
+npx eminiar install           # registers the plugin, installs a stable copy, downloads the model
+npx eminiar install --cursor  # the same, plus hooks, MCP server and skills for Cursor
+npx eminiar doctor            # checks every part
 ```
 
-Restart Claude Code. Then, in your project:
+Restart Claude Code (or Cursor). Then, in your project:
 
 ```text
 /em-onboard             # writes onboarding memories and builds the docs knowledge base
 ```
 
-That is all. Use Claude Code as usual. To see how much context eminiar saves, run `/em-stats` or
-open the dashboard with `eminiar ui`.
+That is all. Use Claude Code or Cursor as usual. To see how much context eminiar saves, run
+`/em-stats` or open the dashboard with `eminiar ui`. One flag covers Cursor because the hook
+runner speaks both dialects; see [Cursor](docs/getting-started.md#cursor) for what differs.
 
 **For a team:** run `npx eminiar install --team` once and commit `eminiar.config.json` and
 `.eminiar/`. Teammates then run `npx eminiar install`. See

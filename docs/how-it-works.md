@@ -2,8 +2,8 @@
 
 [← Docs index](README.md)
 
-eminiar has three parts: **hooks**, an **MCP server** and **local storage**. Claude Code starts
-all of them. Nothing runs in the cloud.
+eminiar has three parts: **hooks**, an **MCP server** and **local storage**. The client (Claude
+Code, or Cursor with `install --cursor`) starts all of them. Nothing runs in the cloud.
 
 ```mermaid
 flowchart TB
@@ -40,7 +40,8 @@ flowchart TB
 
 ## Hooks
 
-The hooks are one small program, `bin/em-hook`. Claude Code runs it on these events:
+The hooks are one small program, `bin/em-hook`. Claude Code runs it on these events (Cursor's
+equivalents are [below](#cursor)):
 
 | Event | What eminiar does |
 |---|---|
@@ -56,6 +57,32 @@ The hooks are one small program, `bin/em-hook`. Claude Code runs it on these eve
 
 Hooks are fast by design. They never run `git log` and never load the embedding model. Recall
 is a few FTS queries against the project database.
+
+### Cursor
+
+The same `bin/em-hook` serves Cursor. Cursor speaks a different hook dialect (camelCase events,
+flat output, `conversation_id` and `workspace_roots`, `Shell` instead of `Bash`, a JSON string for
+the tool result). `src/hooks/cursor.ts` translates both directions, so the handlers above run
+unchanged. The client is taken from `--client cursor` in `~/.cursor/hooks.json`, or detected from
+the payload when Cursor runs a Claude Code hook through its third-party import.
+
+| Cursor event | Runs as | Note |
+|---|---|---|
+| `sessionStart` | `SessionStart` | Context goes into `additional_context`; the session id and project root are exported as `env` for the later hooks |
+| `beforeSubmitPrompt` | `UserPromptSubmit` | Cursor accepts only `continue` here, so the recalled memories are **parked** and delivered with the next tool result |
+| `preToolUse` | `PreToolUse` | Permission only. A deny becomes `permission: "deny"` with the reason as `agent_message`. Memories, fix history and fan-in for the file are parked for the next tool result |
+| `postToolUse`, `postToolUseFailure` | `PostToolUse`, `PostToolUseFailure` | Delivers the parked context plus its own in `additional_context` |
+| `afterAgentResponse` | `Stop` | Cursor's `stop` carries no text; this one carries the reply that `Stop` classifies |
+| `subagentStop`, `preCompact`, `sessionEnd` | same | Observational |
+
+Parked context is kept per session for ten minutes and delivered once. Two safety rules carry
+over: a hook never exits non-zero, and `enforce` routing denies a call only when Cursor has the
+eminiar MCP server in `~/.cursor/mcp.json` and a server runs for the project. Otherwise the call
+is allowed and the hint is parked.
+
+What Cursor does not have: a status line, `/em-*` slash commands (the skills are available as
+agent skills instead), and a session resume. Cursor also applies hooks to its Tab completions
+and cloud agents only through its own events, which eminiar does not subscribe to.
 
 ## Routing
 

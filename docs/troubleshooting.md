@@ -44,6 +44,27 @@ so the rule can be reported or tuned. See [Routing](how-it-works.md#routing).
 To relax it, set `routing.mode` to `annotate` in `eminiar.config.json`. Routing denies a call
 only while the eminiar server runs. If the server is down, the hook only annotates.
 
+## Cursor does not show the em_* tools or run the hooks
+
+Run `eminiar doctor`. The **Cursor** line says whether the hooks and the MCP server are present in
+`~/.cursor/`. If either is missing:
+
+```sh
+npx eminiar install --cursor
+```
+
+Then reload Cursor (**Developer: Reload Window**). The **Hooks** tab under **Customize** lists the
+loaded hooks, and the Hooks output channel shows every call and its error, if any.
+
+**Each hook fires twice in Cursor.** Claude Code was registered with `--method settings`, and
+Cursor's **Settings → Agents → Third-Party Imports** also runs the hooks from
+`~/.claude/settings.json`. Turn that setting off, or reinstall Claude Code with
+`npx eminiar install --method plugin`.
+
+**A denied call says to retry with em_execute, but Cursor has no such tool.** The MCP server is
+missing from `~/.cursor/mcp.json`. eminiar allows the call when it cannot see the server there, so
+this points at a hand-edited file. `npx eminiar install --cursor` restores the entry.
+
 ## Search returns only keyword matches
 
 The embedding model is missing or still downloading. Search does not wait for it. Check with

@@ -1,7 +1,7 @@
 {
   "name": "eminiar",
   "displayName": "Eminiar",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "Local-first context, memory and knowledge graph for Claude Code: sandboxed execution, FTS5 + vector search, session continuity, code graph.",
   "author": {
     "name": "Ryan Dick"
