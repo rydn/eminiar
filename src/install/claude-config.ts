@@ -36,7 +36,8 @@ export function writeJsonWithBackup(file: string, obj: Json): void {
 
 export interface InstallRecord {
   version: string;
-  method: "plugin" | "settings";
+  /** How Claude Code was registered; "none" when only another client (Cursor) was. */
+  method: "plugin" | "settings" | "none";
   node: string;
   stableRoot: string;
   fromSpec: string;
@@ -48,6 +49,8 @@ export interface InstallRecord {
     skills?: string[];
     statusline?: boolean;
     marketplace?: boolean;
+    /** Cursor registration (`install --cursor`): ~/.cursor/hooks.json, mcp.json, skills/. */
+    cursor?: { hookEvents: string[]; mcpServer: boolean; skills: string[] };
   };
 }
 

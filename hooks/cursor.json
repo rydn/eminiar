@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 10 }
+    ],
+    "beforeSubmitPrompt": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 5 }
+    ],
+    "preToolUse": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor",
+        "timeout": 5,
+        "matcher": "Shell|Read|Write|Edit|Grep|Glob|WebFetch|WebSearch|Task"
+      }
+    ],
+    "postToolUse": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 10 }
+    ],
+    "postToolUseFailure": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 5 }
+    ],
+    "subagentStop": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 5 }
+    ],
+    "preCompact": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 15 }
+    ],
+    "afterAgentResponse": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 5 }
+    ],
+    "sessionEnd": [
+      { "command": "\"${CURSOR_PLUGIN_ROOT}/bin/em-hook\" --client cursor", "timeout": 5 }
+    ]
+  }
+}

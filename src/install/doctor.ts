@@ -16,6 +16,7 @@ import {
   pluginInstallPath,
   readInstallRecord,
 } from "./claude-config.js";
+import { cursorPresent, cursorStatus } from "./cursor.js";
 import { stableRoot, stableVersion } from "./materialize.js";
 import { pinNode, pinnedNode, pinnedRoot, pinRoot } from "./node-resolve.js";
 import { pluginCacheStale, probeServer } from "./register.js";
@@ -91,7 +92,7 @@ export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]>
     name: "install",
     ok: !!rec,
     detail: rec
-      ? `v${rec.version} via ${rec.method} at ${rec.installedAt.slice(0, 10)} (${rec.stableRoot})`
+      ? `v${rec.version} via ${rec.method === "none" ? "cursor" : rec.method}${rec.wrote.cursor && rec.method !== "none" ? " + cursor" : ""} at ${rec.installedAt.slice(0, 10)} (${rec.stableRoot})`
       : "not installed (run `npx eminiar install`)",
   });
   const pinned = pinnedNode();
@@ -139,7 +140,7 @@ export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]>
         detail: `${lines.join(" · ")}${drift}${liveOk ? "" : " — run `eminiar doctor --fix`, then `eminiar upgrade` if it still fails"}`,
       });
     }
-  } else {
+  } else if (rec.method === "settings") {
     const s = existsSync(join(process.env.HOME ?? "", ".claude", "settings.json"))
       ? readFileSync(join(process.env.HOME ?? "", ".claude", "settings.json"), "utf8")
       : "";
@@ -148,6 +149,28 @@ export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]>
       ok: s.includes("em-hook"),
       detail: s.includes("em-hook") ? "present" : "missing",
     });
+  }
+
+  // Cursor: registered natively (install --cursor) or merely present on the machine.
+  if (rec?.wrote.cursor || cursorPresent()) {
+    const cs = cursorStatus();
+    const registered = !!rec?.wrote.cursor;
+    checks.push({
+      name: "Cursor",
+      ok: registered ? cs.hooks && cs.mcp : true,
+      detail: registered
+        ? `${cs.hooks ? `hooks on ${cs.events.length} events` : "hooks missing from ~/.cursor/hooks.json"} · ${cs.mcp ? "MCP server in ~/.cursor/mcp.json" : "MCP server missing from ~/.cursor/mcp.json"}${cs.hooks && cs.mcp ? "" : " — run `npx eminiar install --cursor`"}`
+        : cs.hooks || cs.mcp
+          ? "partly configured by hand; `npx eminiar install --cursor` completes and tracks it"
+          : "installed but not registered; `npx eminiar install --cursor` adds hooks, MCP server and skills",
+    });
+    if (registered && rec?.method === "settings")
+      checks.push({
+        name: "Cursor third-party import",
+        ok: false,
+        detail:
+          "Cursor also runs the Claude Code hooks in ~/.claude/settings.json (Settings → Agents → Third-Party Imports, on by default), so each event fires twice there; turn that setting off or reinstall Claude Code with `--method plugin`",
+      });
   }
 
   // Claude Code remembers a plugin server that died at launch and skips it for ~15 min.

@@ -1,0 +1,15 @@
+---
+description: eminiar is installed. Use its em_* tools to keep raw output out of context and to check project memory before deciding.
+alwaysApply: true
+---
+
+eminiar is active. Keep raw tool output out of the context window and check project knowledge before deciding:
+
+- Before starting a task or changing a design: `em_recall {query}` for past decisions, constraints and fixed errors; `em_remember {content, kind}` when you settle something durable.
+- For any library, service or API the project uses: `em_docs {action:"lookup", query}` before web search.
+- Commands that print a lot (tests, logs, git log/diff, dependency trees): `em_execute {language, code, intent}` or `em_batch_execute`; only the sections matching `intent` come back.
+- Large files: `em_execute_file {path, code}`; web pages and docs: `em_fetch_and_index {url, queries}`.
+- Code questions: `em_architecture`, `em_symbols {name_path}`, `em_graph_impact {node}`, `em_search {queries, source:"code"}` instead of grepping.
+- Git history: `em_history {action: overview | file | risk | commit | branch}` instead of git log/blame/show.
+
+Plain Shell/Read/Grep remain right for short fixed output and files you are about to edit.

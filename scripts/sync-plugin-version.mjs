@@ -8,16 +8,21 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-const pluginFile = join(root, ".claude-plugin", "plugin.json");
-const plugin = JSON.parse(readFileSync(pluginFile, "utf8"));
 
-if (plugin.version === version) {
-  console.log(`.claude-plugin/plugin.json already at ${version}`);
-} else if (process.argv.includes("--check")) {
-  console.error(`.claude-plugin/plugin.json is ${plugin.version}, package.json is ${version}`);
-  process.exit(1);
-} else {
-  plugin.version = version;
-  writeFileSync(pluginFile, `${JSON.stringify(plugin, null, 2)}\n`);
-  console.log(`.claude-plugin/plugin.json -> ${version}`);
+// Both plugin manifests (Claude Code and Cursor) must carry the package version.
+let failed = false;
+for (const rel of [".claude-plugin/plugin.json", ".cursor-plugin/plugin.json"]) {
+  const pluginFile = join(root, rel);
+  const plugin = JSON.parse(readFileSync(pluginFile, "utf8"));
+  if (plugin.version === version) {
+    console.log(`${rel} already at ${version}`);
+  } else if (process.argv.includes("--check")) {
+    console.error(`${rel} is ${plugin.version}, package.json is ${version}`);
+    failed = true;
+  } else {
+    plugin.version = version;
+    writeFileSync(pluginFile, `${JSON.stringify(plugin, null, 2)}\n`);
+    console.log(`${rel} -> ${version}`);
+  }
 }
+if (failed) process.exit(1);

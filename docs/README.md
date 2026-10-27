@@ -4,8 +4,10 @@
 
 ## Start here
 
-- **[Getting started](getting-started.md)**: install, team setup, first steps, upgrade
-- **[How it works](how-it-works.md)**: hooks, MCP server, routing, sandbox, search, privacy
+- **[Getting started](getting-started.md)**: install for Claude Code and Cursor, team setup,
+  first steps, upgrade
+- **[How it works](how-it-works.md)**: hooks (Claude Code and Cursor), MCP server, routing,
+  sandbox, search, privacy
 
 ## Features
 
