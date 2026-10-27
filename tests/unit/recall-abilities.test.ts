@@ -42,7 +42,7 @@ beforeAll(() => {
     JSON.stringify({ routing: { mode: "enforce", deferToContextMode: false } }),
   );
   mkdirSync(join(root, "src"), { recursive: true });
-  for (const f of ["src/parser.ts", "src/core.ts", "src/quiet.ts"])
+  for (const f of ["src/parser.ts", "src/core.ts", "src/quiet.ts", "src/busy.ts"])
     writeFileSync(join(root, f), "export const x = 1;\n");
   resetContextCache();
   unmark = markServerAlive(getContext(root));
@@ -64,7 +64,57 @@ beforeAll(() => {
       },
     }),
   );
-  db.metricsReplace([metric("src/core.ts", 12), metric("src/quiet.ts", 1)]);
+  // src/core.ts: imported by five files, and its symbol is called from a sixth.
+  // src/busy.ts: no importers, but 20 calls between its own helpers (metrics fan-in 20).
+  const file = (path: string) => ({
+    id: `file:${path}`,
+    kind: "file",
+    name: path,
+    path,
+    source: "tree-sitter" as const,
+  });
+  const fn = (path: string, name: string) => ({
+    id: `sym:${path}#${name}`,
+    kind: "function",
+    name,
+    path,
+    source: "tree-sitter" as const,
+  });
+  const users = ["a", "b", "c", "d", "e"].map((n) => `src/use-${n}.ts`);
+  const helpers = Array.from({ length: 21 }, (_, i) => fn("src/busy.ts", `h${i}`));
+  db.graphUpsertNodes([
+    ...["src/core.ts", "src/quiet.ts", "src/busy.ts", "src/caller.ts", ...users].map(file),
+    fn("src/core.ts", "run"),
+    fn("src/caller.ts", "main"),
+    ...helpers,
+  ]);
+  db.graphUpsertEdges([
+    ...users.map((u) => ({
+      src: `file:${u}`,
+      dst: "file:src/core.ts",
+      kind: "imports",
+      source: "tree-sitter" as const,
+    })),
+    {
+      src: "sym:src/caller.ts#main",
+      dst: "sym:src/core.ts#run",
+      kind: "calls",
+      source: "tree-sitter",
+    },
+    { src: "file:src/use-a.ts", dst: "file:src/quiet.ts", kind: "imports", source: "tree-sitter" },
+    ...helpers.slice(1).map((h, i) => ({
+      src: helpers[i]!.id,
+      dst: h.id,
+      kind: "calls",
+      source: "tree-sitter" as const,
+    })),
+  ]);
+  // the metrics fan-in is what the old note quoted; it must not be any more
+  db.metricsReplace([
+    metric("src/core.ts", 12),
+    metric("src/quiet.ts", 1),
+    metric("src/busy.ts", 20),
+  ]);
   indexContent(db, {
     source: "docs:stripe",
     title: "Stripe › Rate limits",
@@ -85,8 +135,8 @@ const tool = (sid: string, tool_name: string, tool_input: Record<string, unknown
     base({ session_id: sid, hook_event_name: "PreToolUse", tool_name, tool_input }),
   );
 
-describe("history and graph context before an edit", () => {
-  it("warns about a bug-prone file once per window, never on a plain Read", async () => {
+describe("history and graph context before a read or an edit", () => {
+  it("warns about a bug-prone file once per window, on a Read as well as an Edit", async () => {
     const edit = () => tool("e1", "Edit", { file_path: join(root, "src/parser.ts") });
     const out = await edit();
     expect(out?.hookSpecificOutput?.permissionDecision).toBeUndefined();
@@ -95,12 +145,70 @@ describe("history and graph context before an edit", () => {
     expect(ctxText(out)).toContain("2 earlier changes later needed fixing");
     expect(ctxText(out)).toContain("last fix 1a2b3c4 fix: parser drops trailing comments");
     expect(await edit()).toBeUndefined();
-    expect(await tool("e2", "Read", { file_path: join(root, "src/parser.ts") })).toBeUndefined();
+    // a fresh window: the fix record arrives before the file is even read, and the edit
+    // that follows does not repeat it
+    const read = await tool("e2", "Read", { file_path: join(root, "src/parser.ts") });
+    expect(ctxText(read)).toContain("eminiar history: src/parser.ts is bug-prone");
+    expect(await tool("e2", "Edit", { file_path: join(root, "src/parser.ts") })).toBeUndefined();
   });
-  it("notes fan-in for widely imported files only", async () => {
+  it("notes the files that depend on a widely used file, and only before an edit", async () => {
+    expect(await tool("e3", "Read", { file_path: join(root, "src/core.ts") })).toBeUndefined();
     const core = await tool("e3", "Write", { file_path: join(root, "src/core.ts") });
-    expect(ctxText(core)).toContain("eminiar graph: src/core.ts is imported by 12 files");
+    // five importers plus one caller of its symbol; the metrics fan-in (12) is not quoted
+    expect(ctxText(core)).toContain("eminiar graph: src/core.ts is imported by 6 files");
     expect(await tool("e3", "Edit", { file_path: join(root, "src/quiet.ts") })).toBeUndefined();
+  });
+  it("does not count calls inside the file as dependents", async () => {
+    // metrics fan-in is 20, all from its own helpers: nobody else depends on it
+    expect(await tool("e4", "Edit", { file_path: join(root, "src/busy.ts") })).toBeUndefined();
+  });
+});
+
+describe("git history commands route to em_history", () => {
+  it("maps log, blame, show and shortlog forms to the matching em_history call", () => {
+    const call = (cmd: string) => suggest("Bash", { command: cmd }, root);
+    expect(call("git log --oneline -30")?.tool).toBe("em_history");
+    expect(call("git log --oneline -30")?.reason).toContain('{action:"overview"}');
+    expect(call("git log -p -- src/parser.ts")?.reason).toContain(
+      '{action:"file", path:"src/parser.ts"}',
+    );
+    expect(call("git log --follow src/parser.ts | head -20")?.reason).toContain(
+      '{action:"file", path:"src/parser.ts"}',
+    );
+    expect(call("git blame src/core.ts")?.reason).toContain('{action:"file", path:"src/core.ts"}');
+    expect(call("git show 1a2b3c4 --stat")?.reason).toContain('{action:"commit", sha:"1a2b3c4"}');
+    expect(call("git log --grep='rate limit' -i")?.reason).toContain(
+      '{action:"search", query:"rate limit"}',
+    );
+    expect(call("git log main..feature/x --oneline")?.reason).toContain(
+      '{action:"branch", name:"feature/x"}',
+    );
+    expect(call("git log -L :parse:src/parser.ts")?.reason).toContain(
+      '{action:"symbol", name_path:"src/parser.ts#parse"}',
+    );
+    expect(call("git log --author=ryan --since=2.weeks")?.reason).toContain(
+      '{action:"timeline", author:"ryan"}',
+    );
+    expect(call("cd src && git log -5")?.tool).toBe("em_history");
+    expect(call("git -C /tmp/other --no-pager log -5")?.tool).toBe("em_history");
+  });
+  it("leaves one-commit lookups and file prints alone", () => {
+    const call = (cmd: string) => suggest("Bash", { command: cmd }, root);
+    expect(call("git log -1 --format=%H")).toBeUndefined();
+    expect(call("git log -n 1 --pretty=%s")).toBeUndefined();
+    // a patch is big even for one commit
+    expect(call("git log -1 -p")?.tool).toBe("em_history");
+    // `git show REF:path` prints a file, not history
+    expect(call("git show HEAD:package.json")?.tool).toBe("em_execute");
+    expect(call("git status")).toBeUndefined();
+  });
+  it("denies the raw log in enforce mode and names the em_history call", async () => {
+    const out = await tool("h1", "Bash", { command: "git log --oneline -20 -- src/parser.ts" });
+    expect(out?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(out?.hookSpecificOutput?.permissionDecisionReason).toContain("Retry with em_history");
+    expect(out?.hookSpecificOutput?.permissionDecisionReason).toContain(
+      'em_history {action:"file", path:"src/parser.ts"}',
+    );
   });
 });
 
@@ -108,14 +216,15 @@ describe("commit risk", () => {
   it("names bug-prone and widely imported staged files before git commit", async () => {
     const git = (...args: string[]) => spawnSync("git", args, { cwd: root, encoding: "utf8" });
     git("init", "-q");
-    git("add", "src/parser.ts", "src/core.ts", "src/quiet.ts");
+    git("add", "src/parser.ts", "src/core.ts", "src/quiet.ts", "src/busy.ts");
     const out = await tool("c1", "Bash", { command: 'git commit -m "tweak parser"' });
     const text = ctxText(out);
     expect(out?.hookSpecificOutput?.permissionDecision).toBeUndefined();
     expect(text).toContain("this commit includes files that deserve a second look");
     expect(text).toContain("src/parser.ts is bug-prone");
-    expect(text).toContain("widely imported: src/core.ts (12 importers)");
+    expect(text).toContain("widely imported: src/core.ts (6 importers)");
     expect(text).not.toContain("quiet.ts");
+    expect(text).not.toContain("busy.ts");
     // not a commit: nothing to say
     expect(await tool("c1", "Bash", { command: "git status" })).toBeUndefined();
   });
@@ -169,12 +278,41 @@ describe("docs before the web", () => {
   });
 });
 
+describe("read routing", () => {
+  it("lets Read show large images and PDFs; large text still goes to the sandbox", () => {
+    const big = "x".repeat(300 * 1024);
+    for (const f of [
+      "shot.png",
+      "photo.JPG",
+      "anim.gif",
+      "pic.webp",
+      "spec.pdf",
+      "logo.svg",
+      "data.json",
+    ])
+      writeFileSync(join(root, f), big);
+    for (const f of ["shot.png", "photo.JPG", "anim.gif", "pic.webp", "spec.pdf"])
+      expect(suggest("Read", { file_path: join(root, f) }, root), f).toBeUndefined();
+    // SVG is text: a 300 KB one floods the context like any other text file
+    expect(suggest("Read", { file_path: join(root, "logo.svg") }, root)?.tool).toBe(
+      "em_execute_file",
+    );
+    expect(suggest("Read", { file_path: join(root, "data.json") }, root)?.tool).toBe(
+      "em_execute_file",
+    );
+  });
+});
+
 describe("bash routing ignores heredoc bodies", () => {
   it("lets cat-redirect writes through and does not read pipes inside heredocs", () => {
+    writeFileSync(join(root, "big.log"), "x".repeat(30 * 1024));
     const write = "cat >> notes.md <<'EOF'\nsome | head text\nEOF";
     expect(withoutHeredocs(write)).toBe("cat >> notes.md <<EOF");
     expect(suggest("Bash", { command: write }, root)).toBeUndefined();
     expect(suggest("Bash", { command: "cat big.log" }, root)?.tool).toBe("em_execute");
-    expect(suggest("Bash", { command: "cat a.log > b.log | head" }, root)?.tool).toBe("em_execute");
+    expect(suggest("Bash", { command: "cat big.log | grep x" }, root)?.tool).toBe("em_execute");
+    // a redirection into a file is a write, and `| head` caps what is printed
+    expect(suggest("Bash", { command: "cat big.log > b.log" }, root)).toBeUndefined();
+    expect(suggest("Bash", { command: "cat big.log | head" }, root)).toBeUndefined();
   });
 });

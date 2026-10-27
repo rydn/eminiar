@@ -18,6 +18,31 @@ d3-force, Prism) with no CDN. The theme follows your system, or you can choose l
 
 Token savings per session, per project and over your lifetime. Index and graph sizes.
 
+### Usage
+
+![Usage: cost per day by model, the session's context timeline with compactions, scores and insights](images/dashboard-usage-dark.webp)
+
+The interactive version of [`em_usage`](usage.md): what your Claude Code sessions cost, from the
+transcripts on your machine.
+
+- Tiles for today, the last 7 days, the selected session, cache hit rate, the burn rate of the
+  active 5-hour block (n/a until the block has a few calls over a few minutes) and plan use
+  (5-hour and 7-day windows, from the statusline, subscribers only).
+- Cost per day stacked by model for the last 7, 30 or 90 days, every day of the range on the
+  axis even when it had no calls. Each model id gets its own colour: the family sets the hue
+  (Opus violet, Sonnet blue, Haiku green, Fable rose, other grey) and each distinct id in the
+  family a lighter or darker step, with the id always written next to the swatch.
+- The context timeline of one session: context tokens per API call, dots coloured by model,
+  dashed markers where the context was compacted. Pick a session from the menu, or arrive from
+  the **usage →** link on the Sessions tab.
+- Tables of models (share of cost, tokens, unpriced models flagged), tool results in context, and
+  5-hour billing blocks.
+- Insights with their severity, the project-wide and the session's, and the four scores
+  (context health, cost efficiency, cache efficiency, delegation) with their reasons.
+- What eminiar saved, direct and compounding, with the assumptions.
+
+Deep link: `#/usage?session=<id>&range=7d|30d|90d`.
+
 ### Explore
 
 ![Explore: file tree, source with symbol gutter, and file impact](images/dashboard-explore-dark.webp)
@@ -111,7 +136,8 @@ against `HEAD` and the working tree. Reindex one file.
 
 ### Sessions and System
 
-Session event timelines, maintenance actions, doctor checks and the index-run log.
+Session event timelines (each session links to its usage), maintenance actions, doctor checks
+and the index-run log.
 
 ## Deep links
 

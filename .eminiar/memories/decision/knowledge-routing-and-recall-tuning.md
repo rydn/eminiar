@@ -1,0 +1,16 @@
+---
+name: decision/knowledge-routing-and-recall-tuning
+kind: decision
+tags: [hooks, recall, routing, history, memory, observability]
+related: [file:src/hooks/routing.ts, file:src/session/recall.ts, file:src/session/recall-explain.ts, file:src/memory/store.ts, file:src/hooks/capture.ts, file:src/hooks/session-start.ts, file:src/tools/em_stats.ts, file:src/cli.ts, file:src/config.ts]
+created: 2026-10-26T19:51:14.028Z
+updated: 2026-10-26T19:51:14.028Z
+---
+
+Knowledge triggering (branch feature/knowledge-routing, v0.9.0, 2026-10-26). Execution tools fired reliably because routing *denies* heavy Bash/Read/Grep and names the em_* retry; memories, code search and history only had advisory text plus strictly gated, once-per-window hook injection. Three changes, chosen by Ryan from four options (semantic recall over a server socket was the one not taken, for hook-latency reasons):
+
+1. Route knowledge like execution (`src/hooks/routing.ts`): `historyCall(cmd)` maps `git log/blame/show/shortlog` to an em_history call (`-- path` → file, `A..B` → branch, `--grep` → search, `-L :fn:file` → symbol, `--author` → timeline, `git show sha` → commit); in enforce mode the raw log is denied with that call in the reason. `git log -1 --format=…` and `git show REF:path` stay native. A Grep whose identifier the graph defines (symbolHints found something) is routed to em_symbols/em_search: annotated when files-only, denied when content-mode. `suggest()` takes a fourth `extra: { symbol }` argument for this.
+2. Softer, wider recall (`src/session/recall.ts`): the bar is counted with `sharedTerms` (word-start matches; the reranker's `matched` is a substring test that let `app` match `capped`). One shared term qualifies when it is a slug word or tag of the memory and the prompt is short (`NAME_MATCH_RATIO` 0.3); naming the memory outright always qualifies. Items repeat after `recall.repeatAfter` prompts (default 10; `shownKeys` counts user_prompt events since the key was shown). File recall also matches memories whose body names the path (`bodyNamesPath`) or one of the file's symbols (`symbolMentionPattern`: backticked, qualified or called names ≥ 5 chars; `fileSymbols` reads them from the graph). `memory/store.ts` adds `impliedFileLinks`: project files a body names by path join `node_ids` after the header's `related` and get `mentions` edges at confidence 0.6. The fix record (`hist:` key) is shown on Read as well as Edit; fan-in (`fanin:` key) only on Edit. SessionStart says when `history_files` has not been built yet.
+3. Observability: every prompt recall decision is a `recall` event (category added to CATEGORIES, P4) with keys, path, terms, need and the gated candidates, quiet ones included; `recallStats`/`formatRecallStats` feed em_stats; `src/session/recall-explain.ts` powers `eminiar recall --explain "<prompt>" [--session]`, `--file <path>` and `--replay [--limit] [--since]`. SessionStart logs root/db/document count to ~/.eminiar/hook.log to trace the "0 documents at start" anomaly seen on 2026-10-26.
+
+Why: measured, not guessed — the replay showed prompts failing the two-term bar on synonyms and substring noise firing irrelevant memories. Not changed: hooks still never run git or load embeddings; the `related:` header stays the deliberate list (implied links are lower confidence and do not touch the file).

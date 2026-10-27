@@ -108,7 +108,7 @@ export interface VocabTerm {
   df: number;
 }
 
-export type PurgeScope = "index" | "sessions" | "graph" | "memories" | "all";
+export type PurgeScope = "index" | "sessions" | "graph" | "memories" | "usage" | "all";
 
 export interface SessionRow {
   id: string;
@@ -328,4 +328,119 @@ export interface SnapshotRow {
   bytes: number;
   created_at: number;
   consumed_at: number | null;
+}
+
+// --- usage (transcript-derived model calls, tool results, context events) --------------
+
+/** One API request as recorded in a Claude Code transcript. Token counts are raw, cost is cached. */
+export interface ApiCallRow {
+  request_id: string;
+  message_id: string;
+  session_id: string;
+  /** Subagent id when the call came from a sidechain, else null. */
+  agent_id: string | null;
+  sidechain: number;
+  ts: number;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_create_5m: number;
+  cache_create_1h: number;
+  cache_read: number;
+  thinking_tokens: number;
+  web_searches: number;
+  web_fetches: number;
+  service_tier: string | null;
+  speed: string | null;
+  stop_reason: string | null;
+  prompt_id: string | null;
+  git_branch: string | null;
+  cwd: string | null;
+  effort: string | null;
+  version: string | null;
+  entrypoint: string | null;
+  /** Cost at ingest time from the bundled pricing table; null when the model is unknown. */
+  cost_usd: number | null;
+  /** 1 when cost_usd came from a known price, 0 when the model was not priced. */
+  priced: number;
+}
+
+export type ApiCallInput = Omit<ApiCallRow, "cost_usd" | "priced"> &
+  Partial<Pick<ApiCallRow, "cost_usd" | "priced">>;
+
+/** One tool invocation and its result size, from the transcript. */
+export interface ToolUseRow {
+  tool_use_id: string;
+  session_id: string;
+  agent_id: string | null;
+  ts: number;
+  tool: string;
+  input_chars: number;
+  /** Characters in the tool_result block; null until the result entry is seen. */
+  result_chars: number | null;
+  is_error: number;
+  /** The request that produced the tool_use block. */
+  request_id: string | null;
+}
+
+/** Compactions and clears, from `compact_boundary` system entries. */
+export interface ContextEventRow {
+  id: number;
+  session_id: string;
+  ts: number;
+  kind: "compact" | "clear";
+  trigger: string | null;
+  pre_tokens: number | null;
+  post_tokens: number | null;
+}
+export type ContextEventInput = Omit<ContextEventRow, "id">;
+
+/** Tail state for one transcript file so ingest only reads new bytes. */
+export interface TranscriptFileRow {
+  path: string;
+  session_id: string | null;
+  offset: number;
+  size: number;
+  mtime: number;
+  /**
+   * sha1 (hex) of the first min(512, size) bytes when the row was written, so a rewrite
+   * that keeps the size is still noticed. Null for rows that never read the file.
+   */
+  head_hash?: string | null;
+  ingested_at: number;
+}
+
+/** One statusline render, recorded when the figures change. */
+export interface StatuslineSnapshotRow {
+  id: number;
+  session_id: string;
+  ts: number;
+  model_id: string | null;
+  cost_usd: number | null;
+  api_ms: number | null;
+  duration_ms: number | null;
+  ctx_input_tokens: number | null;
+  ctx_output_tokens: number | null;
+  ctx_size: number | null;
+  ctx_used_pct: number | null;
+  cache_warm: number | null;
+  cache_ttl: string | null;
+  five_hour_pct: number | null;
+  five_hour_resets_at: number | null;
+  seven_day_pct: number | null;
+  seven_day_resets_at: number | null;
+  lines_added: number | null;
+  lines_removed: number | null;
+}
+export type StatuslineSnapshotInput = Omit<StatuslineSnapshotRow, "id">;
+
+export interface UsageFilter {
+  sessionId?: string | undefined;
+  /** Epoch ms, inclusive. */
+  since?: number | undefined;
+  /** Epoch ms, exclusive. */
+  until?: number | undefined;
+  /** true = only sidechain rows, false = only main-thread rows, undefined = both. */
+  sidechain?: boolean | undefined;
+  limit?: number | undefined;
 }

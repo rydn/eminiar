@@ -31,6 +31,27 @@ run it`;
     expect(out[2]!.startLine).toBe(10);
   });
 
+  it("keeps the words of a heading that has no body", () => {
+    const only = chunkMarkdown("# Title only with text on the heading line", "note");
+    expect(only).toEqual([
+      {
+        title: "note > Title only with text on the heading line",
+        body: "Title only with text on the heading line",
+        startLine: 1,
+        endLine: 1,
+      },
+    ]);
+    // Sibling and trailing headings get a chunk each; a parent heading does not, since its
+    // text is already in every descendant's title; bodied sections look as before.
+    const out = chunkMarkdown("# Top\n\n## Alpha\n\n## Beta\nbody\n\n## Gamma\n", "doc.md");
+    expect(out.map((c) => [c.title, c.body])).toEqual([
+      ["doc.md > Top > Alpha", "Alpha"],
+      ["doc.md > Top > Beta", "body\n"],
+      ["doc.md > Top > Gamma", "Gamma"],
+    ]);
+    expect(out[0]).toMatchObject({ startLine: 3, endLine: 3 });
+  });
+
   it("windows oversized sections on blank lines", () => {
     const para = "lorem ipsum dolor sit amet ".repeat(20);
     const md = `# Big\n${[para, para, para, para].join("\n\n")}`;

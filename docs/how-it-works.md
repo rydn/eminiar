@@ -47,7 +47,7 @@ equivalents are [below](#cursor)):
 |---|---|
 | `SessionStart` | Adds the project brief: overview, accepted decisions, constraints, hot files, index freshness. After a resume, replays the Session Guide |
 | `UserPromptSubmit` | Attaches memories and doc pages that match the prompt |
-| `PreToolUse` | Routes noisy calls to `em_*` tools. Attaches memories, fix history and fan-in for a file before a read or edit. Lists risky files before `git commit` |
+| `PreToolUse` | Routes noisy calls to `em_*` tools and history or symbol questions to `em_history` / `em_symbols`. Attaches memories and fix history for a file before a read or edit, fan-in before an edit. Lists risky files before `git commit` |
 | `PostToolUse` | Captures session events (async, never blocks) |
 | `PostToolUseFailure` | Attaches earlier occurrences of the same error and how they were resolved |
 | `SubagentStop` | Records the subagent's findings, so `em_recall` can find them later |
@@ -90,9 +90,11 @@ Routing decides what happens when Claude calls a native tool that an `em_*` tool
 
 | Native call | Suggested tool | Trigger |
 |---|---|---|
-| `Bash` | `em_execute` | Commands that usually print a lot, or pipes into `head`, `tail`, `grep`, `wc`, `sort`, `jq` … |
+| `Bash` | `em_history` | `git log`, `git blame`, `git show <sha>`, `git shortlog`, mapped to the matching action (`-- path` → `file`, `A..B` → `branch`, `--grep` → `search`, `-L :fn:file` → `symbol`). A one-commit `git log -1 --format=…` and `git show REF:path` are left alone |
+| `Bash` | `em_execute` | A simple command that usually prints a lot (`npm test`, `git diff`, `find`, `grep -r`, `curl` …) or streams an unknown output through `grep`, `sort`, `jq` … |
 | `Read` | `em_execute_file` | Files over 200 KB, or data files (`.log`, `.json`, `.csv`, `.xml`, `.sql`, `.har` …) over 20 KB |
-| `Grep` | `em_execute` | Content-mode grep without a `head_limit` |
+| `Grep` | `em_symbols` / `em_search` | The pattern's identifier is a symbol the graph defines. Files-only grep: annotated with the matching symbols. Content-mode grep: denied |
+| `Grep` | `em_execute` | Content-mode grep without a `head_limit` for anything else |
 | `WebFetch` | `em_fetch_and_index` / `em_docs` | Always. Names the docs source if the site is already indexed |
 | `WebSearch` | `em_docs` | When documentation sources exist (annotation only) |
 | `Agent`, `Task` | — | Adds eminiar guidance to the subagent prompt and brief |
@@ -106,6 +108,23 @@ Set the mode with `routing.mode` in `eminiar.config.json`:
 | `annotate` | Allows the call and adds a hint |
 | `off` | No routing hints |
 
+**Bash is judged one simple command at a time.** A line is split at `;`, `&&`, `||` and
+newlines (heredoc bodies and quoted text are skipped), and each part is classified on its own, so
+`cd src && npm test` is heavy because of `npm test`, and the denial names that part. Output that
+is bounded by construction stays native:
+
+- a trailing `| head -40`, `| tail -5` or `| wc -l` (up to 400 lines);
+- `head` / `tail` of a file, a `sed -n 'A,Bp'` range, `du -s`, `grep -l` / `-c`, `git log -1`;
+- `cat` or `grep` over named files small enough for the native `Read` (200 KB in total, 20 KB
+  for data files): the same read through Bash;
+- a command that changes something (`git commit`, `git checkout`, `npm install`, `rm`, `mv`,
+  `sed -i`, a `>` redirection into a file …): its output is secondary, and the native tool is
+  where Claude Code's permission prompts live.
+
+Every routing decision is recorded as a `routing` session event: `em_stats` reports how many
+native calls were denied or annotated per tool, which `em_*` tool they were sent to and which
+rule did it, and `~/.eminiar/hook.log` has one line per denial.
+
 **Safety rule:** `enforce` denies a call only while an eminiar MCP server runs for the project.
 The server writes a pid marker under `~/.eminiar/projects/<id>/servers/`. With no server, the
 hook annotates instead. Claude is never told to retry with a tool that it cannot reach. For
@@ -114,7 +133,9 @@ the same reason, a big `Read` that a `Read` deny or `ask` rule matches is not re
 permission check.
 
 **Project knowledge is not routing.** Memories, fix history, fan-in and doc notes are attached
-in every mode, including `off`.
+in every mode, including `off`. Every such decision is recorded, fired or quiet; `em_stats` and
+`eminiar recall --explain` show the hit rate and the reasons (see
+[Memory and recall](memory-and-recall.md#rules-that-keep-recall-useful)).
 
 ## Sandbox
 
@@ -122,7 +143,9 @@ in every mode, including `off`.
 root.
 
 - **Languages:** shell and JavaScript/TypeScript always. Python, Ruby, Go, PHP, Perl, R,
-  Elixir, Rust and C# when their tools are installed.
+  Elixir, Rust and C# when their tools are installed. JavaScript and TypeScript snippets run
+  as ES modules; a snippet that calls `require(...)` gets one that resolves packages and
+  relative paths from the project root, as a script of the project would.
 - **Output:** output over `sandbox.indexThreshold` (5 KB) is indexed. Claude gets back only the
   sections that match its `intent`, plus a list of searchable terms.
 - **Permissions:** shell snippets are checked against Claude Code's `permissions.deny` and `ask`
@@ -158,14 +181,14 @@ Each chunk has a `source`, for example `memory`, `git`, `docs:<name>` or a sandb
 
 ## Session continuity
 
-The capture hooks sort session events into 26 categories with four priority levels:
+The capture hooks sort session events into 27 categories with four priority levels:
 
 | Priority | Categories |
 |---|---|
 | P1 | files, tasks, plans, rules, user prompt |
 | P2 | decisions, git, errors and their resolutions, constraints, blockers, rejected approaches, environment, agent findings, iteration loops, assistant summaries |
 | P3 | latency, MCP tools, subagents, skills, external references, role |
-| P4 | intent, data, tool calls, session start |
+| P4 | intent, data, tool calls, session start, recall decisions |
 
 Before `/compact`, eminiar writes a **Session Guide** of 2 KB or less: P1 always, then P2, P3 and
 P4 as space allows. When the session resumes, the guide is replayed. `em_search {sort:

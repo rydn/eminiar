@@ -1,10 +1,24 @@
+import type Database from "better-sqlite3";
+
 /**
  * Versioned migrations. Each entry runs once, in order, inside a transaction;
- * `meta.schema_version` records the last applied version.
+ * `meta.schema_version` records the last applied version. A migration is raw `sql`,
+ * an `up` step for changes that must look at the live schema first (SQLite has no
+ * ADD COLUMN IF NOT EXISTS), or both (sql runs first).
+ *
+ * Never edit a shipped migration in place: databases that already ran it will not see
+ * the change. Add a new version instead.
  */
 export interface Migration {
   version: number;
-  sql: string;
+  sql?: string;
+  up?: (db: Database.Database) => void;
+}
+
+/** True when `table` already has a column named `column`. */
+export function hasColumn(db: Database.Database, table: string, column: string): boolean {
+  const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+  return cols.some((c) => c.name === column);
 }
 
 export const migrations: Migration[] = [
@@ -268,6 +282,116 @@ CREATE TABLE IF NOT EXISTS index_runs (
   detail TEXT
 );
 `,
+  },
+  {
+    // Usage insights: api_calls mirrors one API request per Claude Code transcript entry
+    // (deduped on request_id + message_id; cost cached at ingest), tool_uses pairs each
+    // tool_use block with its tool_result size, context_events records compactions,
+    // transcript_files keeps the byte offset so ingest only reads new bytes, and
+    // statusline_snapshots stores what `eminiar statusline` saw. Column names = row fields.
+    version: 5,
+    sql: `
+CREATE TABLE IF NOT EXISTS api_calls (
+  request_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  agent_id TEXT,
+  sidechain INTEGER NOT NULL DEFAULT 0,
+  ts INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_create_5m INTEGER NOT NULL DEFAULT 0,
+  cache_create_1h INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  thinking_tokens INTEGER NOT NULL DEFAULT 0,
+  web_searches INTEGER NOT NULL DEFAULT 0,
+  web_fetches INTEGER NOT NULL DEFAULT 0,
+  service_tier TEXT,
+  speed TEXT,
+  stop_reason TEXT,
+  prompt_id TEXT,
+  git_branch TEXT,
+  cwd TEXT,
+  effort TEXT,
+  version TEXT,
+  entrypoint TEXT,
+  cost_usd REAL,
+  priced INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (request_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS api_calls_session_ts ON api_calls(session_id, ts);
+CREATE INDEX IF NOT EXISTS api_calls_ts ON api_calls(ts);
+
+CREATE TABLE IF NOT EXISTS tool_uses (
+  tool_use_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  agent_id TEXT,
+  ts INTEGER NOT NULL,
+  tool TEXT NOT NULL,
+  input_chars INTEGER NOT NULL DEFAULT 0,
+  result_chars INTEGER,
+  is_error INTEGER NOT NULL DEFAULT 0,
+  request_id TEXT
+);
+CREATE INDEX IF NOT EXISTS tool_uses_session_ts ON tool_uses(session_id, ts);
+CREATE INDEX IF NOT EXISTS tool_uses_ts ON tool_uses(ts);
+
+CREATE TABLE IF NOT EXISTS context_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  trigger TEXT,
+  pre_tokens INTEGER,
+  post_tokens INTEGER
+);
+CREATE INDEX IF NOT EXISTS context_events_session_ts ON context_events(session_id, ts);
+CREATE INDEX IF NOT EXISTS context_events_ts ON context_events(ts);
+
+CREATE TABLE IF NOT EXISTS transcript_files (
+  path TEXT PRIMARY KEY,
+  session_id TEXT,
+  offset INTEGER NOT NULL DEFAULT 0,
+  size INTEGER NOT NULL DEFAULT 0,
+  mtime INTEGER NOT NULL DEFAULT 0,
+  ingested_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS statusline_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  model_id TEXT,
+  cost_usd REAL,
+  api_ms INTEGER,
+  duration_ms INTEGER,
+  ctx_input_tokens INTEGER,
+  ctx_output_tokens INTEGER,
+  ctx_size INTEGER,
+  ctx_used_pct REAL,
+  cache_warm INTEGER,
+  cache_ttl TEXT,
+  five_hour_pct REAL,
+  five_hour_resets_at INTEGER,
+  seven_day_pct REAL,
+  seven_day_resets_at INTEGER,
+  lines_added INTEGER,
+  lines_removed INTEGER
+);
+CREATE INDEX IF NOT EXISTS statusline_snapshots_session_ts ON statusline_snapshots(session_id, ts);
+CREATE INDEX IF NOT EXISTS statusline_snapshots_ts ON statusline_snapshots(ts);
+`,
+  },
+  {
+    // transcript_files.head_hash (fingerprint of the file head, so a rewrite with the same
+    // size is noticed) was first added to v5 after v5 had already run on real databases, so
+    // version-5 databases exist both with and without the column. Add it only when missing.
+    version: 6,
+    up(db) {
+      if (!hasColumn(db, "transcript_files", "head_hash"))
+        db.exec("ALTER TABLE transcript_files ADD COLUMN head_hash TEXT");
+    },
   },
 ];
 

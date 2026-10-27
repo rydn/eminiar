@@ -3,8 +3,12 @@ import * as sqliteVec from "sqlite-vec";
 import type { SessionPatch, StorageAdapter } from "../adapter.js";
 import { topTermsOf } from "../terms.js";
 import type {
+  ApiCallInput,
+  ApiCallRow,
   ChunkInput,
   ChunkWithDoc,
+  ContextEventInput,
+  ContextEventRow,
   DocumentInput,
   DocumentRow,
   DocumentSummaryRow,
@@ -31,6 +35,11 @@ import type {
   SourceStatRow,
   StatDelta,
   StatRow,
+  StatuslineSnapshotInput,
+  StatuslineSnapshotRow,
+  ToolUseRow,
+  TranscriptFileRow,
+  UsageFilter,
   VecHit,
   VocabTerm,
 } from "../types.js";
@@ -76,6 +85,36 @@ function filterSql(f: SearchFilters | undefined): { where: string; params: unkno
     params.push(...f.documentIds);
   }
   return { where: clauses.length ? ` AND ${clauses.join(" AND ")}` : "", params };
+}
+
+/**
+ * WHERE clause for the usage tables. `sidechain` names the column expression that means
+ * "this row came from a subagent" (api_calls has a column; tool_uses infers it from
+ * agent_id; tables without the notion pass null and ignore the filter).
+ */
+function usageWhere(
+  f: UsageFilter,
+  opts: { sidechain?: string | null } = {},
+): { where: string; params: unknown[] } {
+  const clauses: string[] = ["1=1"];
+  const params: unknown[] = [];
+  if (f.sessionId) {
+    clauses.push("session_id = ?");
+    params.push(f.sessionId);
+  }
+  if (f.since !== undefined) {
+    clauses.push("ts >= ?");
+    params.push(f.since);
+  }
+  if (f.until !== undefined) {
+    clauses.push("ts < ?");
+    params.push(f.until);
+  }
+  if (f.sidechain !== undefined && opts.sidechain !== null) {
+    const expr = opts.sidechain ?? "sidechain = 1";
+    clauses.push(f.sidechain ? expr : `NOT (${expr})`);
+  }
+  return { where: clauses.join(" AND "), params };
 }
 
 export class SqliteAdapter implements StorageAdapter {
@@ -135,7 +174,8 @@ export class SqliteAdapter implements StorageAdapter {
     if (pending.length) {
       this.transaction(() => {
         for (const m of pending) {
-          this.db.exec(m.sql);
+          if (m.sql) this.db.exec(m.sql);
+          m.up?.(this.db);
           this.metaSet("schema_version", String(m.version));
         }
       });
@@ -410,28 +450,63 @@ export class SqliteAdapter implements StorageAdapter {
 
   vecSearch(embedding: Float32Array, k: number, filters?: SearchFilters): VecHit[] {
     if (!this.vectors) return [];
-    // vec0 KNN cannot join; over-fetch then apply filters.
-    const raw = this.db
-      .prepare(
-        "SELECT chunk_id id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-      )
-      .all(embedding, BigInt(filters ? k * 4 : k)) as Array<{ id: number; distance: number }>;
-    if (!filters || !raw.length) return raw.map((r) => ({ chunkId: r.id, distance: r.distance }));
     const { where, params } = filterSql(filters);
-    const allowed = new Set(
-      (
-        this.db
+    // The unfiltered query is the hot path: plain KNN, nothing else.
+    if (!where) return this.knn(embedding, k);
+    // vec0 KNN cannot join, but it takes an `IN` constraint on the key next to MATCH and
+    // k, so the k nearest are picked among the allowed chunks only. Over-fetching and
+    // post-filtering instead misses a narrow source (a few hundred chunks out of thousands)
+    // entirely when none of its chunks make the top k*4.
+    try {
+      return this.knn(
+        embedding,
+        k,
+        `AND chunk_id IN (SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE 1=1${where})`,
+        params,
+      );
+    } catch {
+      // a vec0 build without the IN constraint: widen the over-fetch until k allowed hits
+      return this.vecSearchWidening(embedding, k, where, params);
+    }
+  }
+
+  private knn(embedding: Float32Array, k: number, extra = "", params: unknown[] = []): VecHit[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT chunk_id id, distance FROM chunk_vec WHERE embedding MATCH ? AND k = ? ${extra} ORDER BY distance`,
+        )
+        .all(embedding, BigInt(k), ...params) as Array<{ id: number; distance: number }>
+    ).map((r) => ({ chunkId: r.id, distance: r.distance }));
+  }
+
+  /** Fallback filtered KNN: fetch k*4, k*16, ... nearest until k pass the filter or all were seen. */
+  private vecSearchWidening(
+    embedding: Float32Array,
+    k: number,
+    where: string,
+    params: unknown[],
+  ): VecHit[] {
+    const total = this.vecCount();
+    for (let fetch = k * 4; ; fetch *= 4) {
+      const raw = this.knn(embedding, Math.min(fetch, total));
+      if (!raw.length) return [];
+      const allowed = new Set<number>();
+      for (let i = 0; i < raw.length; i += 400) {
+        const ids = raw.slice(i, i + 400).map((r) => r.chunkId);
+        for (const r of this.db
           .prepare(
             `SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id
-             WHERE c.id IN (${raw.map(() => "?").join(",")})${where}`,
+             WHERE c.id IN (${ids.map(() => "?").join(",")})${where}`,
           )
-          .all(...raw.map((r) => r.id), ...params) as Array<{ id: number }>
-      ).map((r) => r.id),
-    );
-    return raw
-      .filter((r) => allowed.has(r.id))
-      .slice(0, k)
-      .map((r) => ({ chunkId: r.id, distance: r.distance }));
+          .all(...ids, ...params) as Array<{ id: number }>)
+          allowed.add(r.id);
+      }
+      const hits = raw.filter((r) => allowed.has(r.chunkId)).slice(0, k);
+      // Stop once everything was asked for (`fetch >= total`), not once everything came
+      // back: a KNN that returns fewer rows than asked must not widen for ever.
+      if (hits.length >= k || fetch >= total) return hits;
+    }
   }
 
   unembeddedChunkIds(limit: number): number[] {
@@ -801,6 +876,29 @@ export class SqliteAdapter implements StorageAdapter {
       )
       .all(...kinds) as Array<{ id: string; n: number }>) {
       get(r.id).fanOut = r.n;
+    }
+    return out;
+  }
+
+  graphDependentFileCounts(paths: string[], kinds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (!paths.length || !kinds.length) return out;
+    const kph = kinds.map(() => "?").join(",");
+    for (let i = 0; i < paths.length; i += 400) {
+      const batch = paths.slice(i, i + 400);
+      const pph = batch.map(() => "?").join(",");
+      for (const r of this.db
+        .prepare(
+          `SELECT d.path p, COUNT(DISTINCT s.path) n
+             FROM graph_nodes d
+             JOIN graph_edges e ON e.dst = d.id AND e.kind IN (${kph})
+             JOIN graph_nodes s ON s.id = e.src
+            WHERE d.path IN (${pph}) AND s.path IS NOT NULL AND s.path <> d.path
+            GROUP BY d.path`,
+        )
+        .all(...kinds, ...batch) as Array<{ p: string; n: number }>) {
+        out.set(r.p, r.n);
+      }
     }
     return out;
   }
@@ -1243,6 +1341,264 @@ export class SqliteAdapter implements StorageAdapter {
     return (this.db.prepare("SELECT COUNT(*) n FROM memories").get() as { n: number }).n;
   }
 
+  // --- usage: model calls, tool results, context events, statusline ------------
+
+  apiCallsUpsert(rows: ApiCallInput[]): number {
+    if (!rows.length) return 0;
+    // Claude Code writes a response's first entry with placeholder usage (output_tokens 8,
+    // no thinking count) and a later entry with the final counts; the two can land in
+    // different ingest passes. Counts never decrease, so a conflict keeps the MAX of each,
+    // takes the incoming stop_reason when it has one, and takes the incoming cost/priced
+    // whenever the incoming output count is at least the stored one (then the incoming
+    // row is the final, repriced one; a stale re-ingest of the placeholder loses).
+    const ins = this.prep(
+      `INSERT INTO api_calls (request_id, message_id, session_id, agent_id, sidechain, ts, model,
+         input_tokens, output_tokens, cache_create_5m, cache_create_1h, cache_read, thinking_tokens,
+         web_searches, web_fetches, service_tier, speed, stop_reason, prompt_id, git_branch, cwd, effort,
+         version, entrypoint, cost_usd, priced)
+       VALUES (@request_id, @message_id, @session_id, @agent_id, @sidechain, @ts, @model,
+         @input_tokens, @output_tokens, @cache_create_5m, @cache_create_1h, @cache_read, @thinking_tokens,
+         @web_searches, @web_fetches, @service_tier, @speed, @stop_reason, @prompt_id, @git_branch, @cwd, @effort,
+         @version, @entrypoint, @cost_usd, @priced)
+       ON CONFLICT(request_id, message_id) DO UPDATE SET
+         cost_usd = CASE WHEN excluded.output_tokens >= api_calls.output_tokens THEN excluded.cost_usd ELSE api_calls.cost_usd END,
+         priced = CASE WHEN excluded.output_tokens >= api_calls.output_tokens THEN excluded.priced ELSE api_calls.priced END,
+         input_tokens = MAX(api_calls.input_tokens, excluded.input_tokens),
+         output_tokens = MAX(api_calls.output_tokens, excluded.output_tokens),
+         cache_create_5m = MAX(api_calls.cache_create_5m, excluded.cache_create_5m),
+         cache_create_1h = MAX(api_calls.cache_create_1h, excluded.cache_create_1h),
+         cache_read = MAX(api_calls.cache_read, excluded.cache_read),
+         thinking_tokens = MAX(api_calls.thinking_tokens, excluded.thinking_tokens),
+         web_searches = MAX(api_calls.web_searches, excluded.web_searches),
+         web_fetches = MAX(api_calls.web_fetches, excluded.web_fetches),
+         stop_reason = COALESCE(excluded.stop_reason, api_calls.stop_reason),
+         service_tier = COALESCE(excluded.service_tier, api_calls.service_tier),
+         speed = COALESCE(excluded.speed, api_calls.speed),
+         prompt_id = COALESCE(api_calls.prompt_id, excluded.prompt_id),
+         effort = COALESCE(api_calls.effort, excluded.effort)`,
+    );
+    // `changes` counts the conflict update too, so report new rows by comparing counts.
+    const count = this.prep("SELECT COUNT(*) AS n FROM api_calls");
+    return this.transaction(() => {
+      const before = (count.get() as { n: number }).n;
+      for (const r of rows) {
+        ins.run({
+          request_id: r.request_id,
+          message_id: r.message_id,
+          session_id: r.session_id,
+          agent_id: r.agent_id ?? null,
+          sidechain: r.sidechain ? 1 : 0,
+          ts: r.ts,
+          model: r.model,
+          input_tokens: r.input_tokens,
+          output_tokens: r.output_tokens,
+          cache_create_5m: r.cache_create_5m,
+          cache_create_1h: r.cache_create_1h,
+          cache_read: r.cache_read,
+          thinking_tokens: r.thinking_tokens,
+          web_searches: r.web_searches,
+          web_fetches: r.web_fetches,
+          service_tier: r.service_tier ?? null,
+          speed: r.speed ?? null,
+          stop_reason: r.stop_reason ?? null,
+          prompt_id: r.prompt_id ?? null,
+          git_branch: r.git_branch ?? null,
+          cwd: r.cwd ?? null,
+          effort: r.effort ?? null,
+          version: r.version ?? null,
+          entrypoint: r.entrypoint ?? null,
+          cost_usd: r.cost_usd ?? null,
+          priced: r.priced ?? 0,
+        });
+      }
+      return (count.get() as { n: number }).n - before;
+    });
+  }
+
+  apiCalls(filter: UsageFilter = {}): ApiCallRow[] {
+    const { where, params } = usageWhere(filter);
+    params.push(filter.limit ?? 100_000);
+    return this.prep(
+      `SELECT * FROM api_calls WHERE ${where} ORDER BY ts ASC, rowid ASC LIMIT ?`,
+    ).all(...params) as ApiCallRow[];
+  }
+
+  apiCallsLatestTs(): number | undefined {
+    const row = this.prep("SELECT MAX(ts) AS ts FROM api_calls").get() as
+      | { ts: number | null }
+      | undefined;
+    return row?.ts ?? undefined;
+  }
+
+  toolUsesUpsert(rows: ToolUseRow[]): number {
+    if (!rows.length) return 0;
+    // A later row (the tool_result entry) fills in result_chars / is_error; the tool_use row
+    // keeps its tool, input size and request. Either side may arrive first.
+    const ins = this.prep(
+      `INSERT INTO tool_uses (tool_use_id, session_id, agent_id, ts, tool, input_chars, result_chars, is_error, request_id)
+       VALUES (@tool_use_id, @session_id, @agent_id, @ts, @tool, @input_chars, @result_chars, @is_error, @request_id)
+       ON CONFLICT(tool_use_id) DO UPDATE SET
+         tool = CASE WHEN tool_uses.tool = '' THEN excluded.tool ELSE tool_uses.tool END,
+         input_chars = MAX(tool_uses.input_chars, excluded.input_chars),
+         result_chars = COALESCE(excluded.result_chars, tool_uses.result_chars),
+         is_error = MAX(tool_uses.is_error, excluded.is_error),
+         request_id = COALESCE(tool_uses.request_id, excluded.request_id),
+         agent_id = COALESCE(tool_uses.agent_id, excluded.agent_id),
+         ts = MIN(tool_uses.ts, excluded.ts)`,
+    );
+    // `changes` counts the conflict update too, so report new rows by comparing counts.
+    const count = this.prep("SELECT COUNT(*) AS n FROM tool_uses");
+    return this.transaction(() => {
+      const before = (count.get() as { n: number }).n;
+      for (const r of rows) {
+        ins.run({
+          tool_use_id: r.tool_use_id,
+          session_id: r.session_id,
+          agent_id: r.agent_id ?? null,
+          ts: r.ts,
+          tool: r.tool,
+          input_chars: r.input_chars,
+          result_chars: r.result_chars ?? null,
+          is_error: r.is_error ? 1 : 0,
+          request_id: r.request_id ?? null,
+        });
+      }
+      return (count.get() as { n: number }).n - before;
+    });
+  }
+
+  toolUses(filter: UsageFilter = {}): ToolUseRow[] {
+    const { where, params } = usageWhere(filter, { sidechain: "agent_id IS NOT NULL" });
+    params.push(filter.limit ?? 100_000);
+    return this.prep(
+      `SELECT * FROM tool_uses WHERE ${where} ORDER BY ts ASC, rowid ASC LIMIT ?`,
+    ).all(...params) as ToolUseRow[];
+  }
+
+  contextEventInsert(e: ContextEventInput): number {
+    const info = this.prep(
+      `INSERT INTO context_events (session_id, ts, kind, trigger, pre_tokens, post_tokens)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      e.session_id,
+      e.ts,
+      e.kind,
+      e.trigger ?? null,
+      e.pre_tokens ?? null,
+      e.post_tokens ?? null,
+    );
+    return Number(info.lastInsertRowid);
+  }
+
+  contextEvents(filter: UsageFilter = {}): ContextEventRow[] {
+    const { where, params } = usageWhere(filter, { sidechain: null });
+    params.push(filter.limit ?? 100_000);
+    return this.prep(
+      `SELECT * FROM context_events WHERE ${where} ORDER BY ts ASC, id ASC LIMIT ?`,
+    ).all(...params) as ContextEventRow[];
+  }
+
+  transcriptFileGet(path: string): TranscriptFileRow | undefined {
+    return this.prep("SELECT * FROM transcript_files WHERE path = ?").get(path) as
+      | TranscriptFileRow
+      | undefined;
+  }
+
+  transcriptFileSet(row: TranscriptFileRow): void {
+    this.prep(
+      `INSERT INTO transcript_files (path, session_id, offset, size, mtime, head_hash, ingested_at)
+       VALUES (@path, @session_id, @offset, @size, @mtime, @head_hash, @ingested_at)
+       ON CONFLICT(path) DO UPDATE SET
+         session_id = COALESCE(excluded.session_id, transcript_files.session_id),
+         offset = excluded.offset, size = excluded.size, mtime = excluded.mtime,
+         head_hash = excluded.head_hash, ingested_at = excluded.ingested_at`,
+    ).run({
+      path: row.path,
+      session_id: row.session_id ?? null,
+      offset: row.offset,
+      size: row.size,
+      mtime: row.mtime,
+      head_hash: row.head_hash ?? null,
+      ingested_at: row.ingested_at,
+    });
+  }
+
+  transcriptFiles(): TranscriptFileRow[] {
+    return this.prep("SELECT * FROM transcript_files ORDER BY path").all() as TranscriptFileRow[];
+  }
+
+  statuslineSnapshotInsert(s: StatuslineSnapshotInput): number {
+    const info = this.prep(
+      `INSERT INTO statusline_snapshots (session_id, ts, model_id, cost_usd, api_ms, duration_ms,
+         ctx_input_tokens, ctx_output_tokens, ctx_size, ctx_used_pct, cache_warm, cache_ttl,
+         five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, lines_added, lines_removed)
+       VALUES (@session_id, @ts, @model_id, @cost_usd, @api_ms, @duration_ms,
+         @ctx_input_tokens, @ctx_output_tokens, @ctx_size, @ctx_used_pct, @cache_warm, @cache_ttl,
+         @five_hour_pct, @five_hour_resets_at, @seven_day_pct, @seven_day_resets_at, @lines_added, @lines_removed)`,
+    ).run({
+      session_id: s.session_id,
+      ts: s.ts,
+      model_id: s.model_id ?? null,
+      cost_usd: s.cost_usd ?? null,
+      api_ms: s.api_ms ?? null,
+      duration_ms: s.duration_ms ?? null,
+      ctx_input_tokens: s.ctx_input_tokens ?? null,
+      ctx_output_tokens: s.ctx_output_tokens ?? null,
+      ctx_size: s.ctx_size ?? null,
+      ctx_used_pct: s.ctx_used_pct ?? null,
+      cache_warm: s.cache_warm ?? null,
+      cache_ttl: s.cache_ttl ?? null,
+      five_hour_pct: s.five_hour_pct ?? null,
+      five_hour_resets_at: s.five_hour_resets_at ?? null,
+      seven_day_pct: s.seven_day_pct ?? null,
+      seven_day_resets_at: s.seven_day_resets_at ?? null,
+      lines_added: s.lines_added ?? null,
+      lines_removed: s.lines_removed ?? null,
+    });
+    return Number(info.lastInsertRowid);
+  }
+
+  statuslineSnapshots(filter: UsageFilter = {}): StatuslineSnapshotRow[] {
+    const { where, params } = usageWhere(filter, { sidechain: null });
+    params.push(filter.limit ?? 100_000);
+    return this.prep(
+      `SELECT * FROM statusline_snapshots WHERE ${where} ORDER BY ts ASC, id ASC LIMIT ?`,
+    ).all(...params) as StatuslineSnapshotRow[];
+  }
+
+  statuslineLatest(sessionId?: string): StatuslineSnapshotRow | undefined {
+    if (sessionId) {
+      return this.prep(
+        "SELECT * FROM statusline_snapshots WHERE session_id = ? ORDER BY ts DESC, id DESC LIMIT 1",
+      ).get(sessionId) as StatuslineSnapshotRow | undefined;
+    }
+    return this.prep(
+      "SELECT * FROM statusline_snapshots ORDER BY ts DESC, id DESC LIMIT 1",
+    ).get() as StatuslineSnapshotRow | undefined;
+  }
+
+  statuslineSnapshotsPrune(opts: { olderThan: number; keepPerSession: number }): number {
+    const keep = Math.max(0, Math.floor(opts.keepPerSession));
+    return this.transaction(() => {
+      let n = this.prep("DELETE FROM statusline_snapshots WHERE ts < ?").run(
+        opts.olderThan,
+      ).changes;
+      // Per session, keep only the newest `keep` rows (sessions over the cap are rare, so the
+      // correlated subquery runs over the (session_id, ts) index for a handful of sessions).
+      n += this.prep(
+        `DELETE FROM statusline_snapshots WHERE id IN (
+           SELECT s.id FROM statusline_snapshots s
+           WHERE s.id NOT IN (
+             SELECT k.id FROM statusline_snapshots k
+             WHERE k.session_id = s.session_id
+             ORDER BY k.ts DESC, k.id DESC LIMIT ?
+           )
+         )`,
+      ).run(keep).changes;
+      return n;
+    });
+  }
+
   // --- misc --------------------------------------------------------------
 
   metaGet(key: string): string | undefined {
@@ -1278,6 +1634,11 @@ export class SqliteAdapter implements StorageAdapter {
       if (scope === "graph" || scope === "all") {
         this.db.exec(
           "DELETE FROM graph_edges; DELETE FROM graph_nodes; DELETE FROM graph_metrics;",
+        );
+      }
+      if (scope === "usage" || scope === "all") {
+        this.db.exec(
+          "DELETE FROM api_calls; DELETE FROM tool_uses; DELETE FROM context_events; DELETE FROM transcript_files; DELETE FROM statusline_snapshots;",
         );
       }
       if (scope === "memories" || scope === "all") {

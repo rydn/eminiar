@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ProjectContext } from "../context.js";
 import { checkCommand, loadPermissionRules } from "../permissions/settings.js";
 import { buildEnv } from "./env.js";
-import { detectInterpreter, resolveLanguage, writeScratch } from "./languages.js";
+import { detectInterpreter, prepareCode, resolveLanguage, writeScratch } from "./languages.js";
 import { type RunResult, runProcess } from "./run.js";
 
 export interface ExecuteInput {
@@ -40,7 +40,7 @@ export async function execute(ctx: ProjectContext, input: ExecuteInput): Promise
     }
   }
 
-  const file = writeScratch(input.code, lang.ext);
+  const file = writeScratch(prepareCode(lang, input.code), lang.ext);
   const env = buildEnv(ctx.config.sandbox.envAllow, {
     EMINIAR_PROJECT_ROOT: ctx.root,
     NODE_PATH: [join(ctx.root, "node_modules"), process.env.NODE_PATH].filter(Boolean).join(":"),

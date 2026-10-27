@@ -19,7 +19,7 @@ export function sourceFilter(source: string | string[] | undefined): {
 export const emSearch = defineTool({
   name: "em_search",
   description:
-    "Search everything eminiar has indexed: sandbox outputs, files, fetched pages, session memory, memories and code (chunks named by symbol, e.g. `src/auth.ts > Session.refresh`). Pass several queries at once — the round trip is paid once. Hybrid BM25 (porter + trigram) with typo correction; `sort: timeline` orders by recency (use after a resume); `mode: regex` scans indexed content with a JS regular expression and returns the matching lines with context (for ad-hoc greps over files not indexed, use em_execute with rg).",
+    'Search everything eminiar has indexed: sandbox outputs, files, fetched pages, session memory, memories, commit messages (source git) and code (chunks named by symbol, e.g. `src/auth.ts > Session.refresh`). Reach for it before Grep or Bash when looking for where something lives, what an earlier command printed, or what a past session found: `source: "code"` answers code questions by symbol, `sort: timeline` orders by recency (use after a resume), `mode: regex` scans indexed content with a JS regular expression and returns the matching lines with context (for ad-hoc greps over files not indexed, use em_execute with rg). Pass several queries at once — the round trip is paid once. Hybrid BM25 (porter + trigram) with typo correction.',
   schema: {
     queries: z.array(z.string().min(1)).min(1).describe("One or more search queries"),
     source: z
@@ -80,10 +80,21 @@ export const emSearch = defineTool({
       }
     }
     const out = formatResults(responses, args.max_tokens ?? ctx.config.search.defaultMaxTokens);
-    const note =
+    let note =
       mode !== "lexical" && mode !== "regex" && !vectorSearch && ctx.config.embeddings.enabled
         ? "\n\n(embeddings: model still loading — lexical results only this time)"
         : "";
+    // docs.embed=false stores documentation pages without vectors, so a semantic query over
+    // docs:* sources has nothing to match; say so instead of a bare "no matches".
+    const sources = Array.isArray(args.source) ? args.source : args.source ? [args.source] : [];
+    if (
+      mode === "semantic" &&
+      !ctx.config.docs.embed &&
+      sources.some((s) => s.startsWith("docs:")) &&
+      responses.every((r) => r.hits.length === 0)
+    )
+      note +=
+        '\n\n(docs:* pages are indexed without vectors because docs.embed is off; use mode "hybrid" or "lexical", or set docs.embed: true in eminiar.config.json and em_docs {action:"sync", force:true})';
     recordStat(ctx, "em_search", {
       rawChars: responses.reduce(
         (a, r) => a + r.hits.reduce((b, h) => b + h.chunk.body.length, 0),

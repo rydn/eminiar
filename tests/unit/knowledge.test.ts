@@ -13,9 +13,12 @@ import {
 import { upsertSources } from "../../src/docs/manifest.js";
 import { impact } from "../../src/graph/query.js";
 import { reindexCode } from "../../src/graph/reindex.js";
+import { indexContent } from "../../src/index/indexer.js";
 import { write } from "../../src/memory/store.js";
+import { search } from "../../src/search/pipeline.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
+import { emIndex } from "../../src/tools/em_index.js";
 import { buildKnowledge } from "../../src/ui/knowledge-api.js";
 
 let root: string;
@@ -101,6 +104,37 @@ describe("docs in the graph", () => {
     expect(db.graphEdgesFrom(["doc:left-pad"])).toEqual([]);
     expect(db.graphGetNode("doc:zod")).toBeDefined();
     expect(syncDocsGraph(ctx, db).sources).toBe(2);
+  });
+});
+
+describe("em_index", () => {
+  const textOf = (r: { content: Array<{ type: string; text?: string }> }) =>
+    r.content.map((c) => c.text ?? "").join("\n");
+
+  it("makes a heading-only document searchable by the heading's words", async () => {
+    const out = textOf(
+      await emIndex.handler(
+        { content: "# Quokka rollout checklist for the staging cluster", title: "quokka" },
+        ctx,
+      ),
+    );
+    expect(out).toMatch(/^indexed "quokka" as doc \d+: 1 chunks/);
+    expect(out).not.toContain("no sections found");
+    const hits = await search(db, "quokka rollout", { limit: 3, mode: "lexical" });
+    expect(hits.hits.some((h) => h.chunk.body.includes("Quokka rollout checklist"))).toBe(true);
+  });
+
+  it("indexes content the chunker could not cut as one chunk and says so", () => {
+    const r = indexContent(db, {
+      source: "inline",
+      title: "uncuttable",
+      content: "nothing to cut here",
+      chunks: [],
+    });
+    expect(r).toMatchObject({ chunks: 1, fallback: true });
+    expect(db.chunksOfDocument(r.documentId).map((c) => c.body)).toEqual(["nothing to cut here"]);
+    const normal = indexContent(db, { source: "inline", title: "n", content: "# A\nbody" });
+    expect(normal.fallback).toBe(false);
   });
 });
 

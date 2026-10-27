@@ -19,10 +19,11 @@ import { docGuesses, githubRepo, resolveProvider } from "../../src/docs/resolve.
 import { looksLikeSpec, specToMarkdown } from "../../src/docs/specs.js";
 import { extractLinks, scopeOf, syncSource } from "../../src/docs/sync.js";
 import { docsSourceFor, suggest } from "../../src/hooks/routing.js";
+import { indexContent } from "../../src/index/indexer.js";
 import { renderProjectBrief } from "../../src/session/brief.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
-import { emDocs } from "../../src/tools/em_docs.js";
+import { emDocs, orphanedDocSources } from "../../src/tools/em_docs.js";
 import { emSearch } from "../../src/tools/em_search.js";
 
 let root: string;
@@ -617,6 +618,53 @@ describe("manifest and sync", () => {
     );
     const bad = await emDocs.handler({ action: "add" }, ctx);
     expect(bad.isError).toBe(true);
+  });
+
+  it("reports, flags and removes orphaned docs:* sources that have no manifest entry", async () => {
+    // Pages indexed under docs:ghost with no manifest entry: the manifest was deleted or
+    // lives on another branch. The tool must say so instead of claiming nothing is registered.
+    indexContent(db, {
+      source: docsTag("ghost"),
+      title: "Ghost API",
+      content:
+        "# Ghost API\n\nThe spectral endpoint returns ectoplasm quotas per haunted tenant.\n",
+      uri: "https://ghost.test/docs/spectral",
+    });
+    expect(readManifest(ctx).sources.some((s) => s.name === "ghost")).toBe(false);
+    expect(
+      orphanedDocSources(
+        db,
+        readManifest(ctx).sources.map((s) => s.name),
+      ),
+    ).toEqual([expect.objectContaining({ name: "ghost", documents: 1 })]);
+
+    const list = textOf(await emDocs.handler({ action: "list" }, ctx));
+    expect(list).toContain("# Orphaned in the index (1");
+    expect(list).toContain("- ghost · 1 doc(s)");
+    expect(list).toContain('em_docs {action:"remove", names:["ghost"]}');
+    expect(list).toMatch(/source\(s\) \+ 1 orphaned/);
+
+    const lookup = textOf(
+      await emDocs.handler({ action: "lookup", query: "spectral ectoplasm quotas" }, ctx),
+    );
+    expect(lookup).toContain("Ghost API");
+    expect(lookup).toContain(
+      'note: ghost is not in the manifest (orphaned pages); em_docs {action:"list"} explains',
+    );
+    // registered sources alone carry no note
+    expect(
+      textOf(await emDocs.handler({ action: "lookup", query: "ledger journals transfer" }, ctx)),
+    ).not.toContain("orphaned pages");
+
+    expect(textOf(await emDocs.handler({ action: "remove", name: "ghost" }, ctx))).toBe(
+      "removed ghost (orphaned; 1 document(s) dropped)",
+    );
+    expect(db.countDocuments(docsTag("ghost"))).toBe(0);
+    expect(textOf(await emDocs.handler({ action: "list" }, ctx))).not.toContain("Orphaned");
+
+    const unknown = await emDocs.handler({ action: "remove", name: "nobody" }, ctx);
+    expect(unknown.isError).toBe(true);
+    expect(textOf(unknown)).toContain("nobody: not registered and not in the index");
   });
 });
 

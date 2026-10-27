@@ -28,9 +28,15 @@ Use
   docs add [--pick recommended|local|service|infra|catalog|api|registry|all] [--name N] [--url U ...] [--path P]
            [--glob G ...] [--provider npm:x|pypi:x|go:x|env:X|image:x|api:host] [--depth N] [--max N] [--no-sync]
   docs list | sync [name ...] [--force] | remove <name> | lookup "<q>" [--name N] | resolve <provider>
-  stats [--lifetime]           Context savings
+  stats [--lifetime]           Context savings, routing interceptions, how often recall fired
+  usage [summary|daily|weekly|monthly|models|session|sessions|blocks|turns|tools|insights|savings]
+        [--since 30d] [--session ID] [--limit N] [--json] [--csv]   Tokens, cache, cost and insights
+  usage ingest                 Read every transcript of the project into the usage tables
   recall ["<q>"]               Memories and session history
-  purge <index|sessions|graph|memories|all> --yes
+  recall --explain "<prompt>" [--session ID]   Why hook recall would (not) fire for a prompt
+  recall --file <path>         What a Read/Edit of the file would attach (memories, history)
+  recall --replay [--limit N] [--since 30d]    Re-run recall over past prompts: hit rate, misses
+  purge <index|sessions|graph|memories|usage|all> --yes
   ui [--port 7331] [--no-open] Web dashboard: stats, memories, graph, search, sessions, actions
                                (alias: serve)
   statusline                   Claude Code statusLine command (reads JSON on stdin)
@@ -338,10 +344,127 @@ const commands: Record<string, Command> = {
     return 0;
   },
 
+  async usage(args) {
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        since: { type: "string" },
+        session: { type: "string" },
+        limit: { type: "string" },
+        json: { type: "boolean" },
+        csv: { type: "boolean" },
+      },
+      allowPositionals: true,
+      strict: false,
+    });
+    const [sub = "summary"] = positionals;
+    const ctx = getContext();
+    if (sub === "ingest") {
+      const { getStorage } = await import("./storage/index.js");
+      const { ingestProject } = await import("./usage/ingest.js");
+      const r = ingestProject(getStorage(ctx), ctx.root, { overrides: ctx.config.usage.pricing });
+      console.log(
+        `usage ingest: ${r.files} file(s) read, ${r.calls} new API call(s), ${r.toolUses} tool use(s), ${r.contextEvents} context event(s)`,
+      );
+      return 0;
+    }
+    const {
+      CSV_VIEWS,
+      emUsage,
+      LIMIT_MAX,
+      USAGE_VIEWS,
+      usageCsv,
+      usageView,
+      loadUsage,
+      parseLimit,
+      parseSince,
+    } = await import("./tools/em_usage.js");
+    type View = (typeof USAGE_VIEWS)[number];
+    // `session` is the current session's summary; `--session ID` narrows any view to one session.
+    const view: View = sub === "session" ? "summary" : (sub as View);
+    if (!USAGE_VIEWS.includes(view)) {
+      console.error(`usage: eminiar usage <${[...USAGE_VIEWS, "session", "ingest"].join("|")}> …`);
+      return 2;
+    }
+    const session =
+      typeof values.session === "string" && values.session ? values.session : undefined;
+    const scope = sub === "session" || session ? "session" : "project";
+    // Bad --since / --limit values are usage errors (exit 2 with the reason), not failures.
+    const sinceArg = typeof values.since === "string" ? values.since : undefined;
+    let since: number | undefined;
+    try {
+      since = parseSince(sinceArg);
+    } catch (err) {
+      console.error((err as Error).message);
+      return 2;
+    }
+    const limit = parseLimit(values.limit === undefined ? undefined : String(values.limit));
+    if (typeof limit === "string") {
+      console.error(`--${limit}`);
+      return 2;
+    }
+    if (values.csv) {
+      if (!CSV_VIEWS.has(view)) {
+        console.error(`--csv works for ${[...CSV_VIEWS].join(", ")}`);
+        return 2;
+      }
+      const data = loadUsage(ctx, { scope, sessionId: session, since });
+      console.log(usageCsv(view, usageView(ctx, view, data, limit ?? LIMIT_MAX)));
+      return 0;
+    }
+    if (session) process.env.EMINIAR_SESSION_ID = session;
+    const r = await emUsage.handler(
+      { scope, view, since: sinceArg, limit, json: !!values.json },
+      ctx,
+    );
+    console.log(text(r));
+    return r.isError ? 1 : 0;
+  },
+
   async recall(args) {
-    const { positionals } = parseArgs({ args, allowPositionals: true, strict: false });
+    const { values, positionals } = parseArgs({
+      args,
+      options: {
+        explain: { type: "boolean" },
+        file: { type: "string" },
+        replay: { type: "boolean" },
+        session: { type: "string" },
+        limit: { type: "string" },
+        since: { type: "string" },
+      },
+      allowPositionals: true,
+      strict: false,
+    });
+    const ctx = getContext();
+    if (values.explain || values.file || values.replay) {
+      const { explainFile, explainPrompt, replayPrompts } = await import(
+        "./session/recall-explain.js"
+      );
+      const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+      if (values.replay) {
+        console.log(
+          await replayPrompts(ctx, {
+            limit: values.limit ? Number(values.limit) : undefined,
+            since: str(values.since),
+          }),
+        );
+        return 0;
+      }
+      const file = str(values.file);
+      if (file) {
+        console.log(explainFile(ctx, file, { sessionId: str(values.session) }));
+        return 0;
+      }
+      const prompt = positionals.join(" ");
+      if (!prompt) {
+        console.error('usage: eminiar recall --explain "<prompt>" [--session ID]');
+        return 2;
+      }
+      console.log(await explainPrompt(ctx, prompt, { sessionId: str(values.session) }));
+      return 0;
+    }
     const { emRecall } = await import("./tools/em_recall.js");
-    const r = await emRecall.handler({ query: positionals.join(" ") || undefined }, getContext());
+    const r = await emRecall.handler({ query: positionals.join(" ") || undefined }, ctx);
     console.log(text(r));
     return 0;
   },
@@ -353,10 +476,17 @@ const commands: Record<string, Command> = {
       allowPositionals: true,
       strict: false,
     });
-    const scope = positionals[0] as "index" | "sessions" | "graph" | "memories" | "all" | undefined;
+    const scope = positionals[0] as
+      | "index"
+      | "sessions"
+      | "graph"
+      | "memories"
+      | "usage"
+      | "all"
+      | undefined;
     if (!scope || !values.yes) {
       console.error(
-        "usage: eminiar purge <index|sessions|graph|memories|all> --yes   (irreversible)",
+        "usage: eminiar purge <index|sessions|graph|memories|usage|all> --yes   (irreversible)",
       );
       return 2;
     }
@@ -446,7 +576,9 @@ try {
 } catch (err) {
   console.error(`eminiar ${cmd} failed: ${(err as Error).message}`);
   if (process.env.EMINIAR_DEBUG) console.error((err as Error).stack);
-  // doctor is still useful when the main command fails
-  if (cmd !== "doctor") console.error(formatDoctor(runDoctor()));
+  // doctor is still useful when the main command fails; a usage error is about the
+  // transcripts or the usage tables, not the installation, so a hint is enough there.
+  if (cmd === "usage") console.error("run `eminiar doctor` to check the installation");
+  else if (cmd !== "doctor") console.error(formatDoctor(runDoctor()));
   process.exit(1);
 }

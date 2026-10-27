@@ -35,6 +35,12 @@ It also reports a cached failure and the time it expires.
 This is `enforce` routing at work. A command that usually prints a lot was redirected to the
 sandbox, which returns only the matching output. Claude should retry with `em_execute`.
 
+Bounded commands are not redirected: a pipe ending in `head`, `tail` or `wc`, `cat` or `grep`
+over named files small enough for `Read`, and anything that commits, installs or writes a file.
+If a call like that is still denied, `em_stats` shows how often routing intercepts each native
+tool and which rule did it, and `~/.eminiar/hook.log` has one line per denial with the command,
+so the rule can be reported or tuned. See [Routing](how-it-works.md#routing).
+
 To relax it, set `routing.mode` to `annotate` in `eminiar.config.json`. Routing denies a call
 only while the eminiar server runs. If the server is down, the hook only annotates.
 
@@ -85,6 +91,17 @@ The next memory call imports the change. To force it:
 ```sh
 eminiar reindex --scope memories
 ```
+
+## `eminiar usage ingest` fails, or the usage figures stop moving
+
+The hooks ingest transcripts best-effort and never block Claude, so a broken ingest shows up
+only as stale numbers in `em_usage` / `em_stats`. The first failure of a session is written to
+`~/.eminiar/hook.log`, `em_stats` prints a `usage: ingest failed: …` line, and
+`eminiar usage ingest` reports the same error on the command line. A message like
+`table transcript_files has no column named head_hash` means the project database is behind the
+schema the code expects; opening it with a current version migrates it in place. If the error
+persists, `eminiar purge usage --yes` followed by `eminiar usage ingest` rebuilds the usage tables
+from the transcripts.
 
 ## Start over for one project
 

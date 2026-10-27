@@ -11,7 +11,7 @@ import { defineTool, errorResult, text } from "./types.js";
 export const emExecuteFile = defineTool({
   name: "em_execute_file",
   description:
-    "Process a file in the sandbox without reading it into context. Your code receives the absolute path as $EM_FILE (shell) / process.env.EM_FILE (node) / os.environ['EM_FILE'] (python); print only what you need. The file must be inside the project root unless a Read(<path>) allow rule opts it in; a matching Read deny or ask rule refuses the path, inside the root or out. Omit `code` to get a quick summary (size, lines, head).",
+    "Process a file in the sandbox without reading it into context. Your code receives the absolute path as $EM_FILE (shell) / process.env.EM_FILE (node) / os.environ['EM_FILE'] (python); print only what you need. The file must be inside the project root unless a Read(<path>) allow rule opts it in; a matching Read deny or ask rule refuses the path, inside the root or out. Omit `code` to get a quick summary (size, lines, head). javascript and typescript run as ES modules; `import` and `require` both work.",
   schema: {
     path: z.string().describe("File to process, relative to the project root or absolute"),
     language: LANG_ENUM.optional(),

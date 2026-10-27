@@ -153,6 +153,31 @@ export function memoryLinks(body: string, self?: string | undefined): string[] {
   return [...out];
 }
 
+/** A project path as prose writes it: `src/a/b.ts`, `./docs/x.md`, `.eminiar/docs.json`. */
+const PATH_RE =
+  /(?<![\w/.-])(?:\.\/)?((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})(?![\w/-])/g;
+
+/**
+ * Files a body names by path that exist in the project, as `file:` ids: the links a
+ * memory implies without a `related:` header, so file recall and impact analysis find
+ * it. Memory files themselves are left out (`mem:` links cover those).
+ */
+export function impliedFileLinks(root: string, body: string, skipPrefix?: string): string[] {
+  const out = new Set<string>();
+  for (const m of body.matchAll(PATH_RE)) {
+    const p = m[1]!.replace(/[.,;:)]+$/, "");
+    if (!p || p.startsWith("..") || out.has(p) || (skipPrefix && p.startsWith(`${skipPrefix}/`)))
+      continue;
+    try {
+      if (statSync(join(root, p)).isFile()) out.add(p);
+    } catch {
+      // not a project file (a URL path, an example, a file that no longer exists)
+    }
+    if (out.size >= 30) break;
+  }
+  return [...out].map((p) => `file:${p}`);
+}
+
 export interface MemoryFile {
   name: string;
   kind: string;
@@ -178,6 +203,8 @@ interface GraphInput {
   kind: string;
   tags: string[];
   related: string[];
+  /** Files the body names by path (not in the header): mentions edges at lower confidence. */
+  implied?: string[] | undefined;
   status?: string | undefined;
   supersedes?: string | undefined;
   body: string;
@@ -198,13 +225,14 @@ function syncGraph(db: StorageAdapter, name: string, rel: string, g: GraphInput)
   ]);
   const edges: GraphEdge[] = [];
   const seen = new Set<string>();
-  const push = (dst: string, kind: string) => {
+  const push = (dst: string, kind: string, confidence = 1) => {
     const key = `${kind}|${dst}`;
     if (dst === self || seen.has(key)) return;
     seen.add(key);
-    edges.push({ src: self, dst, kind, source: "curated", confidence: 1, weight: 1 });
+    edges.push({ src: self, dst, kind, source: "curated", confidence, weight: 1 });
   };
   for (const id of g.related) push(relatedTarget(id), "mentions");
+  for (const id of g.implied ?? []) push(id, "mentions", 0.6);
   // `mem:` references in the body connect memories too, as their own edge kind so a
   // header's deliberate `related:` list stays distinguishable from passing references.
   for (const other of memoryLinks(g.body, name)) push(memoryId(other), "links");
@@ -289,6 +317,9 @@ function syncFile(
     hash = hashText(text);
   }
   const body = parsed.body.trim();
+  const implied = impliedFileLinks(ctx.root, body, memoriesRel(ctx)).filter(
+    (id) => !related.includes(id),
+  );
   const doc = indexContent(db, {
     source: "memory",
     uri: `memory:${name}`,
@@ -303,7 +334,8 @@ function syncFile(
     kind,
     content: body,
     tags,
-    nodeIds: related,
+    // the header's deliberate list first, then the files the body names
+    nodeIds: [...related, ...implied],
     sessionId: opts.sessionId,
     documentId: doc.documentId,
     path: rel,
@@ -315,7 +347,7 @@ function syncFile(
     status,
     supersedes,
   });
-  syncGraph(db, name, rel, { kind, tags, related, status, supersedes, body });
+  syncGraph(db, name, rel, { kind, tags, related, implied, status, supersedes, body });
   return { changed: true, row: db.memoryGetByName(name)! };
 }
 

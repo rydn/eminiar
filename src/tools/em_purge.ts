@@ -5,9 +5,9 @@ import { defineTool, errorResult, text } from "./types.js";
 export const emPurge = defineTool({
   name: "em_purge",
   description:
-    "Permanently delete eminiar data for this project. scope: index (documents/chunks/vectors/caches), sessions (events, snapshots, stats), graph, memories (the database mirror only; the markdown files under .eminiar/memories stay and are re-imported on the next memory call — delete files with em_memory), or all. Requires confirm: true.",
+    "Permanently delete eminiar data for this project. scope: index (documents/chunks/vectors/caches), sessions (events, snapshots, stats), graph, memories (the database mirror only; the markdown files under .eminiar/memories stay and are re-imported on the next memory call — delete files with em_memory), usage (API calls, tool uses, context events, transcript offsets, statusline snapshots), or all. Requires confirm: true.",
   schema: {
-    scope: z.enum(["index", "sessions", "graph", "memories", "all"]),
+    scope: z.enum(["index", "sessions", "graph", "memories", "usage", "all"]),
     confirm: z.boolean().describe("Must be true; this cannot be undone"),
   },
   handler: async (args, ctx) => {

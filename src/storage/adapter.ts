@@ -1,6 +1,10 @@
 import type {
+  ApiCallInput,
+  ApiCallRow,
   ChunkInput,
   ChunkWithDoc,
+  ContextEventInput,
+  ContextEventRow,
   DocumentInput,
   DocumentRow,
   DocumentSummaryRow,
@@ -27,6 +31,11 @@ import type {
   SourceStatRow,
   StatDelta,
   StatRow,
+  StatuslineSnapshotInput,
+  StatuslineSnapshotRow,
+  ToolUseRow,
+  TranscriptFileRow,
+  UsageFilter,
   VecHit,
   VocabTerm,
 } from "./types.js";
@@ -139,6 +148,11 @@ export interface StorageAdapter {
   graphDeleteEdges(edges: Array<Pick<GraphEdge, "src" | "dst" | "kind" | "source">>): void;
   /** Distinct-neighbour counts over the given edge kinds: incoming (fan-in) and outgoing (fan-out). */
   graphDegrees(kinds: string[]): Map<string, { fanIn: number; fanOut: number }>;
+  /**
+   * Per path: how many *other* files depend on that file or a symbol in it over the given edge
+   * kinds. Unlike a file's metrics fan-in, calls from inside the file do not count.
+   */
+  graphDependentFileCounts(paths: string[], kinds: string[]): Map<string, number>;
   /** Delete everything a source produced for one file path (nodes with that path + edges touching them). */
   graphDeleteForPath(source: GraphSource, path: string, opts?: { keepFile?: boolean }): void;
   graphDeleteBySource(source: GraphSource): void;
@@ -200,6 +214,35 @@ export interface StorageAdapter {
   memoryCount(): number;
 
   // --- misc --------------------------------------------------------------
+  // --- usage: model calls, tool results, context events, statusline ------------
+  /**
+   * Insert rows; an existing (request_id, message_id) pair keeps the larger of every
+   * token count (Claude Code writes a placeholder usage first and the final counts later)
+   * and takes the incoming cost when its output count is at least the stored one.
+   * Returns the number of rows newly inserted.
+   */
+  apiCallsUpsert(rows: ApiCallInput[]): number;
+  /** Rows matching the filter, oldest first. */
+  apiCalls(filter?: UsageFilter): ApiCallRow[];
+  /** Newest call timestamp, or undefined when nothing has been ingested. */
+  apiCallsLatestTs(): number | undefined;
+  /** Insert or update by tool_use_id (a later row with result_chars fills in the result). */
+  toolUsesUpsert(rows: ToolUseRow[]): number;
+  toolUses(filter?: UsageFilter): ToolUseRow[];
+  contextEventInsert(e: ContextEventInput): number;
+  contextEvents(filter?: UsageFilter): ContextEventRow[];
+  transcriptFileGet(path: string): TranscriptFileRow | undefined;
+  transcriptFileSet(row: TranscriptFileRow): void;
+  transcriptFiles(): TranscriptFileRow[];
+  statuslineSnapshotInsert(s: StatuslineSnapshotInput): number;
+  statuslineSnapshots(filter?: UsageFilter): StatuslineSnapshotRow[];
+  statuslineLatest(sessionId?: string): StatuslineSnapshotRow | undefined;
+  /**
+   * Drop snapshots with ts < olderThan and, per session, all but the newest keepPerSession.
+   * Returns the number of rows deleted.
+   */
+  statuslineSnapshotsPrune(opts: { olderThan: number; keepPerSession: number }): number;
+
   metaGet(key: string): string | undefined;
   metaSet(key: string, value: string): void;
   purge(scope: PurgeScope): void;

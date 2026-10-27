@@ -14,9 +14,11 @@ import { Memory } from "./views/Memory.js";
 import { Overview } from "./views/Overview.js";
 import { Sessions } from "./views/Sessions.js";
 import { System } from "./views/System.js";
+import { Usage } from "./views/Usage.js";
 
 const TABS: Array<[View, string]> = [
   ["overview", "Overview"],
+  ["usage", "Usage"],
   ["explore", "Explore"],
   ["galaxy", "Galaxy"],
   ["architecture", "Architecture"],
@@ -145,6 +147,7 @@ export function App(): JSX.Element {
       </header>
       <main class={cls("work", FILL.has(view) && "fill")} key={root}>
         {view === "overview" && <Overview />}
+        {view === "usage" && <Usage params={route.params} />}
         {view === "explore" && <Explore params={route.params} />}
         {view === "galaxy" && <Galaxy params={route.params} />}
         {view === "architecture" && <Architecture params={route.params} />}

@@ -1,4 +1,5 @@
 import { realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { extname, join, relative, resolve } from "node:path";
 import type { ProjectContext } from "../context.js";
 import { getContext } from "../context.js";
@@ -9,10 +10,12 @@ import { renderProjectBrief } from "../session/brief.js";
 import {
   commitContext,
   fileContext,
+  fileSymbols,
   memoriesForFile,
   recallForText,
   recordShown,
 } from "../session/recall.js";
+import { type RoutingEvent, recordRouting } from "../session/routing-stats.js";
 import { serverAlive } from "../session/server-alive.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
@@ -60,13 +63,78 @@ export function coverageHint(db: StorageAdapter, rel: string): string | undefine
   return `eminiar graph: ${rel} is ${row.status}${row.reason ? ` (${row.reason})` : ""}; graph answers about it may be incomplete.`;
 }
 
-interface Suggestion {
+const GIT_HISTORY =
+  /(?:^|[;&|]\s*)git\s+(?:(?:-C|--git-dir|--work-tree)[= ]\S+\s+|--no-pager\s+)*(log|blame|shortlog|show|whatchanged|reflog)\b([^;&|]*)/;
+/** One commit, printed short: `git log -1 --format=%H` is a lookup, not a history read. */
+const ONE_COMMIT = /(^|\s)(-1|-n\s*1|-n1|--max-count[= ]1)(?=\s|$)/;
+
+/**
+ * The em_history call that answers a `git log` / `blame` / `show` / `shortlog` command,
+ * or undefined when the command is not a history read (or prints a file, like
+ * `git show HEAD:path`).
+ */
+export function historyCall(cmd: string): string | undefined {
+  const m = GIT_HISTORY.exec(cmd);
+  if (!m) return undefined;
+  const sub = m[1]!;
+  const rest = (m[2] ?? "").trim();
+  const args = rest.split(/\s+/).filter(Boolean);
+  const q = (s: string) => JSON.stringify(s.replace(/^['"]|['"]$/g, ""));
+  const positional = (a: string) => !a.startsWith("-");
+  if (sub === "show") {
+    if (/\S+:\S+/.test(rest)) return undefined; // `git show REF:path` prints a file
+    const sha = args.find(positional);
+    return `{action:"commit", sha:${q(sha ?? "HEAD")}}`;
+  }
+  if (sub === "blame") {
+    const path = args.filter(positional).pop();
+    return path ? `{action:"file", path:${q(path)}}` : undefined;
+  }
+  if (sub === "log" && ONE_COMMIT.test(rest) && !/(^|\s)(-p|--patch|--stat)\b/.test(rest))
+    return undefined;
+  const lineRange = /-L\s*:?([^:\s]+):(\S+)/.exec(rest);
+  if (lineRange) {
+    const [, fn, file] = lineRange;
+    return /^[A-Za-z_$]/.test(fn!)
+      ? `{action:"symbol", name_path:${q(`${file}#${fn}`)}}`
+      : `{action:"file", path:${q(file!)}}`;
+  }
+  const grep = /--grep[= ]("[^"]*"|'[^']*'|\S+)/.exec(rest);
+  if (grep) return `{action:"search", query:${q(grep[1]!)}}`;
+  const author = /--author[= ]("[^"]*"|'[^']*'|\S+)/.exec(rest);
+  const range = args.find((a) => positional(a) && /\.\.\.?/.test(a));
+  if (range) {
+    const [a, b] = range.split(/\.\.\.?/);
+    return `{action:"branch", name:${q(b || a || "HEAD")}}`;
+  }
+  const dash = args.indexOf("--");
+  const path =
+    dash !== -1
+      ? args[dash + 1]
+      : args.find((a) => positional(a) && /[/.]/.test(a) && !/^[0-9a-f]{7,40}$/i.test(a));
+  if (path) return `{action:"file", path:${q(path)}}`;
+  if (author) return `{action:"timeline", author:${q(author[1]!)}}`;
+  if (sub === "shortlog") return `{action:"timeline"}`;
+  return `{action:"overview"}`;
+}
+
+export interface Suggestion {
   tool: string;
   reason: string;
+  /** Which rule fired (heavy, pipe, big-read, history, symbol, …), for routing statistics. */
+  rule?: string;
   /** For Agent/Task in enforce mode: prefix the prompt instead of denying. */
   prefixPrompt?: string;
   /** Context only, never a denial (the native tool is still the right one). */
   annotateOnly?: boolean;
+}
+
+/** What preToolUse already knows that changes a suggestion. */
+export interface SuggestExtra {
+  /** For Grep: the pattern's identifier when the graph defines symbols by that name. */
+  symbol?: string | undefined;
+  /** For Bash: the directory relative paths resolve against (the hook's cwd). */
+  cwd?: string | undefined;
 }
 
 /** Registered documentation sources (default manifest location; cheap, cached by the OS). */
@@ -116,10 +184,273 @@ const BIG_TEXT_EXT = new Set([
   ".sql",
   ".har",
 ]);
+/**
+ * Files Read shows to the model as images or pages, not as text. em_execute_file only returns
+ * what code prints, so routing these there loses the content instead of saving context.
+ * (SVG is text and stays routable.)
+ */
+const VISUAL_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf"]);
 
 /** A command with its heredoc bodies cut out: they are data, not commands to classify. */
 export function withoutHeredocs(cmd: string): string {
   return cmd.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2\s*(?=\n|$)/g, "<<$2");
+}
+
+/** Split `s` at every unquoted position where `sep` returns the separator's length. */
+function splitUnquoted(s: string, sep: (s: string, i: number) => number): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let quote: string | undefined;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (quote) {
+      cur += ch;
+      if (ch === quote && s[i - 1] !== "\\") quote = undefined;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    const n = sep(s, i);
+    if (n) {
+      out.push(cur);
+      cur = "";
+      i += n - 1;
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map((p) => p.trim()).filter(Boolean);
+}
+
+/** The simple commands a shell line runs in sequence: split at `;`, `&&`, `||` and newlines. */
+export function commandSegments(cmd: string): string[] {
+  return splitUnquoted(cmd, (s, i) => {
+    const ch = s[i];
+    if (ch === ";" || ch === "\n") return 1;
+    if ((ch === "&" || ch === "|") && s[i + 1] === ch) return 2;
+    return 0;
+  });
+}
+
+/** The stages of one pipeline: `a | b | c` → [a, b, c]. */
+function pipeStages(segment: string): string[] {
+  return splitUnquoted(segment, (s, i) => (s[i] === "|" && s[i + 1] !== "|" ? 1 : 0));
+}
+
+/** Lines a `head` / `tail` stage keeps: its -n / -N argument, or the default 10. */
+function headLines(stage: string): number {
+  const m = /(?:^|\s)(?:-n\s*=?\s*|-)(\d+)(?=\s|$)|--lines[= ](\d+)/.exec(stage);
+  return m ? Number(m[1] ?? m[2]) : 10;
+}
+
+/** The most lines a bounded final stage may print before it counts as a lot. */
+const BOUNDED_LINES = 400;
+
+/** Does this pipe stage cap the output (`head -40`, `tail -5`, `wc -l`)? */
+function bounds(stage: string): boolean {
+  if (/^\s*wc\b/.test(stage)) return true;
+  if (!/^\s*(head|tail)\b/.test(stage) || /(^|\s)-c\b|--bytes\b/.test(stage)) return false;
+  return headLines(stage) <= BOUNDED_LINES;
+}
+
+/**
+ * Commands whose point is a side effect: commits, installs, file writes. Their output is
+ * secondary and the native Bash tool is where Claude Code's permission prompts live, so a
+ * command containing one is never redirected to the sandbox.
+ */
+const MUTATING =
+  /^\s*(?:(?:sudo|env|[A-Z_][A-Z0-9_]*=\S*)\s+)*(git\s+(add|commit|checkout|switch|push|pull|fetch|merge|rebase|stash|reset|restore|cherry-pick|revert|tag|init|clone|worktree|mv|rm|am|apply|submodule)|npm\s+(install|i|ci|uninstall|un|link|publish|version|update|up|dedupe)|pnpm\s+(install|i|add|remove|rm|update|up|link)|yarn\s+(add|remove|install|upgrade)|pip3?\s+(install|uninstall)|cargo\s+(add|install)|brew\s+(install|uninstall|upgrade)|gh\s+(pr|issue|release|repo)\s+(create|edit|merge|close|comment|delete|ready)|rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|sed\s+(?:-\S+\s+)*-i|tee)\b/;
+/** A redirection into a file (not /dev/null, not a file descriptor) writes something. */
+const WRITES_FILE = /(?:^|\s|\d)>{1,2}\s*(?!&)(?!\/dev\/null)\S/;
+
+function mutates(segment: string): boolean {
+  return MUTATING.test(segment) || WRITES_FILE.test(segment);
+}
+
+/** Output size Read tolerates natively; a `cat` of that much is the same read through Bash. */
+const READ_LIMIT = 200 * 1024;
+const BIG_TEXT_LIMIT = 20 * 1024;
+
+/** Flags of grep / rg that take the next token as their value. */
+const GREP_VALUE_FLAGS = new Set([
+  "-e",
+  "-f",
+  "-m",
+  "-A",
+  "-B",
+  "-C",
+  "-d",
+  "-g",
+  "-t",
+  "-T",
+  "--regexp",
+  "--file",
+  "--max-count",
+  "--after-context",
+  "--before-context",
+  "--context",
+  "--include",
+  "--exclude",
+  "--glob",
+  "--type",
+]);
+
+/**
+ * The files a `cat` / `grep` / `rg` stage reads, or undefined when a glob, variable,
+ * directory or missing operand makes them unknowable (`grep -r x src`, `cat *.log`).
+ */
+function fileOperands(stage: string, cwd: string): string[] | undefined {
+  const tokens = stage.trim().split(/\s+/);
+  const cmd = tokens[0]!;
+  const isGrep = /^(grep|egrep|fgrep|rg)$/.test(cmd);
+  const files: string[] = [];
+  let patternGiven = !isGrep;
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t === "--") {
+      files.push(...tokens.slice(i + 1));
+      break;
+    }
+    if (t.startsWith("-") && t.length > 1) {
+      if (/^-[ef]$|^--(regexp|file)$/.test(t)) patternGiven = true;
+      if (GREP_VALUE_FLAGS.has(t)) i++;
+      continue;
+    }
+    if (!patternGiven) {
+      patternGiven = true;
+      continue;
+    }
+    files.push(t);
+  }
+  if (!files.length) return undefined;
+  const out: string[] = [];
+  for (let f of files) {
+    if (/[*?[\]{}$`\\]/.test(f)) return undefined;
+    f = f.replace(/^['"]|['"]$/g, "");
+    if (f.startsWith("~/")) f = join(homedir(), f.slice(2));
+    out.push(resolve(cwd, f));
+  }
+  return out;
+}
+
+/**
+ * Bytes a `cat` / `grep` stage can print at most (the files it reads), or undefined when
+ * that is unknowable. A missing file costs nothing: one error line.
+ */
+function stageBytes(stage: string, cwd: string): number | undefined {
+  const files = fileOperands(stage, cwd);
+  if (!files) return undefined;
+  let total = 0;
+  for (const f of files) {
+    try {
+      const st = statSync(f);
+      if (st.isDirectory()) return undefined;
+      if (BIG_TEXT_EXT.has(extname(f).toLowerCase()) && st.size > BIG_TEXT_LIMIT)
+        return READ_LIMIT + st.size;
+      total += st.size;
+    } catch {
+      // missing: an error line
+    }
+  }
+  return total;
+}
+
+/** A `sed -n 'A,Bp'` range: at most B-A+1 lines. */
+function sedRangeLines(stage: string): number | undefined {
+  const m = /^\s*sed\s+(?:-\S+\s+)*-n\s+['"]?(\d+),(\d+)p['"]?/.exec(stage);
+  return m ? Number(m[2]) - Number(m[1]) + 1 : undefined;
+}
+
+interface Heavy {
+  rule: string;
+  text: string;
+}
+
+/**
+ * Is the first stage of a pipeline bounded on its own: a short head / tail / sed range,
+ * a `du -s`, a `grep -l` / `-c`, or a cat / grep over named files small enough for Read?
+ * Later stages only narrow it. Returns a Heavy when it is known to be big instead.
+ */
+function firstStageBound(first: string, cwd: string): true | Heavy | undefined {
+  if (/^\s*(head|tail)\s/.test(first)) return bounds(first) || undefined;
+  const sed = sedRangeLines(first);
+  if (sed !== undefined) return sed <= BOUNDED_LINES || undefined;
+  if (/^\s*du\s+-[a-zA-Z]*s/.test(first)) return true;
+  if (/^\s*git\s+log\b/.test(first) && ONE_COMMIT.test(first)) return true;
+  if (
+    /^\s*(grep|egrep|fgrep|rg)\s/.test(first) &&
+    /(^|\s)-[a-zA-Z]*[lLcq][a-zA-Z]*(?=\s|$)|--(files-with-matches|files-without-match|count|quiet)\b/.test(
+      first,
+    )
+  )
+    return true;
+  if (/^\s*(cat|grep|egrep|fgrep|rg)\s/.test(first)) {
+    const bytes = stageBytes(first, cwd);
+    if (bytes === undefined) return undefined;
+    if (bytes <= READ_LIMIT) return true; // what Read would show anyway
+    return { rule: "big-read", text: `reads about ${Math.round(bytes / 1024)} KB` };
+  }
+  return undefined;
+}
+
+/** Why one simple command would print a lot, or undefined when its output is bounded. */
+function heavySegment(segment: string, cwd: string): Heavy | undefined {
+  if (TINY_BASH.test(segment)) return undefined;
+  const stages = pipeStages(segment);
+  const first = stages[0];
+  if (!first) return undefined;
+  // `… | head -40` caps whatever came before it.
+  if (stages.length > 1 && bounds(stages[stages.length - 1]!)) return undefined;
+  const bound = firstStageBound(first, cwd);
+  if (bound === true) return undefined;
+  if (bound) return bound;
+  if (HEAVY_BASH.test(first)) return { rule: "heavy", text: "usually prints a lot" };
+  if (stages.slice(1).some((s) => /^\s*(grep|rg|sort|uniq|jq|less)\b/.test(s)))
+    return { rule: "pipe", text: "streams an unbounded output through a filter" };
+  return undefined;
+}
+
+/** A short label for a command segment in a reason or a log line. */
+function headOf(segment: string, n = 60): string {
+  const one = segment.replace(/\s+/g, " ").trim();
+  return one.length > n ? `${one.slice(0, n - 1)}…` : one;
+}
+
+/**
+ * Routing for a Bash command, one simple command at a time: a command that changes
+ * something stays native; a history read goes to em_history; a segment that prints a lot
+ * (and is not capped by `| head`, and is not a cat of what Read would show anyway) goes to
+ * em_execute.
+ */
+function bashSuggestion(raw: string, cwd: string): Suggestion | undefined {
+  const cmd = withoutHeredocs(raw);
+  if (!cmd.trim()) return undefined;
+  const segments = commandSegments(cmd);
+  if (segments.some(mutates)) return undefined;
+  // git history reads have a classified answer: fixes traced to their origin, risk per
+  // file, branches vs base — em_history, not a raw log through em_execute.
+  const history = historyCall(cmd);
+  if (history) {
+    return {
+      tool: "em_history",
+      rule: "history",
+      reason: `the git history is already classified (commit kinds, fixes traced to the change that caused them, risk per file); em_history ${history} answers this without the raw log`,
+    };
+  }
+  for (const segment of segments) {
+    const heavy = heavySegment(segment, cwd);
+    if (!heavy) continue;
+    return {
+      tool: "em_execute",
+      rule: heavy.rule,
+      reason: `\`${headOf(segment)}\` ${heavy.text}; em_execute {language:"shell", code, intent} keeps the output out of context and returns only matching sections`,
+    };
+  }
+  return undefined;
 }
 
 /** Decide whether a native tool call is better served by an em_* tool. */
@@ -127,34 +458,26 @@ export function suggest(
   toolName: string,
   input: Record<string, unknown>,
   root: string,
+  extra: SuggestExtra = {},
 ): Suggestion | undefined {
   switch (toolName) {
-    case "Bash": {
-      const cmd = withoutHeredocs(String(input.command ?? ""));
-      if (!cmd || TINY_BASH.test(cmd)) return undefined;
-      // `cat > file` / `cat >> file <<EOF` writes a file and prints nothing
-      if (/^\s*cat\b[^|\n]*>/.test(cmd) && !cmd.includes("|")) return undefined;
-      if (HEAVY_BASH.test(cmd) || /\|\s*(head|tail|grep|wc|sort|uniq|jq|less)\b/.test(cmd)) {
-        return {
-          tool: "em_execute",
-          reason: `this command is likely to print a lot; em_execute {language:"shell", code, intent} keeps the output out of context and returns only matching sections`,
-        };
-      }
-      return undefined;
-    }
+    case "Bash":
+      return bashSuggestion(String(input.command ?? ""), extra.cwd ?? root);
     case "Read": {
       const fp = String(input.file_path ?? "");
       if (!fp) return undefined;
+      const ext = extname(fp).toLowerCase();
+      if (VISUAL_EXT.has(ext)) return undefined;
       try {
         const abs = resolve(root, fp);
         const st = statSync(abs);
-        const ext = extname(fp).toLowerCase();
         if (st.size > 200 * 1024 || (BIG_TEXT_EXT.has(ext) && st.size > 20 * 1024)) {
           // em_execute_file refuses what a Read deny or ask rule matches; leave the native Read
           // to Claude Code's own permission check instead of redirecting to a dead end.
           if (!checkReadPath(loadPermissionRules(root), abs).allowed) return undefined;
           return {
             tool: "em_execute_file",
+            rule: "big-read",
             reason: `${fp} is ${Math.round(st.size / 1024)} KB; em_execute_file {path, code} processes it in the sandbox so only what you print enters context`,
           };
         }
@@ -164,10 +487,22 @@ export function suggest(
       return undefined;
     }
     case "Grep": {
-      if (input.output_mode === "content" && !input.head_limit) {
+      const content = input.output_mode === "content" && !input.head_limit;
+      if (extra.symbol) {
+        // The graph already knows this identifier: symbol-level answers beat raw matches.
+        // A files-only grep is cheap, so that one is annotated rather than denied.
+        return {
+          tool: "em_symbols",
+          rule: "symbol",
+          annotateOnly: !content,
+          reason: `the graph indexes "${extra.symbol}": em_symbols {name_path:"${extra.symbol}", mode:"references"} lists its uses, {include_body:true} its definition; em_search {queries:["${extra.symbol}"], source:"code"} finds the code by symbol`,
+        };
+      }
+      if (content) {
         return {
           tool: "em_execute",
-          reason: `content-mode grep can be large; em_execute with rg and an intent returns only matching sections`,
+          rule: "content-grep",
+          reason: `content-mode grep can be large; em_execute with rg and an intent returns only matching sections (em_search {queries, mode:"regex"} scans the indexed files with context)`,
         };
       }
       return undefined;
@@ -199,7 +534,7 @@ export function suggest(
         reason:
           "subagents should prefer em_execute / em_batch_execute / em_search over Bash, Read and Grep",
         prefixPrompt:
-          'Use the eminiar tools (em_execute, em_batch_execute, em_execute_file, em_fetch_and_index, em_search) instead of Bash/Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on.\n\n',
+          'Use the eminiar tools (em_execute, em_batch_execute, em_execute_file, em_fetch_and_index, em_search, em_symbols, em_history) instead of Bash/Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, em_history {action:"file", path} before editing a file, em_symbols / em_search {source:"code"} before grepping for an identifier, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on.\n\n',
       };
     default:
       return undefined;
@@ -245,8 +580,9 @@ const FILE_TOOLS = new Set(["Read", "Edit", "MultiEdit", "Write"]);
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
 
 /**
- * Before a file is read or edited: the memories linked to it; before an edit, also its fix
- * history and fan-in. Each once per context window.
+ * Before a file is read or edited: the memories about it (linked, naming its path or one
+ * of its symbols) and its fix history; before an edit, also its fan-in. Each once per
+ * context window, again after `recall.repeatAfter` prompts.
  */
 function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefined {
   if (!ctx.config.recall.onFile || !FILE_TOOLS.has(input.tool_name ?? "")) return undefined;
@@ -255,8 +591,12 @@ function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefine
     if (!rel) return undefined;
     const db = getStorage(ctx, { vectors: false });
     const sessionId = input.session_id || undefined;
-    const results = [memoriesForFile(db, rel, { sessionId })];
-    if (EDIT_TOOLS.has(input.tool_name ?? "")) results.push(fileContext(db, rel, { sessionId }));
+    const repeatAfter = ctx.config.recall.repeatAfter;
+    const edit = EDIT_TOOLS.has(input.tool_name ?? "");
+    const results = [
+      memoriesForFile(db, rel, { sessionId, symbols: fileSymbols(db, rel), repeatAfter }),
+      fileContext(db, rel, { sessionId, edit, repeatAfter }),
+    ];
     const shown = results.filter((r) => r.text);
     if (!shown.length) return undefined;
     if (sessionId)
@@ -264,6 +604,7 @@ function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefine
         db,
         sessionId,
         shown.flatMap((r) => r.keys),
+        { path: "file" },
       );
     return shown.map((r) => r.text).join("\n");
   } catch {
@@ -320,7 +661,7 @@ async function webKnowledge(ctx: ProjectContext, input: HookInput): Promise<stri
   if (!text.trim()) return undefined;
   try {
     const db = getStorage(ctx, { vectors: false });
-    const r = await recallForText(db, text, { maxMemories: 0, maxDocs: 3 });
+    const r = await recallForText(db, text, { maxMemories: 0, maxDocs: 3, path: "web" });
     if (!r.text) return undefined;
     const pages = r.text.split("\n").filter((l) => l.startsWith("- docs:"));
     return [
@@ -374,10 +715,24 @@ export const preToolUse: HookHandler = async (
   if (coexisting && ["Bash", "Read", "Grep", "WebFetch"].includes(input.tool_name))
     return withContext(undefined, memo);
 
-  const hint = joinHints(graphContext(ctx, input), memo);
-  const s = suggest(input.tool_name, input.tool_input, ctx.root);
-  if (!s) return withContext(undefined, hint);
-  if (s.annotateOnly) return withContext(annotate(s), hint);
+  const graph = graphContext(ctx, input);
+  const hint = joinHints(graph, memo);
+  // graphContext names matching symbols only when the graph has them: that is the signal
+  // to route a Grep for the identifier to em_symbols / em_search instead of rg.
+  const symbol =
+    input.tool_name === "Grep" && graph
+      ? literalOf(String(input.tool_input.pattern ?? ""))
+      : undefined;
+  const s = suggest(input.tool_name, input.tool_input, ctx.root, { symbol, cwd: input.cwd });
+  const record = routingRecorder(ctx, input, s);
+  if (!s) {
+    record("allow");
+    return withContext(undefined, hint);
+  }
+  if (s.annotateOnly) {
+    record("annotate", "annotate-only");
+    return withContext(annotate(s), hint);
+  }
 
   if (mode === "enforce") {
     if (s.prefixPrompt) {
@@ -402,6 +757,7 @@ export const preToolUse: HookHandler = async (
         "info",
         `enforce → annotate for ${input.tool_name}: no eminiar MCP server running for ${ctx.root}`,
       );
+      record("annotate", "no-server");
       return withContext(
         annotate(
           s,
@@ -410,6 +766,8 @@ export const preToolUse: HookHandler = async (
         hint,
       );
     }
+    record("deny");
+    hookLog("info", `deny ${input.tool_name} → ${s.tool} [${s.rule ?? "?"}]: ${callHead(input)}`);
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -419,11 +777,51 @@ export const preToolUse: HookHandler = async (
     };
   }
   // Annotate mode: subagents get the project brief as context since their prompt is untouched.
+  record("annotate", "mode");
   const extra = s.prefixPrompt
     ? joinHints((await briefFor(ctx, String(input.tool_input.prompt ?? ""))).trim(), hint)
     : hint;
   return withContext(annotate(s), extra);
 };
+
+/** Native tools routing may redirect; their every call is counted, denied or not. */
+const ROUTED_TOOLS = new Set(["Bash", "Read", "Grep", "WebFetch", "WebSearch"]);
+
+/** The command, path, pattern or URL of a native call, shortened for a log line. */
+function callHead(input: HookInput): string {
+  const t = input.tool_input ?? {};
+  const v = t.command ?? t.file_path ?? t.pattern ?? t.url ?? t.query ?? "";
+  return headOf(String(v), 120);
+}
+
+/**
+ * A recorder for this call's routing decision: one `routing` event per native call, so
+ * em_stats can show how often Bash / Read / Grep are intercepted and by which rule. Never
+ * throws; a call that cannot be recorded is still routed.
+ */
+function routingRecorder(
+  ctx: ProjectContext,
+  input: HookInput,
+  s: Suggestion | undefined,
+): (decision: RoutingEvent["decision"], why?: string) => void {
+  const tool = input.tool_name ?? "";
+  const sessionId = input.session_id;
+  if (!sessionId || !ROUTED_TOOLS.has(tool)) return () => {};
+  return (decision, why) => {
+    try {
+      recordRouting(getStorage(ctx, { vectors: false }), sessionId, {
+        tool,
+        decision,
+        target: s?.tool,
+        rule: s?.rule,
+        why,
+        head: callHead(input),
+      });
+    } catch {
+      // statistics are optional
+    }
+  };
+}
 
 /**
  * The project brief for a subagent prompt, plus the memories and doc pages matching its
@@ -443,6 +841,7 @@ async function briefFor(ctx: ProjectContext, task: string): Promise<string> {
       const r = await recallForText(db, task, {
         maxMemories: recall.maxMemories,
         maxDocs: recall.maxDocs,
+        path: "agent",
       });
       if (r.text) parts.push(r.text);
     }

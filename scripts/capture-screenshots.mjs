@@ -36,6 +36,7 @@ const click = (label) => `(() => {
 /** name, hash route, color schemes, actions run after load. */
 const SHOTS = [
   { name: "overview", hash: "#/overview", schemes: ["dark"] },
+  { name: "usage", hash: "#/usage?range=30d", schemes: ["dark"] },
   { name: "explore", hash: "#/explore?file=src/session/recall.ts", schemes: ["dark", "light"] },
   {
     name: "galaxy",

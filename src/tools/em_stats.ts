@@ -1,14 +1,19 @@
 import { z } from "zod";
 import { getCurrentSession } from "../session/current.js";
+import { formatRecallStats, RECALL_CATEGORY, recallStats } from "../session/recall.js";
+import { formatRoutingStats, ROUTING_CATEGORY, routingStats } from "../session/routing-stats.js";
 import { globalDb } from "../stats/global.js";
 import { fmtTokens, formatStats } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
+import { usageBrief } from "../usage/brief.js";
+import { ingestSession, usageEnabled } from "../usage/ingest.js";
+import { formatUsd } from "../usage/pricing.js";
 import { defineTool, text } from "./types.js";
 
 export const emStats = defineTool({
   name: "em_stats",
   description:
-    "Show how much context eminiar has kept out of the conversation: tokens seen vs returned per tool for this session, this project, and lifetime across all projects, plus index/graph sizes.",
+    "Show how much context eminiar has kept out of the conversation: tokens seen vs returned per tool for this session, this project, and lifetime across all projects, plus index/graph sizes, how often routing intercepted native Bash/Read/Grep calls (and by which rule), and how often proactive recall (memories, docs, history before prompts, reads and edits) fired versus stayed quiet, with the reasons.",
   schema: {
     scope: z.enum(["session", "project", "lifetime", "all"]).optional().describe("default all"),
   },
@@ -19,9 +24,33 @@ export const emStats = defineTool({
     const parts: string[] = [];
     if (scope === "session" || scope === "all") {
       parts.push(formatStats(`session ${sessionId.slice(0, 8)}`, db.statsBySession(sessionId)));
+      parts.push(
+        formatRoutingStats(
+          "routing (session)",
+          routingStats(db.eventsBySession(sessionId, { categories: [ROUTING_CATEGORY] })),
+        ),
+      );
+      parts.push(
+        formatRecallStats(
+          "recall (session)",
+          recallStats(db.eventsBySession(sessionId, { categories: [RECALL_CATEGORY] })),
+        ),
+      );
     }
     if (scope === "project" || scope === "all") {
       parts.push(formatStats(`project ${ctx.root}`, mergeByTool(db.statsAll())));
+      parts.push(
+        formatRoutingStats(
+          "routing (project, last 2000 calls)",
+          routingStats(db.eventsRecent(2000, [ROUTING_CATEGORY])),
+        ),
+      );
+      parts.push(
+        formatRecallStats(
+          "recall (project, last 2000 decisions)",
+          recallStats(db.eventsRecent(2000, [RECALL_CATEGORY])),
+        ),
+      );
     }
     if (scope === "lifetime" || scope === "all") {
       const g = globalDb();
@@ -39,9 +68,38 @@ export const emStats = defineTool({
     parts.push(
       `index: ${db.countDocuments()} documents (${db.countDocuments("exec")} exec, ${db.countDocuments("batch")} batch, ${db.countDocuments("file")} file, ${db.countDocuments("url")} url, ${db.countDocuments("code")} code), ${db.vecCount()} vectors`,
     );
+    const cost = usageLine(ctx, sessionId);
+    if (cost) parts.push(cost);
     return text(parts.join("\n\n"));
   },
 });
+
+/**
+ * `usage: today $X · session $Y · see em_usage`, or undefined when nothing has been recorded.
+ * A failed ingest is reported in one line rather than hidden: the figures would silently
+ * stop moving otherwise.
+ */
+function usageLine(ctx: Parameters<typeof getStorage>[0], sessionId: string): string | undefined {
+  if (!usageEnabled(ctx)) return undefined;
+  try {
+    const db = getStorage(ctx);
+    let failed: string | undefined;
+    try {
+      ingestSession(db, ctx.root, sessionId, undefined, { overrides: ctx.config.usage.pricing });
+    } catch (err) {
+      failed = `usage: ingest failed: ${(err as Error).message}`;
+    }
+    const b = usageBrief(db, ctx, { sessionId });
+    const line =
+      b.todayUsd || b.sessionUsd
+        ? `usage: today ${formatUsd(b.todayUsd)} · session ${formatUsd(b.sessionUsd)} · see em_usage`
+        : undefined;
+    return [line, failed].filter((s) => s).join("\n") || undefined;
+  } catch (err) {
+    // opening the database or reading the brief failed, not the ingest
+    return `usage: unavailable: ${(err as Error).message}`;
+  }
+}
 
 function mergeByTool(rows: ReturnType<ReturnType<typeof getStorage>["statsAll"]>) {
   const m = new Map<string, (typeof rows)[number]>();
