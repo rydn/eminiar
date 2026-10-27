@@ -49,9 +49,10 @@ Everything runs locally in one SQLite database per project.
 | **Large output** | The full output goes into context | Output is indexed. Only the sections that match your `intent` come back |
 | **Memory** | Lost at `/compact` or a new session | Markdown memories in your repo, given back to Claude when they are relevant |
 | **Code structure** | `grep` and full-file reads | A knowledge graph of files, symbols, calls, routes and hotspots |
-| **Git history** | Raw `git log` / `git blame` | Classified commits, with each fix traced back to the commit that caused it |
+| **Git history** | Raw `git log` / `git blame` | Classified commits, fix tracing, and a graph from branches to the files, memories and docs they touched |
 | **Library docs** | Web search on each question | A local, searchable index of the docs your project uses |
 | **Getting knowledge** | Claude must remember to ask | Hooks push the relevant knowledge to Claude **automatically** |
+| **Cost** | A guess, one session at a time | Tokens, cache hits and estimated cost for every model call, with insights |
 
 ## What you get
 
@@ -62,6 +63,12 @@ Python, Ruby, Go, PHP, Perl, R, Elixir, Rust and C# when they are installed. Out
 indexed. Claude gets back only the sections that match its `intent`. Snippets obey your Claude
 Code `Bash` deny rules, and `em_execute_file` refuses a `path` that one of your `Read` deny rules
 matches ([which rule forms](docs/how-it-works.md#sandbox)).
+
+Hooks route noisy commands for Claude. A Bash line is judged one command at a time: output that
+is already bounded (`| head`, `| wc`, `grep -l`, `cat` of a small file) and commands that change
+files stay native. `git log`, `git blame` and `git show` go to `em_history`, and a `Grep` for a
+symbol the graph knows goes to `em_symbols`. `em_stats` shows each routing decision and the rule
+behind it, so you can see what was sent where.
 
 ### 🔎 Hybrid search — keyword and meaning together
 
@@ -77,6 +84,10 @@ and commit them. Decisions have an ADR-style status (`proposed`, `accepted`, `su
 attach matching memories to your prompts, to file reads and edits, to failed commands and to
 subagent briefs. **Claude does not have to remember to look.**
 
+Recall matches a memory when the prompt names it, one of its tags, a file it mentions or a
+symbol from that file. A memory can come back later in a long session. To see why a memory did
+or did not appear, run `eminiar recall --explain "<prompt>"`.
+
 ### 🕸️ Code knowledge graph — a map before an edit
 
 tree-sitter parses TypeScript, JavaScript, Python, Go and PHP into files, symbols, imports, calls,
@@ -85,11 +96,19 @@ Python decorator routes, Go routers, Laravel, Symfony and Slim). eminiar
 adds fan-in, complexity, churn, a hotspot score, module clusters, import cycles and git co-change
 coupling. Ask *"what breaks if I change this?"* with `em_graph_impact`.
 
+Memories and documentation share the same graph. Each memory links to the files and symbols it
+mentions, and each doc source links to the code that uses it. One graph answers *"what do we
+know about this file?"*
+
 ### 📜 Git history, read for Claude
 
 `em_history` classifies every commit (feat, fix, refactor, perf …). It traces each fix back to
 the commit that wrote the broken lines. Files get a risk score with reasons. Before Claude edits
 a bug-prone file, it sees the record.
+
+The history graph connects branches to their commits, commits to the files they changed, and
+those files to the memories and docs about them. Merged and deleted branches keep their commits.
+A fix points at the commit it repairs.
 
 ### 📚 Documentation knowledge base
 
@@ -109,15 +128,17 @@ price ([details](docs/usage.md)).
 ### 📊 Local dashboard
 
 `eminiar ui` opens a local web app with token savings, usage and cost, a source explorer with
-impact analysis, a graph "galaxy", an architecture map, a history explorer, a memory editor and
-a docs manager.
+impact analysis, a graph "galaxy", an architecture map, a history explorer with a history
+graph, a memory editor with a memory graph, and a docs manager.
 
 | | |
 |:---:|:---:|
-| [<img alt="Galaxy: the knowledge graph around a file" src="docs/images/dashboard-galaxy-dark.webp" width="430">](docs/dashboard.md#galaxy) | [<img alt="History: commits classified by kind, with the branch graph" src="docs/images/dashboard-history-dark.webp" width="430">](docs/dashboard.md#history) |
-| **Galaxy:** the knowledge graph | **History:** classified commits and fix tracing |
-| [<img alt="Memory: a decision with its linked files" src="docs/images/dashboard-memory-dark.webp" width="430">](docs/dashboard.md#memory) | [<img alt="Hotspots: fan-in, churn and complexity per file" src="docs/images/dashboard-hotspots-dark.webp" width="430">](docs/dashboard.md#architecture) |
-| **Memory:** decisions linked to code | **Hotspots:** where change is risky |
+| [<img alt="Galaxy: the knowledge graph around a file" src="docs/images/dashboard-galaxy-dark.webp" width="430">](docs/dashboard.md#galaxy) | [<img alt="Usage: cost per day by model, cache hit rate, burn rate and session scores" src="docs/images/dashboard-usage-dark.webp" width="430">](docs/dashboard.md#usage) |
+| **Galaxy:** the knowledge graph | **Usage:** cost, cache and burn rate |
+| [<img alt="History graph: branches, their commits, and the files, memories and docs they touched" src="docs/images/dashboard-history-graph-dark.webp" width="430">](docs/dashboard.md#history) | [<img alt="Memory graph: memories linked to the files, tags and topics they are about" src="docs/images/dashboard-memory-graph-dark.webp" width="430">](docs/dashboard.md#memory) |
+| **History graph:** branches to files and memories | **Memory graph:** what each memory is about |
+| [<img alt="History: commits classified by kind, with the branch graph" src="docs/images/dashboard-history-dark.webp" width="430">](docs/dashboard.md#history) | [<img alt="Hotspots: fan-in, churn and complexity per file" src="docs/images/dashboard-hotspots-dark.webp" width="430">](docs/dashboard.md#architecture) |
+| **History:** classified commits and fix tracing | **Hotspots:** where change is risky |
 
 ## What Claude sees
 
@@ -132,6 +153,17 @@ fixing; last fix 3f8c697 Fix MCP registration, make enforce routing and dev upgr
 
 eminiar graph: src/cli.ts is imported by 6 files; em_graph_impact {node:"file:src/cli.ts"} lists
 them before you change an exported signature.
+```
+
+When a command would flood the context, routing names the tool to use instead:
+
+```text
+eminiar: `git diff .claude-plugin/plugin.json package.json README.md` usually prints a lot;
+em_execute {language:"shell", code, intent} keeps the output out of context and returns only
+matching sections. Retry with em_execute.
+
+eminiar history: this commit includes files that deserve a second look:
+- package.json is bug-prone (3/25 commits were fixes; 2 earlier changes later needed fixing)
 ```
 
 Each note appears once per context window. After a `/compact`, notes come back when they are
