@@ -120,7 +120,7 @@ export class SqliteSwarmStore implements SwarmStore {
     // reachable (a resumed or parallel session coordinating the same swarm).
     return this.prep(
       `SELECT * FROM swarm_runs WHERE status = 'active' AND (? IS NULL OR swarm = ?)
-       ORDER BY (session_id IS NOT NULL AND session_id = ?) DESC, updated_at DESC, created_at DESC
+       ORDER BY (session_id IS NOT NULL AND session_id = ?) DESC, created_at DESC, rowid DESC
        LIMIT 1`,
     ).get(swarm ?? null, swarm ?? null, sessionId ?? null) as RunRow | undefined;
   }
@@ -405,8 +405,9 @@ export class SqliteSwarmStore implements SwarmStore {
     return this.immediate(() => {
       const r = this.prep(
         `SELECT * FROM swarm_spawns WHERE agent_type = ? AND consumed = 0 AND ts >= ?
-         ORDER BY (session_id IS NOT NULL AND session_id = ?) DESC, id LIMIT 1`,
-      ).get(agentType, sinceTs, sessionId ?? null) as Row | undefined;
+           AND (? IS NULL OR session_id IS NULL OR session_id = ?)
+         ORDER BY id LIMIT 1`,
+      ).get(agentType, sinceTs, sessionId ?? null, sessionId ?? null) as Row | undefined;
       if (!r) return undefined;
       this.prep("UPDATE swarm_spawns SET consumed = 1 WHERE id = ?").run(r.id);
       return toSpawn({ ...r, consumed: 1 });
@@ -419,5 +420,82 @@ export class SqliteSwarmStore implements SwarmStore {
        WHERE run_id = ? AND consumed = 0 AND ts >= ? AND (? IS NULL OR agent_type = ?)`,
     ).get(runId, sinceTs, agentType ?? null, agentType ?? null) as { n: number };
     return r.n;
+  }
+
+  spawnsOpen(agentType: string, sinceTs: number, sessionId?: string | null): SpawnRow[] {
+    return (
+      this.prep(
+        `SELECT * FROM swarm_spawns WHERE agent_type = ? AND consumed = 0 AND ts >= ?
+           AND (? IS NULL OR session_id IS NULL OR session_id = ?)
+         ORDER BY id`,
+      ).all(agentType, sinceTs, sessionId ?? null, sessionId ?? null) as Row[]
+    ).map(toSpawn);
+  }
+
+  spawnConsume(id: number): boolean {
+    return (
+      this.prep("UPDATE swarm_spawns SET consumed = 1 WHERE id = ? AND consumed = 0").run(id)
+        .changes === 1
+    );
+  }
+
+  spawnsVoid(runId: string): number {
+    return this.prep("UPDATE swarm_spawns SET consumed = 1 WHERE run_id = ? AND consumed = 0").run(
+      runId,
+    ).changes;
+  }
+
+  spawnsPendingOfSwarm(swarm: string, sinceTs: number, agentType?: string): number {
+    const r = this.prep(
+      `SELECT COUNT(*) n FROM swarm_spawns s JOIN swarm_runs r ON r.id = s.run_id
+       WHERE r.swarm = ? AND r.status = 'active' AND s.consumed = 0 AND s.ts >= ?
+         AND (? IS NULL OR s.agent_type = ?)`,
+    ).get(swarm, sinceTs, agentType ?? null, agentType ?? null) as { n: number };
+    return r.n;
+  }
+
+  liveWorkersOfSwarm(swarm: string, sinceTs: number): WorkerRow[] {
+    return this.prep(
+      `SELECT a.* FROM swarm_agents a JOIN swarm_runs r ON r.id = a.run_id
+       WHERE r.swarm = ? AND a.status = 'running' AND a.last_ts >= ?`,
+    ).all(swarm, sinceTs) as WorkerRow[];
+  }
+
+  workerPing(runId: string, agentId: string): void {
+    this.prep("UPDATE swarm_agents SET last_ts = ? WHERE run_id = ? AND agent_id = ?").run(
+      Date.now(),
+      runId,
+      agentId,
+    );
+  }
+
+  eventLast(runId: string): SwarmEventRow | undefined {
+    const r = this.prep("SELECT * FROM swarm_events WHERE run_id = ? ORDER BY id DESC LIMIT 1").get(
+      runId,
+    ) as Row | undefined;
+    return r ? toEvent(r) : undefined;
+  }
+
+  eventUpdate(
+    id: number,
+    patch: { ts?: number; text?: string | null; payload?: Record<string, unknown> | null },
+  ): void {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.ts !== undefined) {
+      sets.push("ts = ?");
+      params.push(patch.ts);
+    }
+    if (patch.text !== undefined) {
+      sets.push("text = ?");
+      params.push(patch.text);
+    }
+    if (patch.payload !== undefined) {
+      sets.push("payload = ?");
+      params.push(patch.payload ? JSON.stringify(patch.payload) : null);
+    }
+    if (!sets.length) return;
+    params.push(id);
+    this.prep(`UPDATE swarm_events SET ${sets.join(", ")} WHERE id = ?`).run(...params);
   }
 }

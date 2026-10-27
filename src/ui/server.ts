@@ -69,6 +69,7 @@ import {
 } from "./history-api.js";
 import { historyGraphKnowledgePayload } from "./history-graph-api.js";
 import { knowledgePayload, scopeOf as knowledgeScope } from "./knowledge-api.js";
+import { swarmRoute } from "./swarm-api.js";
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
@@ -557,6 +558,12 @@ export async function serve(opts: { port: number; open: boolean; root?: string }
         if (!id) return json(res, 400, { error: "id required" });
         if (!isUsageSessionId(id)) return json(res, 400, { error: "invalid session id" });
         return json(res, 200, usageSessionPayload(ctx(), id, { calls: q.get("calls") === "1" }));
+      }
+
+      // --- agent swarms (validates its own ids; writes are POST) ---------------------
+      if (p === "/api/swarm" || p.startsWith("/api/swarm/")) {
+        const r = await swarmRoute(ctx(), { path: p, method, query: q, body: () => readJson(req) });
+        return json(res, r.status, r.body);
       }
 
       // --- sessions, doctor, actions -----------------------------------------------

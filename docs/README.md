@@ -19,6 +19,8 @@
   your project depends on
 - **[Usage insights](usage.md)**: tokens, cache, cost and billing blocks per model call, from
   the transcripts on your machine, with insights and what eminiar saved
+- **[Agent swarms](swarms.md)**: opt-in worker swarms declared in `.eminiar/swarm.yaml`, led by
+  the main session, with every worker briefed from the project's memories and history
 - **[Dashboard](dashboard.md)**: the `eminiar ui` web app
 
 ## Reference

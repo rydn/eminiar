@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isNode, LineCounter, parseDocument } from "yaml";
 import { z } from "zod";
+import { checkGlob, GlobError } from "./glob.js";
 import {
   type ConfigIssue,
   type ContextSpec,
@@ -18,9 +19,21 @@ export const SWARM_FILES = [".eminiar/swarm.yaml", ".eminiar/swarm.yml"] as cons
 
 /** Claude Code caps agent names; `swarm-<swarm>-<role>` must fit. */
 const AGENT_NAME_MAX = 64;
-const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
+/** Hyphen-separated words: no leading, trailing or doubled hyphens (`a--b` would put `---` in a name). */
+const NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const NAME_MAX = 32;
 const NAME_MSG =
-  "use 1-32 characters: lowercase letters, digits and hyphens, starting with a letter";
+  "use 1-32 characters: lowercase letters and digits in words joined by single hyphens, starting with a letter (e.g. code-review)";
+/**
+ * Claude Code ends agent frontmatter at the first `---` anywhere in it, so no value that
+ * lands in the frontmatter may contain one.
+ */
+const noFence = (s: string) => !s.includes("---");
+const FENCE_MSG = 'must not contain "---" (Claude Code would end the agent frontmatter there)';
+/** Model aliases Claude Code accepts, or a Claude model id (incl. Bedrock/Vertex forms). */
+const MODEL_RE =
+  /^(?:(?:inherit|sonnet|opus|haiku|fable|opusplan)(?:\[1m\])?|[a-z0-9.:@-]*claude[a-z0-9.:@-]*(?:\[1m\])?)$/i;
+const TOP_KEYS = new Set(["version", "enabled", "sync", "defaults", "swarms"]);
 
 export const DEFAULT_CONTEXT: ContextSpec = {
   memories: 4,
@@ -44,23 +57,26 @@ export const AGENT_COLORS = [
 
 // --- raw YAML schema (snake_case, strict so typos are reported, not ignored) ------------
 
-const Name = z.string().regex(NAME_RE, NAME_MSG);
 const ToolName = z
   .string()
   .trim()
-  .regex(/^[^,\r\n]{1,200}$/, "a tool name such as Read, Bash or mcp__server__tool (no commas)");
+  .regex(
+    /^[^,\r\n\t]{1,200}$/,
+    "a tool name such as Read, Bash or mcp__server__tool (no commas or tabs)",
+  )
+  .refine(noFence, FENCE_MSG);
 const SkillName = z
   .string()
   .regex(
     /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$/,
     "a skill name such as em-history or eminiar:em-graph",
-  );
+  )
+  .refine(noFence, FENCE_MSG);
 const Model = z
   .string()
-  .regex(
-    /^[A-Za-z0-9][A-Za-z0-9._[\]-]{0,99}$/,
-    "a model alias (inherit, sonnet, opus, haiku, fable) or a full model id",
-  );
+  .max(100)
+  .regex(MODEL_RE, "a model alias (inherit, sonnet, opus, haiku, fable) or a Claude model id")
+  .refine(noFence, FENCE_MSG);
 const Glob = z
   .string()
   .min(1)
@@ -68,7 +84,17 @@ const Glob = z
   .refine(
     (g) => !g.startsWith("/") && !/^[A-Za-z]:/.test(g) && !g.split(/[\\/]/).includes(".."),
     "a project-relative glob without '..'",
-  );
+  )
+  .superRefine((g, c) => {
+    try {
+      checkGlob(g);
+    } catch (err) {
+      c.addIssue({
+        code: "custom",
+        message: `not a usable glob: ${err instanceof GlobError ? err.message : String(err)}`,
+      });
+    }
+  });
 
 const RawContext = z.strictObject({
   memories: z.number().int().min(0).max(10).optional(),
@@ -82,11 +108,23 @@ type RawContext = z.infer<typeof RawContext>;
 
 const RawHookCommand = z.strictObject({
   type: z.literal("command"),
-  command: z.string().trim().min(1).max(2000),
+  command: z.string().trim().min(1).max(2000).refine(noFence, FENCE_MSG),
   timeout: z.number().int().positive().max(600).optional(),
 });
 const RawHookMatcher = z.strictObject({
-  matcher: z.string().max(200).optional(),
+  matcher: z
+    .string()
+    .max(200)
+    .refine(noFence, FENCE_MSG)
+    .refine((m) => {
+      try {
+        new RegExp(m);
+        return true;
+      } catch {
+        return false;
+      }
+    }, "not a valid regular expression (Claude Code matches tool names with it)")
+    .optional(),
   hooks: z.array(RawHookCommand).min(1).max(10),
 });
 const RawHooks = z.strictObject({
@@ -96,7 +134,7 @@ const RawHooks = z.strictObject({
 });
 
 const RawAgent = z.strictObject({
-  description: z.string().trim().min(1).max(500),
+  description: z.string().trim().min(1).max(500).refine(noFence, FENCE_MSG),
   prompt: z.string().max(20_000).optional(),
   model: Model.optional(),
   tools: z.array(ToolName).max(80).optional(),
@@ -120,10 +158,13 @@ const RawSwarm = z.strictObject({
   stages: z.array(z.string()).max(32).optional(),
   instructions: z.string().max(20_000).optional(),
   context: RawContext.optional(),
-  agents: z.record(Name, RawAgent),
+  // Names are checked in resolve(): zod reports a bad record key only as "Invalid key".
+  agents: z.record(z.string(), RawAgent),
 });
 
-const RawFile = z.strictObject({
+// Loose at the top so `x-*` keys can hold YAML anchors; other unknown keys are reported in
+// parseSwarmYaml.
+const RawFile = z.looseObject({
   version: z.literal(1).optional(),
   enabled: z.boolean().optional(),
   sync: z.enum(["auto", "manual"]).optional(),
@@ -134,7 +175,7 @@ const RawFile = z.strictObject({
       context: RawContext.optional(),
     })
     .optional(),
-  swarms: z.record(Name, RawSwarm),
+  swarms: z.record(z.string(), RawSwarm),
 });
 type RawFile = z.infer<typeof RawFile>;
 
@@ -174,7 +215,19 @@ export function swarmFile(root: string): { file: string; rel: string; exists: bo
 /** Parse and validate swarm YAML text. `rel`/`file` only label the result. */
 export function parseSwarmYaml(text: string, file: string, rel: string): LoadResult {
   const lines = new LineCounter();
-  const doc = parseDocument(text, { lineCounter: lines, prettyErrors: false, uniqueKeys: true });
+  if (text.length > MAX_FILE_CHARS)
+    return {
+      state: "invalid",
+      file,
+      rel,
+      issues: [{ path: "", message: `the file is larger than ${MAX_FILE_CHARS / 1000} KB` }],
+    };
+  const doc = parseDocument(text, {
+    lineCounter: lines,
+    prettyErrors: false,
+    uniqueKeys: true,
+    merge: true,
+  });
   const lineAt = (offset: number | undefined) =>
     offset === undefined ? undefined : lines.linePos(offset).line;
 
@@ -201,7 +254,18 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
     return undefined;
   };
 
-  const js = doc.toJS() as unknown;
+  let js: unknown;
+  try {
+    // maxAliasCount bounds alias expansion ("billion laughs").
+    js = doc.toJS({ maxAliasCount: 200 });
+  } catch (err) {
+    return {
+      state: "invalid",
+      file,
+      rel,
+      issues: [{ path: "", message: (err as Error).message.split("\n")[0] ?? "unreadable YAML" }],
+    };
+  }
   if (js === null || js === undefined || typeof js !== "object" || Array.isArray(js)) {
     return {
       state: "invalid",
@@ -211,23 +275,46 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
     };
   }
 
+  const issues: ConfigIssue[] = [];
+  const issue = (path: string[], message: string) =>
+    issues.push({ path: path.join("."), message, line: lineOf(path) });
+  // Names are checked on the raw document so a typo elsewhere never hides a bad name.
+  const checkName = (path: string[], n: string, what: string) => {
+    if (!NAME_RE.test(n) || n.length > NAME_MAX) issue(path, `${what} name "${n}": ${NAME_MSG}`);
+  };
+  const rawSwarms = (js as Record<string, unknown>).swarms;
+  if (rawSwarms && typeof rawSwarms === "object" && !Array.isArray(rawSwarms))
+    for (const [name, s] of Object.entries(rawSwarms)) {
+      checkName(["swarms", name], name, "swarm");
+      const agents = (s as Record<string, unknown> | null)?.agents;
+      if (agents && typeof agents === "object" && !Array.isArray(agents))
+        for (const role of Object.keys(agents))
+          checkName(["swarms", name, "agents", role], role, "agent");
+    }
+
   const parsed = RawFile.safeParse(js);
   if (!parsed.success) {
     return {
       state: "invalid",
       file,
       rel,
-      issues: parsed.error.issues.slice(0, 50).map((i) => ({
-        path: i.path.map(String).join("."),
-        message: i.message,
-        line: lineOf(i.path),
-      })),
+      issues: [
+        ...issues,
+        ...parsed.error.issues.slice(0, 50).map((i) => ({
+          path: i.path.map(String).join("."),
+          message: i.message,
+          line: lineOf(i.path),
+        })),
+      ],
     };
   }
 
-  const issues: ConfigIssue[] = [];
-  const issue = (path: string[], message: string) =>
-    issues.push({ path: path.join("."), message, line: lineOf(path) });
+  for (const k of Object.keys(js as Record<string, unknown>))
+    if (!TOP_KEYS.has(k) && !k.startsWith("x-") && k !== "<<")
+      issue(
+        [k],
+        `unknown key "${k}" (top-level keys: ${[...TOP_KEYS].join(", ")}; x-* keys may hold YAML anchors)`,
+      );
   const config = resolve(parsed.data, file, rel, issue);
   if (issues.length) return { state: "invalid", file, rel, issues };
   return { state: "ok", config };
@@ -292,6 +379,11 @@ function resolve(
     });
     if (new Set(stages).size !== stages.length)
       issue(["swarms", name, "stages"], "a role may appear in stages only once");
+    if (stages.length && topology !== "pipeline")
+      issue(
+        ["swarms", name, "stages"],
+        `stages only apply to topology: pipeline (this swarm is ${topology}); remove them or change the topology`,
+      );
 
     swarms.push({
       name,
@@ -317,20 +409,21 @@ function resolve(
 
 // --- loading with a per-process cache ----------------------------------------------------
 
-const cache = new Map<string, { key: string; result: LoadResult }>();
+const MAX_FILE_CHARS = 256_000;
+const cache = new Map<string, { text: string; result: LoadResult }>();
 
-/** Load the project's swarm file. Cached per process by path, mtime and size. */
+/**
+ * Load the project's swarm file. The file is small, so it is read every time and only the
+ * parse is cached (keyed by the text): an edit that keeps the size and mtime still counts.
+ */
 export function loadSwarmConfig(root: string): LoadResult {
   const { file, rel, exists } = swarmFile(root);
   if (!exists) return { state: "absent", file, rel };
-  let key: string;
   let text: string;
   try {
-    const st = statSync(file);
-    key = `${file}\0${st.mtimeMs}\0${st.size}`;
-    const hit = cache.get(file);
-    if (hit && hit.key === key) return hit.result;
     text = readFileSync(file, "utf8");
+    const hit = cache.get(file);
+    if (hit && hit.text === text) return hit.result;
   } catch (err) {
     return {
       state: "invalid",
@@ -341,7 +434,7 @@ export function loadSwarmConfig(root: string): LoadResult {
   }
   const result = parseSwarmYaml(text, file, rel);
   if (cache.size > 32) cache.clear();
-  cache.set(file, { key, result });
+  cache.set(file, { text, result });
   return result;
 }
 

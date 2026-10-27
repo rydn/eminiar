@@ -143,6 +143,63 @@ against `HEAD` and the working tree. Reindex one file.
 Session event timelines (each session links to its usage), maintenance actions, doctor checks
 and the index-run log.
 
+### Swarms
+
+A live monitor for [agent swarms](design/agent-swarms.md), the opt-in feature that runs a team of
+Claude Code subagents from `.eminiar/swarm.yaml`. Every state is written as a glyph and a word,
+so colour is never the only cue: ○ pending or idle, ● running or active, ◆ blocked, ✓ done,
+✗ failed, ◌ stale (running but silent for 30 minutes), ★ the coordinator (your main session).
+
+- **Left rail.** The configured swarms: topology, description, and role chips in a colour per
+  role. Each chip shows the state of its generated agent file (in sync, missing, stale, or a
+  conflict with a hand-written file of the same name). Validation errors are listed with their
+  line numbers. **Sync agent files** rewrites `.claude/agents/swarm-*.md`. Below that are the
+  runs, each with its status, goal, age and task progress. Click a run to open it
+  (`#/swarm?run=<id>`). With no run selected, the newest active run opens.
+- **Stat tiles.** Workers running (out of `max_agents`), tasks done out of total, tool calls,
+  errors and elapsed time.
+- **Topology canvas.** The coordinator hub with one node per worker, showing role, short agent
+  id, status and task. Hierarchical swarms draw as a tree from the hub, mesh as a ring with peer
+  links, and pipeline as left-to-right stage lanes. A role with no worker yet shows as an idle
+  ghost node. Motion means data. A running worker pulses. Each tool call flashes its node: blue
+  for reads, amber for writes, purple for commands. An edge lights up for ten seconds after a
+  claim, post or report. Click a worker to filter the activity feed to it. With
+  `prefers-reduced-motion`, the pulses and flashes are drawn as static rings.
+- **Task board.** Pending, active, done, and failed or blocked columns. Each card shows the
+  task id, role, holder, file count and dependencies. Hovering a card shows the result. A card
+  closed from a worker's final message, because the worker never reported, carries an
+  **auto-closed** badge so you can check it and reopen it. Click a card to see the detail, the
+  full result and the files.
+- **Timeline.** Busy segments per worker over the run, coloured by the kind of tool calls.
+  Events less than a minute apart merge into one segment.
+- **Activity feed.** The run's events, newest first, in monospace, with a role chip and a glyph
+  per kind. You can filter by role or kind (tool calls, tasks, blackboard, workers, run, errors).
+- **Blackboard.** The shared notes with key, author, version and age. Click a note to read its
+  value.
+- **Finish run.** An inline form closes an active run as done, failed or cancelled, with an
+  optional summary. It can also write the outcome as a project memory.
+
+While a run is active and the tab is visible, new events are polled every 2 seconds and the
+snapshot every 5. Otherwise the run list refreshes every 15 seconds.
+
+Without a swarm file, the tab explains the feature. It shows the starter file read-only, with a
+**Create .eminiar/swarm.yaml** button, and the commands `eminiar swarm init` and
+`/eminiar:em-swarm <swarm> <goal>`. An invalid file shows its errors. A file with
+`enabled: false` is shown read-only.
+
+API (JSON, loopback only):
+
+| Route | Returns |
+|---|---|
+| `GET /api/swarm` | state (`absent`, `invalid` or `ok`), swarms and roles with agent-file state, issues, recent runs with counts, the starter YAML when absent |
+| `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments |
+| `GET /api/swarm/events?id=&after=` | up to 200 events after an event id, oldest first |
+| `POST /api/swarm/init` | writes the starter file if none exists (409 otherwise) and syncs the agent files |
+| `POST /api/swarm/sync` | syncs the agent files with the swarm file |
+| `POST /api/swarm/finish` | `{id, status: done\|failed\|cancelled, summary?, remember?}`, closing the run as the coordinator |
+
+Run ids look like `20261028-a1b2c3`. Anything else is a 400, and an unknown run is a 404.
+
 ## Deep links
 
 Views have hash routes, so you can bookmark or share a link to a view:

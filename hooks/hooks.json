@@ -16,7 +16,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Read|Edit|MultiEdit|Write|Grep|Glob|WebFetch|WebSearch|Agent|Task",
+        "matcher": "^(Bash|Read|Edit|MultiEdit|Write|Grep|Glob|WebFetch|WebSearch|Agent|Task|mcp__.*__em_swarm)$",
         "hooks": [
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/em-hook\"", "timeout": 5 }
         ]
@@ -38,6 +38,14 @@
       {
         "hooks": [
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/em-hook\"", "timeout": 5 }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "^swarm-",
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/em-hook\"", "timeout": 10 }
         ]
       }
     ],

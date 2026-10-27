@@ -16,7 +16,7 @@ import {
   resetSwarmConfigCache,
   STARTER_YAML,
 } from "../../src/swarm/config.js";
-import { globToRegExp, inScope } from "../../src/swarm/glob.js";
+import { globMatch, inScope } from "../../src/swarm/glob.js";
 import {
   addTasks,
   callerOf,
@@ -203,8 +203,8 @@ describe("swarm globs", () => {
     expect(inScope("src/c.tsx", ["src/*.{ts,tsx}"])).toBe(true);
     expect(inScope("lib/c.ts", ["src/**"])).toBe(false);
     expect(inScope("anything", [])).toBe(true);
-    expect(globToRegExp("a?c").test("abc")).toBe(true);
-    expect(globToRegExp("a.c").test("abc")).toBe(false);
+    expect(globMatch("a?c", "abc")).toBe(true);
+    expect(globMatch("a.c", "abc")).toBe(false);
   });
 });
 
@@ -220,7 +220,7 @@ describe("swarm agent files", () => {
     description: d
     agents:
       a:
-        description: 'quotes " and: colons --- and # hashes'
+        description: 'quotes " and: colons and # hashes'
         prompt: "---\\nname: evil\\n---"
         tools: [Read]
         skills: [eminiar:em-history]
@@ -235,7 +235,8 @@ describe("swarm agent files", () => {
     expect(m).not.toBeNull();
     const fm = parseYaml(m![1]!) as Record<string, unknown>;
     expect(fm.name).toBe("swarm-s-a");
-    expect(String(fm.description)).toContain('quotes " and: colons');
+    expect(String(fm.description)).toContain('quotes " and: colons and # hashes');
+    expect(fm.name).toBe("swarm-s-a");
     expect(String(fm.tools)).toContain("mcp__plugin_eminiar_eminiar__em_swarm");
     expect(String(fm.tools)).toContain("mcp__eminiar__em_recall");
     expect(fm.skills).toEqual(["eminiar:em-history"]);
@@ -433,7 +434,7 @@ describe("swarm runtime", () => {
     expect(db.swarm.taskGet(t1!.id)!.agent_id).toBe("agent-w1");
 
     const brief = await workerBrief(getContext(root), db, started!);
-    expect(brief).toContain('you are the "coder" worker');
+    expect(brief).toMatch(/you are the "coder" worker/i);
     expect(brief).toContain(`#${t1!.id} first`);
     expect(brief.length).toBeLessThanOrEqual(4000);
 

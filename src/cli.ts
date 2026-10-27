@@ -42,6 +42,15 @@ Use
   statusline                   Claude Code statusLine command (reads JSON on stdin)
   hook [--event E] [--client claude|cursor]   Run the hook handler manually (reads JSON on stdin)
   version | help
+
+Agent swarms (opt-in: .eminiar/swarm.yaml)
+  swarm init [--force]         Write a starter swarm.yaml and generate the worker agents
+  swarm validate               Check swarm.yaml; exit 1 with file:line messages on problems
+  swarm sync [--dry-run] [--force]   Regenerate .claude/agents/swarm-*.md from swarm.yaml;
+                               --force also overwrites generated files edited by hand
+  swarm list | runs [--limit N] | status [run]   Swarms and roles, past runs, one run
+  swarm watch [--run id] [--interval 2]          One NDJSON line per change (for the Monitor
+                               tool); exits when the run finishes. --json on the others
 `;
 
 type Command = (args: string[]) => Promise<number>;
@@ -528,6 +537,11 @@ const commands: Record<string, Command> = {
       root: getContext().root,
     });
     return 0;
+  },
+
+  async swarm(args) {
+    const { swarmCommand } = await import("./swarm/cli.js");
+    return swarmCommand(args, getContext());
   },
 
   async statusline() {

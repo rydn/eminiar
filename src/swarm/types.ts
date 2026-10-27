@@ -318,6 +318,25 @@ export interface SwarmStore {
   }): number;
   /** Oldest unconsumed reservation for `agentType` newer than `sinceTs`, marked consumed. */
   spawnTake(agentType: string, sinceTs: number, sessionId?: string | null): SpawnRow | undefined;
+  /** Unconsumed reservations for `agentType` newer than `sinceTs` (same session when given), oldest first. */
+  spawnsOpen(agentType: string, sinceTs: number, sessionId?: string | null): SpawnRow[];
+  /** Mark one reservation consumed; false if it already was. */
+  spawnConsume(id: number): boolean;
+  /** Void every open reservation of a run (it finished). */
+  spawnsVoid(runId: string): number;
+  /** Unconsumed reservations across every active run of a swarm, optionally of one agent type. */
+  spawnsPendingOfSwarm(swarm: string, sinceTs: number, agentType?: string): number;
+  /** Workers of a swarm (any run) still marked running with activity since `sinceTs`. */
+  liveWorkersOfSwarm(swarm: string, sinceTs: number): WorkerRow[];
+  /** Stamp a worker's last activity without counting a tool call. */
+  workerPing(runId: string, agentId: string): void;
+  /** The newest event of a run. */
+  eventLast(runId: string): SwarmEventRow | undefined;
+  /** Rewrite an event (to collapse repeats). */
+  eventUpdate(
+    id: number,
+    patch: { ts?: number; text?: string | null; payload?: Record<string, unknown> | null },
+  ): void;
   /** Unconsumed reservations of a run newer than `sinceTs`, optionally of one agent type. */
   spawnsPending(runId: string, sinceTs: number, agentType?: string): number;
 }

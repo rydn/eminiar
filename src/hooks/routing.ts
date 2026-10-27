@@ -19,6 +19,7 @@ import { type RoutingEvent, recordRouting } from "../session/routing-stats.js";
 import { serverAlive } from "../session/server-alive.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
+import { isSwarmTool, swarmPreAgent, swarmStampCaller, swarmTouch } from "../swarm/hooks.js";
 import { contextModeInstalled, effectiveRoutingMode } from "./coexist.js";
 import { hookLog } from "./log.js";
 import type { HookHandler, HookInput, HookOutput } from "./types.js";
@@ -700,7 +701,16 @@ export const preToolUse: HookHandler = async (
   input: HookInput,
 ): Promise<HookOutput | undefined> => {
   if (!input.tool_name || !input.tool_input) return undefined;
+  // em_swarm is eminiar's own tool: stamp (or strip) its caller, never route or annotate it.
+  if (isSwarmTool(input.tool_name)) return swarmStampCaller(input);
   const ctx = getContext(input.cwd);
+  // A swarm worker starting a tool is alive: keep its capacity slot and its task.
+  if (input.agent_id) swarmTouch(ctx, input);
+  // Swarm capacity holds in every routing mode, and a denial wins over everything else.
+  const spawn = swarmPreAgent(ctx, input);
+  if (spawn?.kind === "deny") return spawn.output;
+  // A swarm worker is briefed at SubagentStart; a prompt brief as well would say it twice.
+  const swarmWorker = spawn?.kind === "worker";
   // Project knowledge is pushed in every routing mode: switching routing off should not
   // hide decisions, fix history or the docs that are already indexed.
   const memo = joinHints(
@@ -744,7 +754,7 @@ export const preToolUse: HookHandler = async (
           permissionDecision: "allow",
           updatedInput: {
             ...input.tool_input,
-            prompt: s.prefixPrompt + (await briefFor(ctx, prompt)) + prompt,
+            prompt: s.prefixPrompt + (swarmWorker ? "" : await briefFor(ctx, prompt)) + prompt,
           },
         },
       };
@@ -778,9 +788,10 @@ export const preToolUse: HookHandler = async (
   }
   // Annotate mode: subagents get the project brief as context since their prompt is untouched.
   record("annotate", "mode");
-  const extra = s.prefixPrompt
-    ? joinHints((await briefFor(ctx, String(input.tool_input.prompt ?? ""))).trim(), hint)
-    : hint;
+  const extra =
+    s.prefixPrompt && !swarmWorker
+      ? joinHints((await briefFor(ctx, String(input.tool_input.prompt ?? ""))).trim(), hint)
+      : hint;
   return withContext(annotate(s), extra);
 };
 

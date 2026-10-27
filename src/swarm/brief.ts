@@ -213,29 +213,28 @@ export async function workerBrief(
   const now = Date.now();
   const spec = w.role.context;
   const snap = runSnapshot(db, w.run, 0);
-  const head = [
-    `eminiar swarm brief: you are the "${w.role.role}" worker (${w.role.agentType}) of swarm "${w.swarm.name}", run ${w.run.id}, topology ${w.swarm.topology}.`,
-    `Goal: ${w.run.goal}`,
-  ];
+  // The task and how to report it lead, so a small max_chars never cuts them off.
+  const head: string[] = [];
   if (w.task) {
     head.push(
-      `Your task (already claimed for you): ${taskLine(w.task)}${w.task.detail ? `\n${clip(w.task.detail, 1200)}` : ""}${
-        w.task.files.length ? `\nFiles: ${w.task.files.join(", ")}` : ""
-      }`,
-      'Report it with em_swarm {action:"update", task, status:"done"|"failed"|"blocked", result}.',
+      `eminiar swarm brief · your task (already claimed for you): ${taskLine(w.task)}. Report it with em_swarm {action:"update", task:${w.task.id}, status:"done"|"failed"|"blocked", result}.`,
     );
   } else {
-    if (w.handoffNote) head.push(`Task hand-over failed: ${w.handoffNote}.`);
     const open = snap.tasks.filter((t) => eligibility(t, snap.tasks, w.swarm, w.role.role).ok);
     head.push(
-      open.length
-        ? `No task was handed to you. Claimable now: ${open
-            .slice(0, 6)
-            .map(taskLine)
-            .join("; ")}. Claim one with em_swarm {action:"claim"} (or {action:"claim", task}).`
-        : 'No task was handed to you and none is claimable yet; check em_swarm {action:"status"} and follow your prompt.',
+      `eminiar swarm brief · no task was handed to you${w.handoffNote ? ` (${w.handoffNote})` : ""}. If your prompt names "task #N", claim it first with em_swarm {action:"claim", task:N}; otherwise claim the next open one with em_swarm {action:"claim"}.${
+        open.length
+          ? ` Claimable now: ${open.slice(0, 6).map(taskLine).join("; ")}.`
+          : ' Nothing is claimable yet; check em_swarm {action:"status"}.'
+      }`,
     );
   }
+  head.push(
+    `You are the "${w.role.role}" worker (${w.role.agentType}) of swarm "${w.swarm.name}", run ${w.run.id}, topology ${w.swarm.topology}.`,
+    `Goal: ${clip(w.run.goal, 300)}`,
+  );
+  if (w.task?.detail) head.push(clip(w.task.detail, 1200));
+  if (w.task?.files.length) head.push(`Files: ${w.task.files.join(", ")}`);
   const text = [w.run.goal, w.role.description, w.task?.title, w.task?.detail, w.prompt]
     .filter(Boolean)
     .join(" ");

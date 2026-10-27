@@ -13,6 +13,7 @@ import { History } from "./views/History.js";
 import { Memory } from "./views/Memory.js";
 import { Overview } from "./views/Overview.js";
 import { Sessions } from "./views/Sessions.js";
+import { Swarm } from "./views/Swarm.js";
 import { System } from "./views/System.js";
 import { Usage } from "./views/Usage.js";
 
@@ -27,6 +28,7 @@ const TABS: Array<[View, string]> = [
   ["docs", "Docs"],
   ["coverage", "Coverage"],
   ["sessions", "Sessions"],
+  ["swarm", "Swarms"],
   ["system", "System"],
 ];
 
@@ -156,6 +158,7 @@ export function App(): JSX.Element {
         {view === "docs" && <Docs params={route.params} />}
         {view === "coverage" && <Coverage />}
         {view === "sessions" && <Sessions />}
+        {view === "swarm" && <Swarm params={route.params} />}
         {view === "system" && <System onChanged={() => setTick((x) => x + 1)} />}
       </main>
       <footer class="status">

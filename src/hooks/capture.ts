@@ -13,6 +13,7 @@ import { globalDb } from "../stats/global.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import type { EventInput } from "../storage/types.js";
+import { swarmActivity, swarmSubagentStop } from "../swarm/hooks.js";
 import { budgetWarnings } from "../usage/brief.js";
 import { ingestSession, ingestTranscript, usageEnabled } from "../usage/ingest.js";
 import { hookLog } from "./log.js";
@@ -160,6 +161,8 @@ function detectLoop(db: StorageAdapter, sessionId: string, key: string, summary:
 
 export const postToolUse: HookHandler = (input) => {
   if (!input.tool_name) return undefined;
+  // A swarm worker's call feeds the swarm ledger too (a no-op for every other caller).
+  if (input.agent_id) swarmActivity(getContext(input.cwd), input, false);
   const { db, root, sessionId } = open(input);
   const drafts = classifyToolCall({
     toolName: input.tool_name,
@@ -186,6 +189,7 @@ export const postToolUse: HookHandler = (input) => {
 
 export const postToolUseFailure: HookHandler = async (input) => {
   if (!input.tool_name) return undefined;
+  if (input.agent_id) swarmActivity(getContext(input.cwd), input, true);
   const { db, root, sessionId } = open(input);
   // Look the error up before it is persisted, so it does not find itself.
   let recalled: string | undefined;
@@ -218,6 +222,8 @@ export const postToolUseFailure: HookHandler = async (input) => {
 };
 
 export const subagentStop: HookHandler = (input) => {
+  // A swarm worker is closed first: its task must not stay held if capture fails below.
+  if (input.agent_id) swarmSubagentStop(getContext(input.cwd), input);
   const { db, sessionId } = open(input);
   const msg = input.last_assistant_message ?? "";
   if (msg.trim()) {

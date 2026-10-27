@@ -411,6 +411,7 @@ CREATE TABLE IF NOT EXISTS swarm_runs (
   summary TEXT
 );
 CREATE INDEX IF NOT EXISTS swarm_runs_status ON swarm_runs(status, updated_at);
+CREATE INDEX IF NOT EXISTS swarm_runs_swarm ON swarm_runs(swarm, status, created_at);
 CREATE TABLE IF NOT EXISTS swarm_tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL REFERENCES swarm_runs(id) ON DELETE CASCADE,

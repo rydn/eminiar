@@ -1,5 +1,16 @@
 /** Fetch wrapper for the dashboard API: every call carries the selected project root. */
 import type { DocCategory } from "../../docs/category.js";
+import type {
+  NoteRow,
+  RunRow,
+  RunStatus,
+  SwarmEventKind,
+  SwarmEventRow,
+  TaskRow,
+  TaskStatus,
+  Topology,
+  WorkerStatus,
+} from "../../swarm/types.js";
 
 export type { DocCategory };
 
@@ -645,4 +656,166 @@ export interface HistoryKnowledgeUi {
   truncated: boolean;
   total: number;
   branches: HistoryGraphBranchUi[];
+}
+
+// --- agent swarms (GET /api/swarm, /api/swarm/run, /api/swarm/events) -----------------
+
+export type {
+  RunStatus as SwarmRunStatus,
+  SwarmEventKind,
+  TaskStatus as SwarmTaskStatus,
+  Topology as SwarmTopology,
+  WorkerStatus as SwarmWorkerStatus,
+};
+export type SwarmTask = TaskRow;
+export type SwarmNote = NoteRow;
+export type SwarmEvent = SwarmEventRow;
+export type SwarmIo = "read" | "write" | "exec" | "swarm" | "other";
+/** Sync state of a role's agent file; `disabled`: swarms are off and no file exists. */
+export type SwarmFileAction =
+  | "create"
+  | "update"
+  | "unchanged"
+  | "delete"
+  | "conflict"
+  | "disabled";
+
+export interface SwarmIssue {
+  path: string;
+  message: string;
+  line?: number;
+}
+export interface SwarmRoleUi {
+  role: string;
+  agentType: string;
+  description: string;
+  /** null: inherits the session's model. */
+  model: string | null;
+  count: number;
+  /** null: every tool. */
+  tools: string[] | null;
+  disallowedTools: string[] | null;
+  skills: string[];
+  scope: string[];
+  memoryTags: string[];
+  isolation: string | null;
+  hasHooks: boolean;
+  file: { path: string; action: SwarmFileAction; reason?: string };
+}
+export interface SwarmDefUi {
+  name: string;
+  description: string;
+  topology: Topology;
+  maxAgents: number;
+  stages: string[];
+  instructions: string;
+  roles: SwarmRoleUi[];
+}
+export interface SwarmRunCounts {
+  tasks: Record<TaskStatus, number> & { total: number };
+  workers: Record<WorkerStatus, number>;
+}
+export interface SwarmRunSummary {
+  id: string;
+  swarm: string;
+  goal: string;
+  status: RunStatus;
+  topology: Topology;
+  created_at: number;
+  updated_at: number;
+  ended_at: number | null;
+  counts: SwarmRunCounts;
+}
+export interface SwarmOverview {
+  state: "absent" | "invalid" | "ok";
+  /** Swarms are active: the file exists, is valid and not `enabled: false`. */
+  enabled: boolean;
+  sync?: "auto" | "manual";
+  /** Project-relative path of the swarm file (the default path when absent). */
+  file: string;
+  issues: SwarmIssue[];
+  swarms: SwarmDefUi[];
+  /** Generated agent files the swarm file no longer produces. */
+  orphans: Array<{ path: string; agentType: string; reason: string | null }>;
+  syncNeeded: boolean;
+  runs: SwarmRunSummary[];
+  /** The starter file, when there is no swarm file yet. */
+  starter?: string;
+  now: number;
+}
+export interface SwarmWorkerUi {
+  run_id: string;
+  agent_id: string;
+  agent_type: string;
+  role: string;
+  status: WorkerStatus;
+  task_id: number | null;
+  prompt: string | null;
+  session_id: string | null;
+  spawned_at: number;
+  last_ts: number;
+  ended_at: number | null;
+  tool_calls: number;
+  errors: number;
+  last_tool: string | null;
+  summary: string | null;
+}
+export interface SwarmSegment {
+  start: number;
+  end: number;
+  n: number;
+  errors: number;
+  io: Record<SwarmIo, number>;
+  open?: boolean;
+}
+export interface SwarmRunDetail {
+  run: RunRow;
+  tasks: SwarmTask[];
+  workers: SwarmWorkerUi[];
+  notes: SwarmNote[];
+  /** The latest events, oldest first. */
+  events: SwarmEvent[];
+  counts: {
+    tasks: Record<TaskStatus, number>;
+    workers: Record<WorkerStatus, number>;
+    toolCalls: number;
+    errors: number;
+    autoClosed: number;
+    /** Active tasks held by a worker that went quiet or stopped (newer servers). */
+    staleHeld?: number;
+  };
+  /** Roles of the swarm in config order, plus any the ledger names that the file lacks. */
+  roles: string[];
+  stages: string[];
+  maxAgents: number | null;
+  /** The run's swarm is still in the swarm file. */
+  configured: boolean;
+  timeline: {
+    start: number;
+    end: number;
+    cut: boolean;
+    workers: Array<{
+      agent_id: string;
+      role: string;
+      status: WorkerStatus;
+      spawned_at: number;
+      ended_at: number | null;
+      segments: SwarmSegment[];
+    }>;
+  };
+  lastEventId: number;
+  staleMs: number;
+  now: number;
+}
+export interface SwarmEventsPage {
+  run: { id: string; status: RunStatus; updated_at: number };
+  events: SwarmEvent[];
+  last: number;
+  more: boolean;
+  now: number;
+}
+export interface SwarmSyncResult {
+  actions: Array<{ agentType: string; path: string; action: string; reason?: string }>;
+  changed: number;
+  conflicts: number;
 }

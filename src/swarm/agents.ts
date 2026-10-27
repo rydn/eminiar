@@ -1,17 +1,26 @@
+import { createHash } from "node:crypto";
 import {
+  linkSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { stringify } from "yaml";
 import type { RoleSpec, SwarmConfig, SwarmSpec, Topology } from "./types.js";
 
-/** First line of every generated body; sync only rewrites or deletes files carrying it. */
+/**
+ * Generated agent files are `---\n<frontmatter>\n---\n<marker line>\n<body>`. The marker is
+ * the first line after the frontmatter and carries a hash of everything else, so sync can
+ * tell its own untouched files from hand-written or hand-edited ones.
+ */
 export const MARKER_PREFIX = "<!-- eminiar:swarm ";
+const HASH_RE = /\bhash=([0-9a-f]{12})\b/;
 
 /** eminiar tools a worker always keeps, whatever its `tools` allowlist says. */
 export const WORKER_EM_TOOLS = [
@@ -43,10 +52,6 @@ export function agentsDir(root: string): string {
 
 export function agentRel(agentType: string): string {
   return `${AGENTS_REL}/${agentType}.md`;
-}
-
-export function isGenerated(content: string): boolean {
-  return content.includes(MARKER_PREFIX);
 }
 
 const TOPOLOGY_RULE: Record<Topology, string> = {
@@ -87,15 +92,21 @@ function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> 
   return fm;
 }
 
+const hashOf = (fm: string, rest: string) =>
+  createHash("sha1").update(`${fm}\n${rest}`).digest("hex").slice(0, 12);
+
 /** The full agent file for one role. Deterministic, so sync can compare by content. */
 export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: RoleSpec): string {
   const fm = stringify(frontmatter(swarm, role), { lineWidth: 0 }).trimEnd();
+  // Validation rejects "---" in every frontmatter value; this guards against a gap there,
+  // because Claude Code would cut the frontmatter at the first "---" and drop the agent.
+  if (fm.includes("---"))
+    throw new Error(`agent ${role.agentType}: frontmatter would contain "---"; fix ${config.rel}`);
   const stages =
     swarm.topology === "pipeline" && swarm.stages.length
       ? ` Stages: ${swarm.stages.join(" → ")}.`
       : "";
-  const body = [
-    `${MARKER_PREFIX}swarm=${swarm.name} role=${role.role} · generated from ${config.rel} by \`eminiar swarm sync\`; edit the YAML, not this file (it is overwritten). -->`,
+  const rest = [
     "",
     `You are the **${role.role}** worker of the eminiar swarm **${swarm.name}**: ${role.description}`,
     `Topology ${swarm.topology}: ${TOPOLOGY_RULE[swarm.topology]}${stages}`,
@@ -103,7 +114,7 @@ export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: Rol
     ...(role.prompt ? [role.prompt, ""] : []),
     "## Swarm protocol",
     "",
-    '1. eminiar starts you with a swarm brief: the run goal, your task, the shared notes and what the project knows (memories, history, structure). If your prompt names `task #N`, that task is already claimed for you; otherwise claim one with `em_swarm {action:"claim"}`.',
+    '1. eminiar starts you with a swarm brief: the run goal, your task, the shared notes and what the project knows (memories, history, structure). If the brief says a task was claimed for you, work on it. Otherwise claim the task your prompt names with `em_swarm {action:"claim", task:N}`, or the next open one with `em_swarm {action:"claim"}`.',
     '2. Ask eminiar before acting: `em_recall {query}` for decisions and constraints, `em_history {action:"file", path}` before editing a file, `em_graph_impact {node}` before changing a symbol, `em_symbols` / `em_search` instead of grepping.',
     '3. Share what other workers need with `em_swarm {action:"post", key, value}` and read theirs with `em_swarm {action:"read"}`.',
     '4. Close every task with `em_swarm {action:"update", task, status, result}`: status `done`, `failed` or `blocked`; the result says what changed and how you verified it.',
@@ -111,7 +122,30 @@ export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: Rol
     "6. Your final message goes back to the coordinator: lead with the outcome, then the files you changed and anything left open.",
     "",
   ].join("\n");
-  return `---\n${fm}\n---\n${body}`;
+  const marker = `${MARKER_PREFIX}swarm=${swarm.name} role=${role.role} hash=${hashOf(fm, rest)} · generated from ${config.rel} by \`eminiar swarm sync\`; edit the YAML, not this file (it is overwritten). -->`;
+  return `---\n${fm}\n---\n${marker}\n${rest}`;
+}
+
+/** How a file on disk relates to sync: ours untouched, ours but edited by hand, or not ours. */
+export type GeneratedState = "generated" | "edited" | "foreign";
+
+export function generatedState(content: string): GeneratedState {
+  if (!content.startsWith("---\n")) return "foreign";
+  const end = content.indexOf("\n---\n", 3);
+  if (end === -1) return "foreign";
+  const fm = content.slice(4, end);
+  const after = content.slice(end + 5);
+  const nl = after.indexOf("\n");
+  const marker = nl === -1 ? after : after.slice(0, nl);
+  if (!marker.startsWith(MARKER_PREFIX)) return "foreign";
+  const hash = HASH_RE.exec(marker)?.[1];
+  if (!hash) return "foreign";
+  return hashOf(fm, nl === -1 ? "" : after.slice(nl + 1)) === hash ? "generated" : "edited";
+}
+
+/** True for any file sync generated (edited or not). */
+export function isGenerated(content: string): boolean {
+  return generatedState(content) !== "foreign";
 }
 
 // --- sync ---------------------------------------------------------------------------------
@@ -133,17 +167,46 @@ export interface SyncResult {
   conflicts: number;
 }
 
-function readMaybe(file: string): string | undefined {
+type Entry =
+  | { kind: "missing" }
+  | { kind: "file"; content: string; state: GeneratedState }
+  | { kind: "other"; why: string };
+
+function inspect(file: string): Entry {
+  let st: ReturnType<typeof lstatSync>;
   try {
-    return readFileSync(file, "utf8");
-  } catch {
-    return undefined;
+    st = lstatSync(file);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT"
+      ? { kind: "missing" }
+      : { kind: "other", why: `cannot inspect it: ${(err as Error).message}` };
+  }
+  if (st.isSymbolicLink()) return { kind: "other", why: "it is a symbolic link" };
+  if (!st.isFile()) return { kind: "other", why: "it is not a regular file" };
+  try {
+    const content = readFileSync(file, "utf8");
+    return { kind: "file", content, state: generatedState(content) };
+  } catch (err) {
+    return { kind: "other", why: `cannot read it: ${(err as Error).message}` };
   }
 }
 
-/** Generated agent files already on disk (by marker), keyed by agent name. */
-function existingGenerated(dir: string): Map<string, string> {
-  const out = new Map<string, string>();
+/** Why the agents directory must not be written, or undefined when it is safe. */
+function unsafeDir(root: string, dir: string): string | undefined {
+  try {
+    const real = realpathSync(dir);
+    const rel = relative(realpathSync(root), real);
+    if (rel.startsWith("..") || rel === "" || /^[A-Za-z]:/.test(rel))
+      return `${AGENTS_REL} resolves outside the project (${real}); swarm sync only writes inside the project`;
+  } catch {
+    // missing directory: it is created inside the project
+  }
+  return undefined;
+}
+
+/** Generated agent files already on disk, keyed by agent name. */
+function existingGenerated(dir: string): Map<string, Entry & { kind: "file" }> {
+  const out = new Map<string, Entry & { kind: "file" }>();
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -152,94 +215,139 @@ function existingGenerated(dir: string): Map<string, string> {
   }
   for (const n of names) {
     if (!n.startsWith("swarm-") || !n.endsWith(".md")) continue;
-    const content = readMaybe(join(dir, n));
-    if (content !== undefined && isGenerated(content)) out.set(n.slice(0, -3), content);
+    const e = inspect(join(dir, n));
+    if (e.kind === "file" && e.state !== "foreign") out.set(n.slice(0, -3), e);
   }
   return out;
 }
 
-/** What a sync would do. `config` undefined or disabled means "remove every generated file". */
+/**
+ * What a sync would do. `config` undefined or disabled means "remove every generated file".
+ * `force` lets sync overwrite or delete generated files that were edited by hand.
+ */
 export function planAgentSync(
   root: string,
   config: SwarmConfig | undefined,
+  opts: { force?: boolean | undefined } = {},
 ): Array<SyncAction & { content?: string }> {
   const dir = agentsDir(root);
+  const wantedRoles = config?.enabled
+    ? config.swarms.flatMap((swarm) => swarm.roles.map((role) => ({ swarm, role })))
+    : [];
+  const unsafe = unsafeDir(root, dir);
+  if (unsafe)
+    return wantedRoles.map(({ role }) => ({
+      agentType: role.agentType,
+      path: agentRel(role.agentType),
+      action: "conflict" as const,
+      reason: unsafe,
+    }));
   const generated = existingGenerated(dir);
   const actions: Array<SyncAction & { content?: string }> = [];
   const wanted = new Set<string>();
-  if (config?.enabled) {
-    for (const swarm of config.swarms)
-      for (const role of swarm.roles) {
-        wanted.add(role.agentType);
-        const content = renderAgentFile(config, swarm, role);
-        const path = agentRel(role.agentType);
-        const current = generated.get(role.agentType);
-        if (current !== undefined) {
-          actions.push({
-            agentType: role.agentType,
-            path,
-            action: current === content ? "unchanged" : "update",
-            content,
-          });
-          continue;
-        }
-        const other = readMaybe(join(dir, `${role.agentType}.md`));
-        if (other !== undefined) {
-          actions.push({
-            agentType: role.agentType,
-            path,
-            action: "conflict",
-            reason: "a hand-written agent file with this name exists; rename the role or the file",
-          });
-          continue;
-        }
-        actions.push({ agentType: role.agentType, path, action: "create", content });
-      }
-  }
-  for (const name of generated.keys())
-    if (!wanted.has(name))
+  const editedReason =
+    "the generated file was edited by hand; move the edits into the swarm file, then sync with --force";
+  for (const { swarm, role } of wantedRoles) {
+    wanted.add(role.agentType);
+    const path = agentRel(role.agentType);
+    let content: string;
+    try {
+      content = renderAgentFile(config!, swarm, role);
+    } catch (err) {
       actions.push({
-        agentType: name,
-        path: agentRel(name),
-        action: "delete",
-        reason: config?.enabled ? "no longer in the swarm file" : "swarms are disabled",
+        agentType: role.agentType,
+        path,
+        action: "conflict",
+        reason: (err as Error).message,
       });
+      continue;
+    }
+    const e = inspect(join(dir, `${role.agentType}.md`));
+    if (e.kind === "missing")
+      actions.push({ agentType: role.agentType, path, action: "create", content });
+    else if (e.kind === "other")
+      actions.push({
+        agentType: role.agentType,
+        path,
+        action: "conflict",
+        reason: `left alone: ${e.why}`,
+      });
+    else if (e.state === "foreign")
+      actions.push({
+        agentType: role.agentType,
+        path,
+        action: "conflict",
+        reason: "a hand-written agent file with this name exists; rename the role or the file",
+      });
+    else if (e.state === "edited" && !opts.force)
+      actions.push({ agentType: role.agentType, path, action: "conflict", reason: editedReason });
+    else
+      actions.push({
+        agentType: role.agentType,
+        path,
+        action: e.content === content ? "unchanged" : "update",
+        content,
+      });
+  }
+  for (const [name, e] of generated)
+    if (!wanted.has(name))
+      actions.push(
+        e.state === "edited" && !opts.force
+          ? { agentType: name, path: agentRel(name), action: "conflict", reason: editedReason }
+          : {
+              agentType: name,
+              path: agentRel(name),
+              action: "delete",
+              reason: config?.enabled ? "no longer in the swarm file" : "swarms are disabled",
+            },
+      );
   return actions;
 }
 
-/** Bring `.claude/agents/swarm-*.md` in line with the swarm file. */
+/** Bring `.claude/agents/swarm-*.md` in line with the swarm file. Never throws per file. */
 export function syncAgents(
   root: string,
   config: SwarmConfig | undefined,
-  opts: { dryRun?: boolean } = {},
+  opts: { dryRun?: boolean; force?: boolean | undefined } = {},
 ): SyncResult {
   const dir = agentsDir(root);
-  const planned = planAgentSync(root, config);
+  const planned = planAgentSync(root, config, opts);
+  const actions: SyncAction[] = [];
   let changed = 0;
-  for (const a of planned) {
-    if (opts.dryRun) {
-      if (a.action === "create" || a.action === "update" || a.action === "delete") changed++;
+  for (const { content, ...a } of planned) {
+    const writes = a.action === "create" || a.action === "update" || a.action === "delete";
+    if (opts.dryRun || !writes) {
+      if (writes) changed++;
+      actions.push(a);
       continue;
     }
     const file = join(dir, `${a.agentType}.md`);
-    if ((a.action === "create" || a.action === "update") && a.content !== undefined) {
-      mkdirSync(dir, { recursive: true });
-      const tmp = `${file}.${process.pid}.tmp`;
-      writeFileSync(tmp, a.content);
-      renameSync(tmp, file);
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      if (a.action === "delete") unlinkSync(file);
+      else {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(tmp, content ?? "");
+        // create: link fails if something appeared meanwhile, so nothing is ever replaced;
+        // update: the file is ours (checked in the plan), so an atomic rename is right.
+        if (a.action === "create") linkSync(tmp, file);
+        else renameSync(tmp, file);
+      }
       changed++;
-    } else if (a.action === "delete") {
+      actions.push(a);
+    } catch (err) {
+      actions.push({
+        ...a,
+        action: "conflict",
+        reason: `could not ${a.action}: ${(err as Error).message}`,
+      });
+    } finally {
       try {
-        unlinkSync(file);
-        changed++;
+        unlinkSync(tmp);
       } catch {
-        // already gone
+        // renamed, or never written
       }
     }
   }
-  return {
-    actions: planned.map(({ content: _c, ...a }) => a),
-    changed,
-    conflicts: planned.filter((a) => a.action === "conflict").length,
-  };
+  return { actions, changed, conflicts: actions.filter((a) => a.action === "conflict").length };
 }

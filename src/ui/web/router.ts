@@ -11,6 +11,7 @@ export const VIEWS = [
   "docs",
   "coverage",
   "sessions",
+  "swarm",
   "system",
 ] as const;
 export type View = (typeof VIEWS)[number];

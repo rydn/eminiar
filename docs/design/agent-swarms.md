@@ -1,6 +1,6 @@
 # Design: agent swarms (opt-in)
 
-Status: accepted · branch `feature/agent-swarms` · target v0.11.0 · 2026-10-28
+Status: accepted · branch `feature/agent-swarms` · target v0.12.0 · 2026-10-28
 
 ## Goal
 
@@ -250,4 +250,4 @@ is active and the tab is visible.
    (b) `em_swarm` tool, CLI, docs; (c) dashboard API and view.
 3. Adversarial review per feature area: config and generation; runtime and tool; hooks;
    dashboard. Fix every confirmed finding.
-4. Build, typecheck, lint, tests, run the dashboard, version bump to 0.11.0, memories, PR.
+4. Build, typecheck, lint, tests, run the dashboard, version bump to 0.12.0, memories, PR.
