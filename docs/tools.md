@@ -2,7 +2,7 @@
 
 [← Docs index](README.md)
 
-eminiar adds 23 MCP tools. In Claude Code their full names are
+eminiar adds 24 MCP tools. In Claude Code their full names are
 `mcp__plugin_eminiar_eminiar__em_*`. This page uses the short names.
 
 You do not normally call these tools yourself. Claude calls them, and the hooks remind Claude to
@@ -10,7 +10,8 @@ use them. This page helps you understand what Claude does and what to ask for.
 
 **Contents:** [Run code](#run-code) · [Search and fetch](#search-and-fetch) ·
 [Memory](#memory) · [Documentation](#documentation) · [Code graph](#code-graph) ·
-[History](#history) · [Housekeeping](#housekeeping) · [Slash commands](#slash-commands)
+[History](#history) · [Agent swarms](#agent-swarms) · [Housekeeping](#housekeeping) ·
+[Slash commands](#slash-commands)
 
 ## Run code
 
@@ -121,6 +122,35 @@ See [Knowledge graph and history](knowledge-graph.md).
 | `symbol` | The line history of one function |
 | `timeline`, `search` | When and why something happened |
 
+## Agent swarms
+
+| Tool | Parameters | Use for |
+|---|---|---|
+| `em_swarm` | `action`, `swarm`, `goal`, `run`, `tasks`, `task`, `status`, `result`, `key`, `value`, `summary`, `remember`, `agent`, `role`, `force` | Coordinate an opt-in agent swarm: runs, a task board, workers and a shared blackboard |
+
+| Action | Who | Does |
+|---|---|---|
+| `list` | anyone | Swarms, roles, agent file state, active runs |
+| `start` | coordinator | Opens a run of `swarm` for `goal` and returns the coordinator brief |
+| `plan` | coordinator, workers | Adds `tasks: [{key, title, detail, role, deps, files}]`; any other key is an error |
+| `claim` | workers, coordinator | Claims `task` (or the next eligible one) and returns its brief |
+| `update` | the task's holder, coordinator | Sets a task to `done`, `failed`, `blocked`, or `pending` to reopen |
+| `post` | coordinator, workers, other subagents | Writes a note to the run's shared blackboard |
+| `read` | anyone | One note by `key`, or every key followed by the values |
+| `status` | anyone | The next step, tasks by status, workers, blackboard keys, recent events |
+| `finish` | coordinator | Closes the run and its running workers; `remember: true` writes the outcome as a memory |
+| `release` | coordinator | Frees stuck workers (`agent` id or prefix, every worker of a `role`, or with neither every worker quiet for 15 minutes); their tasks go back to pending |
+| `sync` | coordinator | Regenerates `.claude/agents/swarm-*.md` from `.eminiar/swarm.yaml`; `force: true` overwrites generated files edited by hand |
+
+Without `.eminiar/swarm.yaml` the tool only explains how to opt in. Calls without `run` go to
+the one active run of this session (a worker's: its own run; `claim`/`update` with `task`: that
+task's run); when several are active the tool lists them and asks for `run`. The `caller_*`
+fields are a signed stamp that eminiar's PreToolUse hook adds to tell the coordinator from
+workers; Claude leaves them empty, and a call without a valid stamp can only `list`, `status`
+and `read` (settings installed by an eminiar older than 0.12 need `eminiar upgrade`). Subagents
+that are not swarm workers can only `list`, `status`, `read` and `post`. See
+[Agent swarms](swarms.md).
+
 ## Housekeeping
 
 | Tool | Use for |
@@ -143,5 +173,6 @@ See [Knowledge graph and history](knowledge-graph.md).
 | `/em-index` | Index files, a directory or pasted content |
 | `/em-stats` | Context savings and index size |
 | `/em-usage` | Tokens, cache, cost, billing blocks, insights and savings |
+| `/em-swarm <swarm> <goal>` | Coordinate a run of an agent swarm: plan, spawn workers, review, finish |
 | `/em-doctor` | Diagnose the installation |
 | `/em-purge` | Delete project data |

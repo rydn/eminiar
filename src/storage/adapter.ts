@@ -1,3 +1,4 @@
+import type { SwarmStore } from "../swarm/types.js";
 import type {
   ApiCallInput,
   ApiCallRow,
@@ -49,6 +50,9 @@ export type SessionPatch = { id: string } & { [K in keyof SessionRow]?: SessionR
  * surface for a team-shared backend.
  */
 export interface StorageAdapter {
+  /** Agent swarm ledger (runs, tasks, workers, events, blackboard); see src/swarm. */
+  readonly swarm: SwarmStore;
+
   // --- documents & chunks -------------------------------------------------
   /** Insert a document with its chunks. Same uri+hash → returns the existing id with created=false. */
   upsertDocument(doc: DocumentInput, chunks: ChunkInput[]): { id: number; created: boolean };

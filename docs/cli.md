@@ -97,6 +97,28 @@ eminiar usage ingest                           # read every transcript of the pr
 `--session <id>` narrows any view to one session and `--limit N` caps list views. See
 [Usage insights](usage.md).
 
+## Agent swarms
+
+```sh
+eminiar swarm init [--force]                   # starter .eminiar/swarm.yaml plus generated agents
+eminiar swarm validate                         # path:line messages; exit 1 on problems
+eminiar swarm sync [--dry-run] [--force]       # regenerate (or remove) .claude/agents/swarm-*.md
+eminiar swarm list                             # swarms, roles, agent file state, active runs
+eminiar swarm runs [--limit 20]                # past and active runs
+eminiar swarm status [run]                     # one run in full: the active one, else the latest
+eminiar swarm release [--run id] [--agent id] [--role r]   # free stuck workers; tasks back to pending
+eminiar swarm watch [--run id] [--interval 2]  # one JSON line per change, for the Monitor tool
+```
+
+`--json` works for every swarm command except `watch`, which always prints JSON lines. `sync` and
+`init` exit 1 when a hand-written or hand-edited agent file is left in place, in text and JSON
+mode alike; `sync --force` overwrites generated files edited by hand, and `sync --json` names the
+`reason` when there was nothing to do. `release` with neither `--agent` nor `--role` frees every
+worker quiet for 15 minutes, and needs `--run` when several runs are active. `watch` starts with
+a `swarm.snapshot` line (or `swarm.finished` for a closed run) and then prints a line only when
+tasks, workers or run events change, never for a worker's tool calls. An option such as
+`--interval` given without a value exits 2. See [Agent swarms](swarms.md).
+
 ## Dashboard and status line
 
 ```sh

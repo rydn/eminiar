@@ -5,6 +5,8 @@ export interface HookInput {
   cwd: string;
   permission_mode?: string;
   hook_event_name: string;
+  /** Set by fromCursor: the payload came from Cursor, not Claude Code. */
+  client?: "cursor";
   // SessionStart
   source?: "startup" | "resume" | "clear" | "compact" | "fork";
   // UserPromptSubmit
@@ -19,8 +21,10 @@ export interface HookInput {
   // Stop / SubagentStop
   stop_hook_active?: boolean;
   last_assistant_message?: string;
+  // SubagentStart / SubagentStop, and tool events fired inside a subagent
   agent_id?: string;
   agent_type?: string;
+  // SubagentStop
   agent_transcript_path?: string;
   // PreCompact
   trigger?: "manual" | "auto";

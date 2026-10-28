@@ -7,6 +7,7 @@ import { renderProjectBrief } from "../session/brief.js";
 import { setCurrentSession } from "../session/current.js";
 import { renderGuide } from "../session/guide.js";
 import { getStorage } from "../storage/index.js";
+import { swarmSessionStart } from "../swarm/hooks.js";
 import { usageBrief } from "../usage/brief.js";
 import { ingestUsage } from "./capture.js";
 import { effectiveRoutingMode } from "./coexist.js";
@@ -89,6 +90,10 @@ export const sessionStart: HookHandler = (input) => {
     }
   }
   parts.push(routingGuidance(effectiveRoutingMode(ctx.config)));
+  // Opted-in swarms: agent files synced, one line naming the swarms and any active run.
+  // Early, so the MAX_INJECT cut never drops it (≤600 chars; nothing without a swarm file).
+  const swarm = swarmSessionStart(ctx, sessionId);
+  if (swarm) parts.push(swarm);
   // A fresh context gets the project brief; after a compaction the Session Guide has the
   // room, so only the one-line index state is added.
   try {

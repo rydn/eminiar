@@ -40,7 +40,7 @@ Claude Code is very capable, but three things slow it down on a real project:
 
 ## The solution
 
-eminiar is a Claude Code plugin that also installs into Cursor. It adds an MCP server with 23
+eminiar is a Claude Code plugin that also installs into Cursor. It adds an MCP server with 24
 `em_*` tools and a set of hooks.
 Everything runs locally in one SQLite database per project.
 
@@ -125,6 +125,15 @@ session with its compactions, which tools fill the context, insights with recomm
 what eminiar's own tools saved in dollars. Everything stays local; cost is an estimate at list
 price ([details](docs/usage.md)).
 
+### 🐝 Agent swarms (opt-in)
+
+Declare worker roles in `.eminiar/swarm.yaml`, with their prompts, models, tools, skills and
+hooks. eminiar generates a Claude Code agent file per role. `/eminiar:em-swarm <swarm> <goal>`
+makes the main session the coordinator: it plans small tasks, fans workers out in parallel and
+reviews what comes back. Every worker starts with the memories, history risk and hot files for
+its task. Capacity limits, a shared blackboard and a live Swarms tab in the dashboard come with
+it. Nothing changes until you run `eminiar swarm init` ([details](docs/swarms.md)).
+
 ### 📊 Local dashboard
 
 `eminiar ui` opens a local web app with token savings, usage and cost, a source explorer with
@@ -200,7 +209,7 @@ flowchart LR
     CC["Claude Code"]
     subgraph eminiar ["eminiar (local)"]
         H["Hooks<br/>recall · routing · capture"]
-        S["MCP server<br/>23 em_* tools"]
+        S["MCP server<br/>24 em_* tools"]
         SB["Sandbox<br/>shell · JS · TS · Python …"]
         DB[("SQLite per project<br/>FTS5 · vectors · graph")]
         M["Memory files<br/>.eminiar/memories/*.md"]
@@ -234,6 +243,7 @@ Read more in [How it works](docs/how-it-works.md).
 | [Knowledge graph and history](docs/knowledge-graph.md) | Graph, symbols, impact analysis, git history |
 | [Documentation knowledge base](docs/documentation-kb.md) | Discover, index and look up docs |
 | [Usage insights](docs/usage.md) | Tokens, cache, cost, billing blocks, insights and savings per session |
+| [Agent swarms](docs/swarms.md) | Opt-in worker swarms: the swarm file, topologies, the tool and CLI |
 | [Dashboard](docs/dashboard.md) | The `eminiar ui` web app |
 | [Configuration](docs/configuration.md) | Every config key with its default |
 | [CLI](docs/cli.md) | The `eminiar` command |

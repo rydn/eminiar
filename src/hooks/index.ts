@@ -1,3 +1,4 @@
+import { subagentStart } from "../swarm/hooks.js";
 import {
   postToolUse,
   postToolUseFailure,
@@ -18,6 +19,8 @@ export const handlers: Record<string, HookHandler> = {
   PreToolUse: preToolUse,
   PostToolUse: postToolUse,
   PostToolUseFailure: postToolUseFailure,
+  // Agent swarms only: registers a swarm worker and injects its brief (src/swarm/hooks.ts).
+  SubagentStart: subagentStart,
   SubagentStop: subagentStop,
   PreCompact: preCompact,
   Stop: stop,

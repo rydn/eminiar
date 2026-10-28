@@ -50,13 +50,38 @@ equivalents are [below](#cursor)):
 | `PreToolUse` | Routes noisy calls to `em_*` tools and history or symbol questions to `em_history` / `em_symbols`. Attaches memories and fix history for a file before a read or edit, fan-in before an edit. Lists risky files before `git commit` |
 | `PostToolUse` | Captures session events (async, never blocks) |
 | `PostToolUseFailure` | Attaches earlier occurrences of the same error and how they were resolved |
-| `SubagentStop` | Records the subagent's findings, so `em_recall` can find them later |
+| `SubagentStart` | Swarm workers only: registers the worker and injects its brief; the worker then claims the `task #N` its prompt names |
+| `SubagentStop` | Records the subagent's findings, so `em_recall` can find them later. Closes a swarm worker |
 | `PreCompact` | Writes a ≤2 KB Session Guide snapshot |
 | `Stop` | Classifies Claude's last reply (decisions, summaries) |
 | `SessionEnd` | Marks the session as ended and flushes lifetime statistics |
 
 Hooks are fast by design. They never run `git log` and never load the embedding model. Recall
 is a few FTS queries against the project database.
+
+### Agent swarms
+
+Swarms are opt-in: without `.eminiar/swarm.yaml` every swarm path below returns after one
+`agent_type` prefix test (`swarm-`) or one file-exists check. A swarm problem is logged to
+`~/.eminiar/hook.log` and never blocks Claude. Spec: [design/agent-swarms.md](design/agent-swarms.md).
+
+| Event | Swarm work |
+|---|---|
+| `SessionStart` | With `sync: auto`, regenerates `.claude/agents/swarm-<swarm>-<role>.md` from the YAML. Adds one line naming the swarms and any active run, or a warning naming the first problem in an invalid file |
+| `PreToolUse` `Agent` / `Task` | For a `swarm-*` agent: checks `max_agents` and the role's `count`, and reserves the slot. Over capacity, the spawn is denied with the reason. Routing still adds its prompt prefix, but not the prompt brief: `SubagentStart` briefs the worker instead |
+| `PreToolUse` `em_swarm` | Drops any `caller_*` fields the model passed and stamps the call with the real caller from the hook payload: main session or subagent, `agent_id`, `agent_type` and `session_id`, signed with a per-machine key (`~/.eminiar/swarm.key`). The tool trusts only stamps that verify, so nobody can pose as the coordinator or another worker; an unstamped call can only `list`, `status` and `read`. Never routed or annotated |
+| `SubagentStart` | Registers the worker in its run and injects the worker brief: goal, blackboard, memories, history and hot files for its scope. The worker claims the `task #N` its spawn prompt names itself, because parallel spawns of one role cannot be told apart here |
+| `PostToolUse` / `PostToolUseFailure` | Counts the worker's tool calls and errors, and adds them to the run's activity feed |
+| `SubagentStop` | Marks the worker done and stores its last message. A task it still holds is closed as done (`auto_closed`), or released back to pending when there is no final message |
+| `SessionEnd` | Closes the session's workers that never got `SubagentStop` and releases their tasks back to pending |
+
+Settings installs made by an eminiar older than 0.12 lack the `em_swarm` PreToolUse matcher;
+`eminiar upgrade` (or `eminiar install`) rewrites the hook entries. The plugin's hooks update
+with the plugin.
+
+A role with `isolation: worktree` runs in a git worktree. Its hooks map the worktree back to the
+main checkout (the `.git` file's `gitdir:` points into `<main>/.git/worktrees/`), so the swarm
+ledger stays in the main project's database.
 
 ### Cursor
 
@@ -97,7 +122,7 @@ Routing decides what happens when Claude calls a native tool that an `em_*` tool
 | `Grep` | `em_execute` | Content-mode grep without a `head_limit` for anything else |
 | `WebFetch` | `em_fetch_and_index` / `em_docs` | Always. Names the docs source if the site is already indexed |
 | `WebSearch` | `em_docs` | When documentation sources exist (annotation only) |
-| `Agent`, `Task` | — | Adds eminiar guidance to the subagent prompt and brief |
+| `Agent`, `Task` | — | Adds eminiar guidance to the subagent prompt and brief (swarm workers get the guidance only; their brief comes from `SubagentStart`) |
 
 Set the mode with `routing.mode` in `eminiar.config.json`:
 

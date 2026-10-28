@@ -20,6 +20,7 @@ const HOOK_EVENTS = [
   "PreToolUse",
   "PostToolUse",
   "PostToolUseFailure",
+  "SubagentStart",
   "SubagentStop",
   "PreCompact",
   "Stop",
@@ -154,7 +155,10 @@ export function registerSettings(stable: string): InstallRecord["wrote"] {
     const entry: Json = {
       hooks: [{ type: "command", command: hookCmd, timeout: ev === "PreCompact" ? 15 : 10 }],
     };
-    if (ev === "PreToolUse") entry.matcher = "Bash|Read|Grep|Glob|WebFetch|Agent|Task";
+    if (ev === "PreToolUse")
+      entry.matcher = "^(Bash|Read|Grep|Glob|WebFetch|Agent|Task|mcp__.*__em_swarm)$";
+    // Only generated swarm workers need SubagentStart; other subagents skip the hook process.
+    if (ev === "SubagentStart") entry.matcher = "^swarm-";
     if (ev === "PostToolUse" || ev === "PostToolUseFailure")
       (entry.hooks as Json[])[0]!.async = true;
     filtered.push(entry);
