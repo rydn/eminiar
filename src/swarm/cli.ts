@@ -6,6 +6,7 @@ import type { StorageAdapter } from "../storage/adapter.js";
 import { planAgentSync, syncAgents } from "./agents.js";
 import { loadSwarmConfig, STARTER_YAML, swarmFile } from "./config.js";
 import {
+  enforceNote,
   formatInvalid,
   formatIssues,
   formatNotOptedIn,
@@ -150,10 +151,17 @@ export async function swarmCommand(
                 state: "ok",
                 file: loaded.config.rel,
                 enabled: loaded.config.enabled,
+                enforce: loaded.config.enforce,
+                allowed_agents: loaded.config.allowedAgents,
                 swarms: loaded.config.swarms.map((s) => s.name),
               }
             : loaded.state === "invalid"
-              ? { state: "invalid", file: loaded.rel, issues: loaded.issues }
+              ? {
+                  state: "invalid",
+                  file: loaded.rel,
+                  enforce: loaded.enforce ?? false,
+                  issues: loaded.issues,
+                }
               : { state: "absent", file: loaded.rel },
         );
         return loaded.state === "ok" ? 0 : 1;
@@ -170,7 +178,7 @@ export async function swarmCommand(
       io.out(
         `ok: ${c.rel} · ${c.swarms.length} swarm(s), ${c.swarms.reduce((n, s) => n + s.roles.length, 0)} role(s)${
           c.enabled ? "" : " · disabled (enabled: false)"
-        }`,
+        }${enforceNote(c)}`,
       );
       return 0;
     }

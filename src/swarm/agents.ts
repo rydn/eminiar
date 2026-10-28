@@ -88,7 +88,11 @@ function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> 
   };
   if (role.model) fm.model = role.model;
   if (role.tools) fm.tools = workerTools(role.tools).join(", ");
-  if (role.disallowedTools?.length) fm.disallowedTools = role.disallowedTools.join(", ");
+  // Workers are leaves: Claude Code lets subagents spawn subagents unless Agent is disallowed.
+  // A role that lists Agent or Task in its own `tools` opted out of that.
+  const spawns = role.tools?.some((t) => t === "Agent" || t === "Task");
+  const disallowed = [...new Set([...(role.disallowedTools ?? []), ...(spawns ? [] : ["Agent"])])];
+  if (disallowed.length) fm.disallowedTools = disallowed.join(", ");
   if (role.skills.length) fm.skills = role.skills;
   if (role.hooks) {
     const hooks = Object.fromEntries(

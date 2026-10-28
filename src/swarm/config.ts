@@ -44,7 +44,15 @@ const FENCE_MSG = 'must not contain "---" (Claude Code would end the agent front
 /** Model aliases Claude Code accepts, or a Claude model id (incl. Bedrock/Vertex forms). */
 const MODEL_RE =
   /^(?:inherit|opusplan|(?:sonnet|opus|haiku|fable)(?:\[1m\])?|(?:[a-z0-9-]+\.)*claude-[a-z0-9.:@-]+(?:\[1m\])?)$/;
-const TOP_KEYS = new Set(["version", "enabled", "sync", "defaults", "swarms"]);
+const TOP_KEYS = new Set([
+  "version",
+  "enabled",
+  "sync",
+  "enforce",
+  "allowed_agents",
+  "defaults",
+  "swarms",
+]);
 
 export const DEFAULT_CONTEXT: ContextSpec = {
   memories: 4,
@@ -106,6 +114,18 @@ const Glob = z
       });
     }
   });
+
+const AgentName = z
+  .string()
+  .trim()
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/,
+    "an agent type such as Explore, statusline-setup or my-plugin:reviewer",
+  )
+  .refine(
+    (n) => !n.startsWith("swarm-"),
+    "swarm workers need no entry: they are allowed during a run of their swarm",
+  );
 
 const RawContext = z.strictObject({
   memories: z.number().int().min(0).max(10).optional(),
@@ -180,6 +200,8 @@ const RawFile = z.looseObject({
   version: z.literal(1).optional(),
   enabled: z.boolean().optional(),
   sync: z.enum(["auto", "manual"]).optional(),
+  enforce: z.boolean().optional(),
+  allowed_agents: z.array(AgentName).max(50).optional(),
   defaults: z
     .strictObject({
       model: Model.optional(),
@@ -224,6 +246,29 @@ export function swarmFile(root: string): { file: string; rel: string; exists: bo
 
 // --- parse + resolve --------------------------------------------------------------------
 
+/**
+ * Does the raw text ask for enforcement (top-level `enforce: true`, not switched off by
+ * `enabled: false`)? Used when the file cannot be parsed, so an invalid file never silently
+ * drops enforcement. bin/em-hook applies the same rule with grep, so keep the two in step.
+ *
+ * Accepts the YAML 1.2 spellings true/True/TRUE and false/False/FALSE, a plain or quoted
+ * key, a BOM, CRLF, whitespace before the colon and a trailing ` # comment`. A quoted or
+ * suffixed value ("true", trueish) is not a boolean and does not count, matching what
+ * parseSwarmYaml reports. Known edge: a flow-style or indented whole document that fails to
+ * parse is not recognised; when it does parse, the parsed value decides instead.
+ */
+export function enforceIntent(text: string): boolean {
+  return topLevelFlag(text, "enforce", "true") && !topLevelFlag(text, "enabled", "false");
+}
+
+function topLevelFlag(text: string, key: string, word: "true" | "false"): boolean {
+  const w = word === "true" ? "(?:true|True|TRUE)" : "(?:false|False|FALSE)";
+  return new RegExp(
+    `^\\uFEFF?(?:${key}|"${key}"|'${key}')[ \\t]*:[ \\t]+${w}(?:[ \\t]+#.*)?[ \\t]*\\r?$`,
+    "m",
+  ).test(text);
+}
+
 /** Parse and validate swarm YAML text. `rel`/`file` only label the result. */
 export function parseSwarmYaml(text: string, file: string, rel: string): LoadResult {
   const Y = yaml();
@@ -233,6 +278,7 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
       state: "invalid",
       file,
       rel,
+      enforce: enforceIntent(text),
       issues: [{ path: "", message: `the file is larger than ${MAX_FILE_CHARS / 1000} KB` }],
     };
   const doc = Y.parseDocument(text, {
@@ -249,6 +295,7 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
       state: "invalid",
       file,
       rel,
+      enforce: enforceIntent(text),
       issues: doc.errors.map((e) => ({
         path: "",
         message: e.message.split("\n")[0] ?? e.message,
@@ -276,6 +323,7 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
       state: "invalid",
       file,
       rel,
+      enforce: enforceIntent(text),
       issues: [{ path: "", message: (err as Error).message.split("\n")[0] ?? "unreadable YAML" }],
     };
   }
@@ -284,10 +332,13 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
       state: "invalid",
       file,
       rel,
+      enforce: enforceIntent(text),
       issues: [{ path: "", message: "expected a mapping with a `swarms:` key", line: 1 }],
     };
   }
 
+  const top = js as Record<string, unknown>;
+  const enforce = top.enforce === true && top.enabled !== false;
   const issues: ConfigIssue[] = [];
   const issue = (path: string[], message: string) =>
     issues.push({ path: path.join("."), message, line: lineOf(path) });
@@ -311,6 +362,7 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
       state: "invalid",
       file,
       rel,
+      enforce,
       issues: [
         ...issues,
         ...parsed.error.issues.slice(0, 50).map((i) => ({
@@ -329,7 +381,7 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
         `unknown key "${k}" (top-level keys: ${[...TOP_KEYS].join(", ")}; x-* keys may hold YAML anchors)`,
       );
   const config = resolve(parsed.data, file, rel, issue);
-  if (issues.length) return { state: "invalid", file, rel, issues };
+  if (issues.length) return { state: "invalid", file, rel, enforce, issues };
   return { state: "ok", config };
 }
 
@@ -415,6 +467,8 @@ function resolve(
     rel,
     enabled: raw.enabled ?? true,
     sync: raw.sync ?? "auto",
+    enforce: raw.enforce ?? false,
+    allowedAgents: uniq(raw.allowed_agents ?? []),
     swarms,
     hash: createHash("sha1").update(JSON.stringify(swarms)).digest("hex"),
   };
@@ -491,6 +545,8 @@ export const STARTER_YAML = `# eminiar agent swarms (opt-in). Docs: https://gith
 version: 1
 enabled: true
 sync: auto            # regenerate the agent files at session start when this file changes
+# enforce: true        # only swarm workers may run as subagents, and only during a run of their swarm
+# allowed_agents: []   # with enforce: other agent types still allowed, e.g. [statusline-setup]
 
 defaults:
   model: sonnet

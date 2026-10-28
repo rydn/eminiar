@@ -2,14 +2,87 @@
 # Hook entry shim. Node and package-root resolution live in _resolve.sh.
 # A hook must never block Claude: if nothing can run, print an empty JSON object.
 . "$(dirname "$0")/_resolve.sh"
+# Swarm enforcement fails closed: when nothing can run, an Agent/Task call in a project whose
+# .eminiar/swarm.yaml says `enforce: true` is denied. Reads stdin only here; every other call
+# (and every other project) gets the empty answer below.
+swarm_gate() {
+  case " $* " in *" cursor "*) return 0 ;; esac
+  payload=$(cat 2>/dev/null) || return 0
+  case "$payload" in *'"PreToolUse"'*) ;; *) return 0 ;; esac
+  printf '%s' "$payload" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Agent|Task)"' || return 0
+  # Payloads with "agent_id" (a call made inside a subagent) are denied too: the Node path
+  # allows nested calls only for allow-listed agents, and this shim cannot read allowed_agents,
+  # so a nested call gets the same deny text as a main-session one.
+  # Root order matches the hooks: CLAUDE_PROJECT_DIR (set by Claude Code per hook command)
+  # before EMINIAR_PROJECT_ROOT (may be inherited from an outer session).
+  root="${CLAUDE_PROJECT_DIR:-${EMINIAR_PROJECT_ROOT:-$PWD}}"
+  # Walk up to the first directory with a project marker (src/project.ts ROOT_MARKERS), else
+  # stay on the start dir, so this checks the root resolveProjectRoot would.
+  d=$root
+  while :; do
+    for m in .git package.json pnpm-workspace.yaml go.mod Cargo.toml pyproject.toml; do
+      [ -e "$d/$m" ] && break 2
+    done
+    p=${d%/*}
+    [ -n "$p" ] || p=/
+    [ "$p" != "$d" ] || { d=$root; break; }
+    d=$p
+  done
+  root=$d
+  main=
+  # A `claude --worktree` session: .git is a file ("gitdir: <main>/.git/worktrees/<n>"), and the
+  # uncommitted swarm file lives in the main checkout. Follow gitdir -> commondir to it. A .git
+  # file without a gitdir line, or a gitdir without commondir (a submodule), is not followed.
+  if [ -f "$root/.git" ]; then
+    cr=$(printf '\r')
+    gd=$(grep -m1 '^gitdir:' "$root/.git" 2>/dev/null)
+    gd=${gd#gitdir:}
+    gd=${gd# }
+    gd=${gd%"$cr"}
+    if [ -n "$gd" ]; then
+      case "$gd" in /*) ;; *) gd="$root/$gd" ;; esac
+      cdir=
+      [ -f "$gd/commondir" ] && read -r cdir < "$gd/commondir"
+      cdir=${cdir%"$cr"}
+      if [ -n "$cdir" ]; then
+        case "$cdir" in /*) ;; *) cdir="$gd/$cdir" ;; esac
+        main=$(cd "$cdir/.." 2>/dev/null && pwd)
+        [ "$main" = "$root" ] && main=
+      fi
+    fi
+  fi
+  # The same rule as enforceIntent (src/swarm/config.ts): top-level `enforce: true|True|TRUE`
+  # (plain or quoted key, BOM, CRLF, space before the colon, trailing comment), and not
+  # `enabled: false|False|FALSE`. Flow-style or indented documents are not recognised here; a
+  # parsing Node reader decides those.
+  bom=$(printf '\357\273\277')
+  tail='[[:space:]]*:[[:space:]]+'
+  end='([[:space:]]+#.*)?[[:space:]]*$'
+  for r in "$root" "$main"; do
+    [ -n "$r" ] || continue
+    for f in "$r/.eminiar/swarm.yaml" "$r/.eminiar/swarm.yml"; do
+      [ -f "$f" ] || continue
+      grep -Eq "^($bom)?(enforce|\"enforce\"|'enforce')${tail}(true|True|TRUE)${end}" "$f" 2>/dev/null || return 0
+      grep -Eq "^($bom)?(enabled|\"enabled\"|'enabled')${tail}(false|False|FALSE)${end}" "$f" 2>/dev/null && return 0
+      echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"eminiar swarm enforcement: eminiar'"'"'s hook cannot run (no Node.js or no installed copy; npx eminiar install fixes it), so this subagent is denied. Do the work in this session, or ask the user to fix the install or set enforce: false in .eminiar/swarm.yaml."}}'
+      return 1
+    done
+  done
+  return 0
+}
+# --gate: decide-only mode for a project-level onFailure:"block" entry. Nothing to run means
+# failure (exit 1), so that entry blocks; the swarm_gate fallback below is for the plugin hook.
+case " $* " in *" --gate "*) EM_GATE=1 ;; *) EM_GATE= ;; esac
 if [ ! -x "$NODE" ]; then
   echo "eminiar hook: no node binary found (run: npx eminiar install)" >&2
-  echo '{}'
+  [ -n "$EM_GATE" ] && exit 1
+  swarm_gate "$@" && echo '{}'
   exit 0
 fi
 if [ -z "$RUN" ]; then
   echo "eminiar hook: $DIR has no node_modules and no stable copy is pinned (run: npx eminiar install)" >&2
-  echo '{}'
+  [ -n "$EM_GATE" ] && exit 1
+  swarm_gate "$@" && echo '{}'
   exit 0
 fi
 exec "$NODE" "$RUN/dist/hook.js" "$@"

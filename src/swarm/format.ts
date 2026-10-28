@@ -149,6 +149,12 @@ export function runRef(run: RunRow): string {
   return `${run.id} (${run.swarm}) "${clip(firstLine(run.goal), 80)}"`;
 }
 
+/** " · enforce on (also allowed: a, b)" when the swarms are on and enforce is set, else "". */
+export function enforceNote(config: SwarmConfig): string {
+  if (!config.enabled || !config.enforce) return "";
+  return ` · enforce on${config.allowedAgents.length ? ` (also allowed: ${config.allowedAgents.join(", ")})` : ""}`;
+}
+
 /** Swarms, their roles and agent files, plus the active runs. */
 export function formatSwarmList(
   config: SwarmConfig,
@@ -165,7 +171,7 @@ export function formatSwarmList(
     .join(", ");
   const swarms = opts.swarm ? config.swarms.filter((s) => s.name === opts.swarm) : config.swarms;
   const lines = [
-    `eminiar swarms · ${config.rel} · sync ${config.sync} · agent files: ${fileSummary || "none"}`,
+    `eminiar swarms · ${config.rel} · sync ${config.sync}${enforceNote(config)} · agent files: ${fileSummary || "none"}`,
   ];
   if (opts.swarm && !swarms.length)
     lines.push(

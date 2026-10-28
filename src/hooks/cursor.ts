@@ -112,6 +112,7 @@ export function fromCursor(raw: Record<string, unknown>): HookInput {
       str(raw.session_id) ?? str(raw.conversation_id) ?? process.env.EMINIAR_SESSION_ID ?? "cursor",
     cwd,
     hook_event_name: CURSOR_EVENTS[event] ?? event,
+    client: "cursor",
   };
   const transcript = str(raw.transcript_path);
   if (transcript) input.transcript_path = transcript;

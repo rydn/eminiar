@@ -5,6 +5,8 @@ export interface HookInput {
   cwd: string;
   permission_mode?: string;
   hook_event_name: string;
+  /** Set by fromCursor: the payload came from Cursor, not Claude Code. */
+  client?: "cursor";
   // SessionStart
   source?: "startup" | "resume" | "clear" | "compact" | "fork";
   // UserPromptSubmit

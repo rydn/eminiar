@@ -10,6 +10,7 @@ import { planAgentSync, renderAgentFile, syncAgents, workerTools } from "../../s
 import { coordinatorBrief, taskBrief, workerBrief } from "../../src/swarm/brief.js";
 import {
   activeSwarmConfig,
+  enforceIntent,
   findRole,
   loadSwarmConfig,
   parseSwarmYaml,
@@ -36,6 +37,7 @@ import {
   updateTask,
 } from "../../src/swarm/runtime.js";
 import type { SwarmConfig } from "../../src/swarm/types.js";
+import { ENFORCE_FORMS } from "./swarm-enforce-forms.js";
 
 const parse = (yaml: string) =>
   parseSwarmYaml(yaml, "/x/.eminiar/swarm.yaml", ".eminiar/swarm.yaml");
@@ -240,11 +242,63 @@ describe("swarm agent files", () => {
     expect(String(fm.tools)).toContain("mcp__plugin_eminiar_eminiar__em_swarm");
     expect(String(fm.tools)).toContain("mcp__eminiar__em_recall");
     expect(fm.skills).toEqual(["eminiar:em-history"]);
+    expect(fm.disallowedTools).toBe("Agent");
     expect((fm.hooks as Record<string, unknown>).PostToolUse).toBeTruthy();
     expect(text).toContain("<!-- eminiar:swarm swarm=s role=a");
     expect(
       workerTools(["Read", "mcp__eminiar__em_swarm"]).filter((t) => t === "mcp__eminiar__em_swarm"),
     ).toHaveLength(1);
+  });
+
+  it("always disallows Agent so workers stay leaves, merged with disallowed_tools without duplicates", () => {
+    const c = ok(`
+version: 1
+swarms:
+  s:
+    description: d
+    agents:
+      a:
+        description: x
+        disallowed_tools: [Write, Agent]
+      b:
+        description: y
+`);
+    const s = c.swarms[0]!;
+    const dis = (i: number) => {
+      const m = /^---\n([\s\S]*?)\n---\n/.exec(renderAgentFile(c, s, s.roles[i]!));
+      return (parseYaml(m![1]!) as Record<string, unknown>).disallowedTools;
+    };
+    expect(dis(0)).toBe("Write, Agent");
+    expect(dis(1)).toBe("Agent");
+  });
+
+  it("respects a role that lists Agent or Task in its own tools", () => {
+    const c = ok(`
+version: 1
+swarms:
+  s:
+    description: d
+    agents:
+      a:
+        description: x
+        tools: [Read, Agent]
+      b:
+        description: y
+        tools: [Read, Task]
+        disallowed_tools: [Write]
+      c:
+        description: z
+        tools: [Read]
+`);
+    const s = c.swarms[0]!;
+    const fm = (i: number) => {
+      const m = /^---\n([\s\S]*?)\n---\n/.exec(renderAgentFile(c, s, s.roles[i]!));
+      return parseYaml(m![1]!) as Record<string, unknown>;
+    };
+    expect(fm(0).disallowedTools).toBeUndefined();
+    expect(String(fm(0).tools)).toContain("Agent");
+    expect(fm(1).disallowedTools).toBe("Write");
+    expect(fm(2).disallowedTools).toBe("Agent");
   });
 
   it("syncs, is idempotent, never touches hand-written files and prunes", () => {
@@ -530,5 +584,176 @@ describe("swarm runtime", () => {
       "em_search",
     );
     expect(toolHead(root, "Bash", { command: "npm test\necho hi" })).toBe("Bash npm test");
+  });
+});
+
+describe("swarm enforcement config", () => {
+  const saved = {
+    EMINIAR_PROJECT_ROOT: process.env.EMINIAR_PROJECT_ROOT,
+    CLAUDE_PROJECT_DIR: process.env.CLAUDE_PROJECT_DIR,
+  };
+  beforeEach(() => {
+    delete process.env.EMINIAR_PROJECT_ROOT;
+    delete process.env.CLAUDE_PROJECT_DIR;
+  });
+  afterAll(() => {
+    for (const [k, v] of Object.entries(saved))
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  });
+  const BODY = `swarms:
+  s:
+    description: d
+    agents:
+      a: { description: x }
+`;
+  const issuesOf = (yaml: string) => {
+    const r = parse(yaml);
+    return r.state === "invalid" ? r.issues : [];
+  };
+
+  it("defaults enforce to false and parses enforce and allowed_agents", () => {
+    const off = ok(BODY);
+    expect(off.enforce).toBe(false);
+    expect(off.allowedAgents).toEqual([]);
+    const on = ok(
+      `enforce: true\nallowed_agents: [statusline-setup, my-plugin:reviewer, statusline-setup]\n${BODY}`,
+    );
+    expect(on.enforce).toBe(true);
+    expect(on.allowedAgents).toEqual(["statusline-setup", "my-plugin:reviewer"]);
+  });
+
+  it("accepts allowed_agents without enforce, and enforce with enabled: false", () => {
+    const c = ok(`allowed_agents: [Explore]\n${BODY}`);
+    expect(c.enforce).toBe(false);
+    expect(ok(`enabled: false\nenforce: true\n${BODY}`).enabled).toBe(false);
+  });
+
+  it("rejects a swarm- entry in allowed_agents and the typo `enforced:`", () => {
+    const sw = issuesOf(`enforce: true\nallowed_agents: [swarm-s-a]\n${BODY}`);
+    expect(
+      sw.some(
+        (i) => i.path.startsWith("allowed_agents") && /swarm workers need no entry/.test(i.message),
+      ),
+    ).toBe(true);
+    const typo = issuesOf(`enforced: true\n${BODY}`);
+    expect(typo.some((i) => /unknown key "enforced"/.test(i.message))).toBe(true);
+    expect(parse(`enforce: yes-please\n${BODY}`).state).toBe("invalid");
+    expect(parse(`allowed_agents: "Explore"\n${BODY}`).state).toBe("invalid");
+  });
+
+  it("keeps the enforce intent of an invalid file, including a YAML syntax error", () => {
+    const bad = parse(`enforce: true\nswarms: {}\nmax_agent: 3\n${BODY}`);
+    expect(bad.state === "invalid" && bad.enforce).toBe(true);
+    const syntax = parse("enforce: true\nswarms: [oops\n");
+    expect(syntax.state === "invalid" && syntax.enforce).toBe(true);
+    const commented = parse("enforce: true   # on\nswarms: [oops\n");
+    expect(commented.state === "invalid" && commented.enforce).toBe(true);
+    const notMap = parse("- enforce\n");
+    expect(notMap.state === "invalid" && notMap.enforce).toBe(false);
+  });
+
+  it("gives an invalid file no enforce when enabled: false or enforce is not true", () => {
+    const disabled = parse("enabled: false\nenforce: true\nswarms: [oops\n");
+    expect(disabled.state === "invalid" && disabled.enforce).toBe(false);
+    const disabledMapping = parse(`enabled: false\nenforce: true\nmax_agent: 1\n${BODY}`);
+    expect(disabledMapping.state === "invalid" && disabledMapping.enforce).toBe(false);
+    const off = parse("enforce: false\nswarms: [oops\n");
+    expect(off.state === "invalid" && off.enforce).toBe(false);
+    const quoted = parse('enforce: "true"\nswarms: [oops\n');
+    expect(quoted.state === "invalid" && quoted.enforce).toBe(false);
+  });
+
+  it("does not change the hash", () => {
+    const base = ok(BODY);
+    expect(ok(`enforce: true\nallowed_agents: [Explore]\n${BODY}`).hash).toBe(base.hash);
+  });
+
+  it("keeps STARTER_YAML valid and enforce off, and the commented keys switch on cleanly", () => {
+    expect(ok(STARTER_YAML).enforce).toBe(false);
+    expect(STARTER_YAML).toContain("# enforce: true");
+    const on = STARTER_YAML.replace("# enforce: true", "enforce: true").replace(
+      "# allowed_agents: []",
+      "allowed_agents: [statusline-setup]",
+    );
+    const c = ok(on);
+    expect(c.enforce).toBe(true);
+    expect(c.allowedAgents).toEqual(["statusline-setup"]);
+  });
+
+  it("shows enforce in the list header, the enforceNote and `swarm validate`", async () => {
+    const { enforceNote, formatSwarmList } = await import("../../src/swarm/format.js");
+    const { swarmCommand } = await import("../../src/swarm/cli.js");
+    const on = ok(`enforce: true\nallowed_agents: [statusline-setup]\n${BODY}`);
+    expect(enforceNote(on)).toBe(" · enforce on (also allowed: statusline-setup)");
+    expect(enforceNote(ok(`enforce: true\n${BODY}`))).toBe(" · enforce on");
+    expect(enforceNote(ok(BODY))).toBe("");
+    expect(enforceNote({ ...on, enabled: false })).toBe("");
+    expect(formatSwarmList(on, [], [])).toContain(
+      "· enforce on (also allowed: statusline-setup) ·",
+    );
+    expect(formatSwarmList(ok(BODY), [], [])).not.toContain("enforce");
+
+    const root = mkdtempSync(join(tmpdir(), "em-swc-cli-"));
+    writeFileSync(join(root, "package.json"), "{}");
+    mkdirSync(join(root, ".eminiar"));
+    const file = join(root, ".eminiar", "swarm.yaml");
+    const run = async (args: string[]) => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await swarmCommand(args, getContext(root), {
+        out: (s) => out.push(s),
+        err: (s) => err.push(s),
+      });
+      return { code, out: out.join("\n"), err: err.join("\n") };
+    };
+    writeFileSync(file, `enforce: true\nallowed_agents: [statusline-setup]\n${BODY}`);
+    resetSwarmConfigCache();
+    const text = await run(["validate"]);
+    expect(text.code).toBe(0);
+    expect(text.out).toContain("enforce on (also allowed: statusline-setup)");
+    const json = JSON.parse((await run(["validate", "--json"])).out);
+    expect(json).toMatchObject({
+      state: "ok",
+      enforce: true,
+      allowed_agents: ["statusline-setup"],
+    });
+    writeFileSync(file, `enforce: true\nswarms: [oops\n`);
+    resetSwarmConfigCache();
+    const bad = await run(["validate", "--json"]);
+    expect(bad.code).toBe(1);
+    expect(JSON.parse(bad.out)).toMatchObject({ state: "invalid", enforce: true });
+    writeFileSync(file, BODY);
+    resetSwarmConfigCache();
+    expect(JSON.parse((await run(["validate", "--json"])).out)).toMatchObject({
+      enforce: false,
+      allowed_agents: [],
+    });
+  });
+});
+
+describe("enforceIntent", () => {
+  for (const c of ENFORCE_FORMS)
+    it(`${c.name}`, () => {
+      expect(enforceIntent(c.text)).toBe(c.intent);
+    });
+
+  it("on a syntax error still denies the spellings the parser would read as enforce: true", () => {
+    for (const head of ["enforce: True", '"enforce": true', "enforce : TRUE # x"]) {
+      const r = parseSwarmYaml(`version: 1\n${head}\nswarms: [oops\n`, "f", "r");
+      expect(r.state).toBe("invalid");
+      expect(r.state === "invalid" && r.enforce).toBe(true);
+    }
+  });
+
+  it("agrees with the parsed value whenever the document parses", () => {
+    for (const c of ENFORCE_FORMS) {
+      const r = parseSwarmYaml(c.text, "f", "r");
+      const parsed =
+        r.state === "ok"
+          ? r.config.enforce && r.config.enabled
+          : r.state === "invalid" && r.enforce === true;
+      expect(parsed, c.name).toBe(c.intent);
+    }
   });
 });

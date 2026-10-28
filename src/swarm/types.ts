@@ -92,6 +92,10 @@ export interface SwarmConfig {
   enabled: boolean;
   /** auto: SessionStart regenerates agent files when they differ from the YAML. */
   sync: "auto" | "manual";
+  /** Only swarm workers may run as subagents (and only during a run of their swarm). */
+  enforce: boolean;
+  /** Agent types allowed besides swarm workers; read only when `enforce` is true. */
+  allowedAgents: string[];
   swarms: SwarmSpec[];
   /** sha1 of the resolved swarms, for "is everything generated from this version?". */
   hash: string;
@@ -107,7 +111,14 @@ export interface ConfigIssue {
 
 export type LoadResult =
   | { state: "absent"; file: string; rel: string }
-  | { state: "invalid"; file: string; rel: string; issues: ConfigIssue[] }
+  | {
+      state: "invalid";
+      file: string;
+      rel: string;
+      issues: ConfigIssue[];
+      /** The file asks for enforcement even though it is invalid. */
+      enforce?: boolean | undefined;
+    }
   | { state: "ok"; config: SwarmConfig };
 
 // --- runtime ledger --------------------------------------------------------------------

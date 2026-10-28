@@ -634,7 +634,7 @@ export type SpawnDecision =
       swarm: SwarmSpec;
       taskId?: number | undefined;
     }
-  | { decision: "deny"; reason: string };
+  | { decision: "deny"; reason: string; code?: "no_run" };
 
 /** Every distinct `task #N` a prompt names. */
 export function taskRefs(prompt: string | undefined): number[] {
@@ -715,6 +715,8 @@ export function reserveSpawn(
     description?: string | undefined;
     sessionId?: string | undefined;
     toolUseId?: string | undefined;
+    /** Deny (code `no_run`, nothing written) unless a run of the swarm is active. */
+    requireRun?: boolean | undefined;
   },
 ): SpawnDecision | undefined {
   const hit = findRole(config, opts.agentType);
@@ -729,6 +731,12 @@ export function reserveSpawn(
     const run =
       (refRun && refRun.status === "active" && refRun.swarm === swarm.name ? refRun : undefined) ??
       db.swarm.runActive(swarm.name, opts.sessionId);
+    if (opts.requireRun && !run)
+      return {
+        decision: "deny" as const,
+        code: "no_run" as const,
+        reason: `swarm "${swarm.name}" has no active run`,
+      };
     const live = db.swarm
       .liveWorkersOfSwarm(swarm.name, now - STALE_MS)
       .filter((w) => isLive(w, now));

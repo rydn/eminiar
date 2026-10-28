@@ -12,7 +12,7 @@ Swarms are **off** unless you opt in.
 
 **Contents:** [Opt in](#opt-in) · [Run a swarm](#run-a-swarm) · [The swarm file](#the-swarm-file)
 · [Topologies](#topologies) · [What workers know](#what-workers-know) ·
-[Capacity](#capacity) · [Hooks](#hooks) · [The `em_swarm` tool](#the-em_swarm-tool) ·
+[Capacity](#capacity) · [Enforcement](#enforcement) · [Hooks](#hooks) · [The `em_swarm` tool](#the-em_swarm-tool) ·
 [CLI](#cli) · [Worktree isolation](#worktree-isolation) · [Security](#security)
 
 ## Opt in
@@ -124,6 +124,8 @@ nothing.
 | `version` | `1` | File format version. Only `1` is accepted |
 | `enabled` | `true` | `false` switches swarms off without deleting the file |
 | `sync` | `auto` | `auto`: session start regenerates the agent files when they differ from the YAML. `manual`: only `eminiar swarm sync`, `em_swarm {action:"sync"}`, the dashboard and `em_swarm start` write them |
+| `enforce` | `false` | `true` denies every subagent that is not a swarm worker. See [Enforcement](#enforcement) |
+| `allowed_agents` | `[]` | With `enforce: true`, other agent types that may still run, such as `[statusline-setup]`. Ignored when `enforce` is off. `swarm-*` names are not accepted |
 | `defaults.model` | unset | Model for every role that does not set one |
 | `defaults.skills` | `[]` | Skills preloaded into every role, before the role's own |
 | `defaults.context` | see [context](#context) | What every worker is told at start |
@@ -205,6 +207,13 @@ hand-written agent file already has the same name, sync reports a conflict and l
 alone; rename the role or the file. A generated file that someone edited by hand is also
 reported as a conflict and kept; `eminiar swarm sync --force` overwrites it.
 
+**Workers are leaves.** Generated files list `Agent` in `disallowedTools` (merged with the role's
+`disallowed_tools`), whether or not `enforce` is on, so a worker cannot start subagents: only the
+coordinator, the main session, starts workers. The ledger cannot see nested spawns, so they would
+not be tracked or capped. A role that lists `Agent` (or `Task`) in its own `tools` keeps it, and
+`Agent` is not added to its `disallowedTools`; with `enforce: true` such a nested call is still
+denied unless its type is in `allowed_agents`.
+
 Edit the YAML, not the generated files: the next sync overwrites them. Claude Code reads agent
 files when a session starts. If a new worker type is missing from the Agent tool, open
 `/agents` or restart the session.
@@ -262,6 +271,121 @@ If a worker is spawned while no run is active, eminiar opens an ad-hoc run for i
 activity is still recorded. An ad-hoc run closes itself once its last worker stopped and no task
 is open.
 
+## Enforcement
+
+By default Claude can still spawn any subagent. Set `enforce: true` to make swarms the only way:
+
+```yaml
+enforce: true
+allowed_agents: [statusline-setup]   # optional
+```
+
+eminiar's PreToolUse hook on `Agent` then denies a subagent unless it is a swarm worker
+(`swarm-<swarm>-<role>`) **and** a run of its swarm is active. The denial tells Claude which
+swarms exist and how to start a run (`em_swarm {action:"start"}`), or to do the work itself.
+
+**What is blocked.** Every dispatch through the `Agent` / `Task` tool: `Explore`, `Plan`,
+`general-purpose`, forks, a call with no type, and other plugins' agents. That includes built-in
+skills and agents that launch their own through that tool, such as `/statusline`
+(`statusline-setup`) and `claude-code-guide`. Allow-list the ones you want in `allowed_agents`; a
+listed type skips the swarm check. Swarm workers need no entry. Capacity limits still apply to them.
+
+**What is not covered.** Enforcement hooks the `Agent` / `Task` tool and nothing else. Other
+paths that start a subagent do not go through it and are **not** blocked: a skill with
+`context: fork` (started through the `Skill` tool, which runs its `agent:` type directly), the
+`Workflow` tool, and any other dispatch Claude Code adds outside `Agent` / `Task`. If you need those
+closed, deny the tool or skill in your settings permissions.
+
+**Nested calls.** While enforcing, an `Agent` / `Task` call made from inside a subagent is denied
+unless its type is listed in `allowed_agents`. Workers cannot start subagents in the first place
+(see [Generated agent files](#generated-agent-files)). The no-Node shim cannot read
+`allowed_agents`, so there a nested call gets the same denial as a main-session one.
+
+**The run requirement.** A swarm worker is allowed only while a run of its swarm is active. With
+no run it is denied and nothing is recorded. Any active run of that swarm counts, including one
+from another session, so finish or cancel stale runs.
+
+**Turn it off.** Remove `enforce` or set `enforce: false`. `enabled: false` also turns
+enforcement off. `allowed_agents` without `enforce: true` is ignored, so turning enforcement off
+never makes the file invalid.
+
+**Scope.** Cursor is not covered. Enforcement, and the SessionStart sentence that announces it,
+come only from the session's project directory and its main checkout. That directory is
+`CLAUDE_PROJECT_DIR` (Claude Code sets it for every hook command), then `EMINIAR_PROJECT_ROOT`,
+then the current directory; `CLAUDE_PROJECT_DIR` comes first because `EMINIAR_PROJECT_ROOT` can be
+inherited from an outer session and would otherwise point a nested `claude` session at another
+project's file. A repo Claude `cd`s into never turns enforcement on or off. Run tracking is
+different: it follows a coordinator that `cd`s into a nested repo by looking at the session root
+first, so those spawns are still recorded. A session **started** inside a sub-repo of a workspace
+does not see the workspace's file; enforcement does not reach that session. In a
+`claude --worktree` session the main checkout's file is used when the worktree has none.
+
+**One ledger.** `em_swarm` calls that name no project are stamped with the session's project
+root, so the MCP server and the hooks use the same ledger even in a `claude` started from another
+session's shell. An enforcing project can therefore always start the run its denial asks for.
+
+What counts as `enforce: true` when the file cannot be parsed (and in the no-Node shim) is a
+line-based reading: a top-level `enforce` key (plain, `"quoted"` or `'quoted'`, spaces before the
+colon allowed) with the value `true`, `True` or `TRUE`, optionally followed by a `# comment`, a
+BOM or CRLF line ends; `enabled: false` (any of its spellings) switches it off. A quoted
+`"true"`, `trueish` or `yes` is not a boolean and does not count. A flow-style or indented whole
+document that does not parse is not recognised; one that parses is decided by its parsed value.
+
+### When the check fails
+
+Enforcement fails closed where the hook can see the failure, and only when the file asks for
+it. Projects without `enforce: true` are never affected.
+
+| Situation | Result |
+|---|---|
+| No swarm file, `enforce` off, or `enabled: false` | Not enforced |
+| Valid file with `enforce: true` | Enforced |
+| Invalid file that sets `enforce: true` (including YAML that does not parse) | Every subagent is denied until the file is fixed |
+| Swarm file unreadable | Not enforced (no evidence of opt-in); session start warns |
+| Loading the config throws | Denied if the raw file says `enforce: true`, otherwise allowed |
+| Database error while checking a swarm worker | Denied (a busy database gets a retry message) |
+| The hook throws elsewhere | Denied if the raw file says `enforce: true` |
+| No Node.js or no installed copy (`bin/em-hook` shim) | Denied if the raw file says `enforce: true` |
+| Hook timeout (5 s) or a crash while loading | **Not covered: the spawn goes ahead** |
+
+The last row is an open gap. Claude Code treats a hook that times out or cannot start as a
+non-blocking error. For a hard guarantee, add your own entry to the project's
+`.claude/settings.json` (Claude Code 2.1.295 or later). It runs `em-hook --gate`, a decide-only
+mode: it applies the same rule as the plugin hook and prints the same denial, but reserves
+nothing and writes nothing (the run requirement and capacity stay with the plugin hook, so there
+is no double count). Any error in gate mode, including no Node.js or no installed copy, exits 1,
+and `"onFailure": "block"` turns that into a blocked call:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Agent|Task)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.eminiar/plugin/node_modules/eminiar/bin/em-hook\" --gate",
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`eminiar install` keeps its runnable copy at `~/.eminiar/plugin/node_modules/eminiar` (under
+`$EMINIAR_HOME` when you set it) and `eminiar upgrade` refreshes it in place, so the path
+survives upgrades; `eminiar doctor` shows the exact location. eminiar does not ship this entry
+in the plugin because a plugin entry applies to every user, including projects that never opted in.
+
+### Claude can edit the file
+
+Claude can edit `.eminiar/swarm.yaml` and set `enforce: false`. The denial texts tell it to ask
+you first, but that is a request, not a lock. To stop it, add a permission rule that denies
+`Edit(.eminiar/swarm.yaml)` (and `Write` for the same path) in your settings.
+
 ## Hooks
 
 Swarms use eminiar's existing hook entries, plus `SubagentStart` and a PreToolUse matcher for
@@ -271,8 +395,8 @@ than 0.12, run `eminiar upgrade` (or `eminiar install`) to get the new entries.
 
 | Event | Swarm work |
 |---|---|
-| SessionStart | With `sync: auto`, regenerate changed agent files. Add one line naming the swarms and any active run |
-| PreToolUse on `Agent` | Check capacity and record the spawn before the worker starts |
+| SessionStart | With `sync: auto`, regenerate changed agent files. Add one line naming the swarms and any active run, and a sentence when enforcement is on |
+| PreToolUse on `Agent` / `Task` | Check capacity and record the spawn before the worker starts. With `enforce: true`, also deny anything that is not a swarm worker of an active run (see [Enforcement](#enforcement)) |
 | PreToolUse on `em_swarm` | Stamp the call with who is calling, signed (see [Who is calling](#who-is-calling)) |
 | SubagentStart | Register the worker in its run and inject the worker brief. The worker then claims the task its prompt names |
 | PostToolUse / PostToolUseFailure | Record the worker's tool activity for the status board and dashboard |
