@@ -295,6 +295,7 @@ const ROLE_ORDER = [
   "count",
   "max_turns",
   "isolation",
+  "tools_profile",
   "tools",
   "disallowed_tools",
   "skills",
