@@ -568,11 +568,15 @@ function projectRel(ctx: ProjectContext, fp: string): string | undefined {
   return rel.startsWith("..") ? undefined : rel;
 }
 
+const GRAPH_HINT_TOOLS = new Set(["Grep", "Glob", "Read"]);
+
 /**
  * Non-blocking context for navigation tools: matching graph symbols for Grep/Glob
  * patterns, coverage gaps for files about to be read. Never denies anything.
  */
 function graphContext(ctx: ProjectContext, input: HookInput): string | undefined {
+  // Only these tools get a graph hint: any other call must not open the database.
+  if (!GRAPH_HINT_TOOLS.has(input.tool_name ?? "")) return undefined;
   try {
     const db = getStorage(ctx, { vectors: false });
     if (!db.graphCounts().nodes) return undefined;

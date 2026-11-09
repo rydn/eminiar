@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getContext, resetContextCache } from "../../src/context.js";
 import { handlers } from "../../src/hooks/index.js";
 import type { HookInput } from "../../src/hooks/types.js";
 import { markServerAlive } from "../../src/session/server-alive.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
+import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
 
 let root: string;
 let unmark: () => void;
@@ -88,4 +89,21 @@ describe("context-mode coexistence", () => {
       expect(read?.hookSpecificOutput?.permissionDecision).toBeUndefined();
     });
   }
+
+  it("does not count the graph for tools that get no graph hint", async () => {
+    process.env.EMINIAR_ROUTING_MODE = "auto";
+    writeFileSync(join(root, "eminiar.config.json"), "{}");
+    resetContextCache();
+    const counts = vi.spyOn(SqliteAdapter.prototype, "graphCounts");
+    try {
+      await pre("Bash", { command: "ls" });
+      await pre("WebFetch", { url: "https://example.com/x", prompt: "x" });
+      expect(counts).not.toHaveBeenCalled();
+      // the tools that can use it still get it
+      await pre("Grep", { pattern: "parseThing" });
+      expect(counts).toHaveBeenCalled();
+    } finally {
+      counts.mockRestore();
+    }
+  });
 });
