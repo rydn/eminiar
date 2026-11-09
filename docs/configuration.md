@@ -52,8 +52,10 @@ changes nothing). To skip one more folder, list only that folder:
 ```
 
 In `graph.exclude` only, an entry that starts with `!` removes that exact entry from the
-built-in list and the earlier layers, for example `"!**/vendor/**"` to parse vendored code. The
-`!` entry itself is not kept. In the other two lists `!` has no special meaning.
+built-in list, for example `"!**/vendor/**"` to parse vendored code. It never removes an entry
+a config file lists, so a project file cannot take back one of your excludes, even one that
+matches a built-in entry. The `!` entry itself is not kept. In the other two lists `!` has no
+special meaning.
 
 A value the schema refuses (a wrong type, or a number above its limit) makes only the file that
 holds it invalid. eminiar ignores that whole file, prints a note on stderr naming it, and uses
@@ -109,7 +111,7 @@ tables below.
 | Key | Default | Description |
 |---|---|---|
 | `include` | `**/*.{ts,tsx,js,jsx,mjs,cjs,py,go,php}` | Files to parse |
-| `exclude` | `node_modules`, `dist`, `build`, `.git`, `coverage`, `*.d.ts`, virtualenvs, `__pycache__`, `site-packages`, `vendor`, `*.min.js`, `*.blade.php` | Files to skip. Adds to this list and the earlier layers; `"!<glob>"` removes one (see [How layers merge](#how-layers-merge)) |
+| `exclude` | `node_modules`, `dist`, `build`, `.git`, `coverage`, `*.d.ts`, virtualenvs, `__pycache__`, `site-packages`, `vendor`, `*.min.js`, `*.blade.php` | Files to skip. Adds to this list and the earlier layers; `"!<glob>"` removes a built-in one (see [How layers merge](#how-layers-merge)) |
 
 ### `git`
 

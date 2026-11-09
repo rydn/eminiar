@@ -576,8 +576,9 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * Lists that add up across layers instead of replacing: the default, then each layer's entries
  * in order, without repeats. They only ever skip or refuse more, so a project file can add a
  * deny rule, a disabled language or an exclude, but cannot take back a personal one.
- * NEGATABLE_LISTS also take `"!<entry>"`, which removes that entry from the earlier layers and
- * the defaults (e.g. `"!**\/vendor/**"` to index vendored code); the security lists do not.
+ * NEGATABLE_LISTS also take `"!<entry>"`, which removes that entry from the built-in defaults
+ * only (e.g. `"!**\/vendor/**"` to index vendored code), never one a config file listed; the
+ * security lists do not.
  */
 export const ADDITIVE_LISTS: readonly (readonly [string, string])[] = [
   ["permissions", "extraDeny"],
@@ -617,13 +618,21 @@ function mergeLayers(layers: Record<string, unknown>[]): Record<string, unknown>
       continue;
     }
     const negatable = NEGATABLE_LISTS.has(`${section}.${key}`);
-    const acc: unknown[] = [...defaultList(section, key)];
+    const defaults = defaultList(section, key);
+    const acc: unknown[] = [...defaults];
+    // Entries a layer listed itself: a later "!" never takes these back, even when they match
+    // a default, so a project file cannot undo a personal exclude.
+    const listed = new Set<unknown>();
     for (const list of lists as unknown[][])
       for (const e of list) {
         if (negatable && typeof e === "string" && e.startsWith("!")) {
-          const i = acc.indexOf(e.slice(1));
-          if (i >= 0) acc.splice(i, 1);
-        } else if (!acc.includes(e)) acc.push(e);
+          const target = e.slice(1);
+          const i = acc.indexOf(target);
+          if (i >= 0 && defaults.includes(target) && !listed.has(target)) acc.splice(i, 1);
+        } else {
+          listed.add(e);
+          if (!acc.includes(e)) acc.push(e);
+        }
       }
     out[section] = { ...(out[section] as Record<string, unknown>), [key]: acc };
   }

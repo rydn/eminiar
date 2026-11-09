@@ -109,14 +109,27 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     expect(ex).toEqual([...defaults, "**/tmp/**", "**/generated/**"]);
   });
 
-  it('graph.exclude "!entry" removes a default or an earlier layer\'s entry', () => {
-    personal({ graph: { exclude: ["**/tmp/**"] } });
-    project({ graph: { exclude: ["!**/vendor/**", "!**/tmp/**", "!**/not-there/**"] } });
-    const ex = loadConfig(root).graph.exclude;
+  it('graph.exclude "!entry" removes a built-in default', () => {
+    project({ graph: { exclude: ["!**/vendor/**", "!**/not-there/**"] } });
+    let ex = loadConfig(root).graph.exclude;
     expect(ex).toContain("**/node_modules/**");
     expect(ex).not.toContain("**/vendor/**");
-    expect(ex).not.toContain("**/tmp/**");
     expect(ex.some((e) => e.startsWith("!"))).toBe(false);
+    personal({ graph: { exclude: ["!**/dist/**"] } });
+    ex = loadConfig(root).graph.exclude;
+    expect(ex).not.toContain("**/dist/**");
+    expect(ex).not.toContain("**/vendor/**");
+  });
+
+  it('a project "!entry" cannot take back a personal graph.exclude entry', () => {
+    personal({ graph: { exclude: ["**/private-client/**", "**/vendor/**"] } });
+    project({ graph: { exclude: ["!**/private-client/**", "!**/vendor/**", "!**/build/**"] } });
+    const ex = loadConfig(root).graph.exclude;
+    expect(ex).toContain("**/private-client/**");
+    // Also a default, but listed in the personal file: it stays.
+    expect(ex).toContain("**/vendor/**");
+    // A default nobody listed is still the project's to remove.
+    expect(ex).not.toContain("**/build/**");
   });
 
   it("a project file adds deny rules and disabled languages but cannot remove personal ones", () => {
