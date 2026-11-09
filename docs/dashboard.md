@@ -153,10 +153,10 @@ and the index-run log.
 
 ### Swarms
 
-A live monitor for [agent swarms](design/agent-swarms.md), the opt-in feature that runs a team of
+A live monitor for [agent swarms](swarms.md), the opt-in feature that runs a team of
 Claude Code subagents from `.eminiar/swarm.yaml`. Every state is written as a glyph and a word,
 so colour is never the only cue: ○ pending or idle, ● running or active, ◆ blocked, ✓ done,
-✗ failed, ◌ stale (running but silent for 30 minutes), ★ the coordinator (your main session).
+✗ failed, ◌ stale (running but silent for 15 minutes), ★ the coordinator (your main session).
 
 The tab has two pages, switched in the sub-nav at the top. **Runs** (`#/swarm`) is the live
 monitor described below. **Configure** (`#/swarm/config`) is the [configuration studio](#configure),
@@ -220,8 +220,9 @@ API (JSON, loopback only):
 | Route | Returns |
 |---|---|
 | `GET /api/swarm` | state (`absent`, `invalid` or `ok`), swarms and roles with agent-file state, issues, recent runs with counts, the starter YAML when absent |
-| `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments |
-| `GET /api/swarm/events?id=&after=` | up to 200 events after an event id, oldest first |
+| `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments. `tasksSince=<ms>` sends only the tasks updated since then, `events=0` leaves the events out. Long task text is cut |
+| `GET /api/swarm/task?id=&run=` | one whole task, with its full `detail` and `result`. `run` is optional and must match the task's run |
+| `GET /api/swarm/events?id=&after=` | up to 200 events after an event id, oldest first, with `last` and `more` for the next page |
 | `POST /api/swarm/init` | writes the starter file if none exists (409 otherwise) and syncs the agent files |
 | `POST /api/swarm/sync` | syncs the agent files with the swarm file |
 | `POST /api/swarm/release` | `{id, agent}`, returning a stale worker's task to pending |
@@ -456,7 +457,10 @@ http://127.0.0.1:7331/#/explore?file=src/server.ts
 ## Security
 
 - The server answers loopback hosts only (`127.0.0.1`, `localhost`, `[::1]`).
-- Every request that writes needs a JSON content type and a loopback `Origin`.
+- Every request that writes needs a JSON content type. An `Origin` header, when the request has
+  one, must be loopback, and a `Sec-Fetch-Site` header other than `same-origin` or `none` is
+  refused, so cross-site browser requests are blocked.
 - File reads are checked to stay inside the project root.
 
-`eminiar serve` is an older name for the same command.
+`eminiar serve` is an older name for the same server. It does not open the browser unless you
+pass `--open`.

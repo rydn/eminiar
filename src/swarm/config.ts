@@ -656,7 +656,7 @@ swarms:
   feature:
     description: Plan, build, test and review a change to the codebase.
     topology: hierarchical   # hierarchical | mesh | pipeline
-    max_agents: 4            # workers running at once in one run
+    max_agents: 4            # workers running at once across all runs of the swarm
     instructions: |
       Break the goal into tasks one worker can finish in one go, each naming the files it touches.
       Let the architect design first, fan the coding tasks out, then test, then review.

@@ -25,7 +25,7 @@ You can opt in three ways:
 
 - run `eminiar swarm init`. It writes a starter file with two swarms (`feature` and `review`)
   and generates their agent files;
-- click "Create starter swarm.yaml" on the Swarms tab of the dashboard (`eminiar ui`);
+- click "Create from the starter" on the Swarms tab of the dashboard (`eminiar ui`);
 - write the file yourself, using the reference below.
 
 Commit `.eminiar/swarm.yaml` so your team shares the swarms. The generated agent files in
@@ -215,7 +215,7 @@ swarm or a role; the most specific value wins.
 | `history` | `true` | Bug-prone files among the task's files (or in the role's scope), each with its fix count and last fix, plus the project's history lesson |
 | `structure` | `true` | The project brief |
 | `insights` | `true` | Hot files (fan-in × churn) among the task's files or in the role's scope |
-| `max_chars` | `4000` | Size budget of the brief, 500 to 20000 characters |
+| `max_chars` | `4000` | Size budget of the brief, 500 to 9000 characters |
 
 ### Role hooks
 
@@ -427,7 +427,7 @@ it. Projects without `enforce: true` are never affected.
 | Database error while checking a swarm worker | Denied (a busy database gets a retry message) |
 | The hook throws elsewhere | Denied if the raw file says `enforce: true` |
 | No Node.js or no installed copy (`bin/em-hook` shim) | Denied if the raw file says `enforce: true` |
-| Hook timeout (5 s) or a crash while loading | **Not covered: the spawn goes ahead** |
+| Hook timeout (5 s for the plugin's hook, 10 s for the entry `eminiar install` writes into settings) or a crash while loading | **Not covered: the spawn goes ahead** |
 
 The last row is an open gap. Claude Code treats a hook that times out or cannot start as a
 non-blocking error. For a hard guarantee, add your own entry to the project's
