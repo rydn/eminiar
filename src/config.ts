@@ -578,6 +578,57 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/**
+ * Lists that add up across layers instead of replacing: the default, then each layer's entries
+ * in order, without repeats. They only ever skip or refuse more, so a project file can add a
+ * deny rule, a disabled language or an exclude, but cannot take back a personal one.
+ * NEGATABLE_LISTS also take `"!<entry>"`, which removes that entry from the earlier layers and
+ * the defaults (e.g. `"!**\/vendor/**"` to index vendored code); the security lists do not.
+ */
+export const ADDITIVE_LISTS: readonly (readonly [string, string])[] = [
+  ["permissions", "extraDeny"],
+  ["sandbox", "disabledLanguages"],
+  ["graph", "exclude"],
+];
+const NEGATABLE_LISTS: ReadonlySet<string> = new Set(["graph.exclude"]);
+
+let listDefaults: Record<string, unknown> | undefined;
+
+/** The schema default of an ADDITIVE_LISTS entry; parsed once, only when a layer sets one. */
+function defaultList(section: string, key: string): unknown[] {
+  listDefaults ??= BaseConfigSchema.parse({}) as Record<string, unknown>;
+  const v = (listDefaults[section] as Record<string, unknown> | undefined)?.[key];
+  return Array.isArray(v) ? v : [];
+}
+
+/**
+ * deepMerge of the layers in order, except that ADDITIVE_LISTS are combined. When a layer holds
+ * something other than a list there, the plain merge result stays so the schema reports it.
+ */
+function mergeLayers(layers: Record<string, unknown>[]): Record<string, unknown> {
+  let out: Record<string, unknown> = {};
+  for (const l of layers) out = deepMerge(out, l);
+  for (const [section, key] of ADDITIVE_LISTS) {
+    const lists: unknown[] = [];
+    for (const l of layers) {
+      const s = l[section];
+      if (isPlainObject(s) && Object.hasOwn(s, key)) lists.push(s[key]);
+    }
+    if (!lists.length || !lists.every(Array.isArray)) continue;
+    const negatable = NEGATABLE_LISTS.has(`${section}.${key}`);
+    const acc: unknown[] = [...defaultList(section, key)];
+    for (const list of lists as unknown[][])
+      for (const e of list) {
+        if (negatable && typeof e === "string" && e.startsWith("!")) {
+          const i = acc.indexOf(e.slice(1));
+          if (i >= 0) acc.splice(i, 1);
+        } else if (!acc.includes(e)) acc.push(e);
+      }
+    out[section] = { ...(out[section] as Record<string, unknown>), [key]: acc };
+  }
+  return out;
+}
+
 function envOverrides(): Record<string, unknown> {
   const o: Record<string, unknown> = {};
   const mode = process.env.EMINIAR_ROUTING_MODE;
@@ -865,7 +916,7 @@ export function personalConfigProblem(
 /**
  * The project layer with its adjudicator section cut down to what projectKeeps allows. A section
  * holding a key-like field stays whole instead, so the schema's secret check still refuses it
- * (the whole config falls back to defaults, the adjudicator off) rather than dropping it quietly.
+ * (loadConfig ignores the whole project file, with a stderr note) rather than dropping it quietly.
  */
 function projectLayer(raw: Record<string, unknown>): Record<string, unknown> {
   const adj = raw.adjudicator;
@@ -915,24 +966,45 @@ function personalLayer(projectRoot: string): Record<string, unknown> {
 
 /**
  * Precedence: defaults < ~/.eminiar/config.json < <root>/eminiar.config.json < EMINIAR_* env.
- * The project file is the one teams commit.
+ * The project file is the one teams commit. ADDITIVE_LISTS add up instead (mergeLayers).
+ * Keys the schema does not know are dropped by the parse, so they never make a layer invalid.
  */
 export function loadConfig(projectRoot: string): Config {
-  const merged = deepMerge(
-    deepMerge(
-      personalLayer(projectRoot),
-      withoutUnsafeDocsManifest(
-        projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
-        "eminiar.config.json",
-      ),
+  const layers = [
+    personalLayer(projectRoot),
+    withoutUnsafeDocsManifest(
+      projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
+      "eminiar.config.json",
     ),
     envOverrides(),
-  );
-  // zod reads inherited properties: hand it a plain own-key copy, never the merged object.
-  const parsed = parseConfig(ownJson(merged) as Record<string, unknown>);
+  ];
+  const parsed = parseLayers(layers);
   if (parsed.success) return parsed.data;
+  // A value the schema refuses costs only the layer that holds it: a bad recall.maxMemories in
+  // one file must not reset the other file's routing.mode. Each layer is checked on its own
+  // (over the defaults) and the invalid ones are left out; only when the rest still fails, or no
+  // single layer is to blame, does everything fall back to the defaults.
+  const sources = [paths().configFile, "eminiar.config.json", "EMINIAR_* environment"];
+  const kept = layers.filter((layer, i) => {
+    const alone = parseLayers([layer]);
+    if (!alone.success)
+      process.stderr.write(
+        `eminiar: invalid config in ${sources[i]}, ignoring it: ${alone.error.message}\n`,
+      );
+    return alone.success;
+  });
+  if (kept.length < layers.length) {
+    const retry = parseLayers(kept);
+    if (retry.success) return retry.data;
+  }
   process.stderr.write(`eminiar: invalid config, using defaults: ${parsed.error.message}\n`);
   return { ...BaseConfigSchema.parse({}), adjudicator: adjudicatorDefaults() };
+}
+
+/** parseConfig of the merged layers. */
+function parseLayers(layers: Record<string, unknown>[]) {
+  // zod reads inherited properties: hand it a plain own-key copy, never the merged object.
+  return parseConfig(ownJson(mergeLayers(layers)) as Record<string, unknown>);
 }
 
 /**
