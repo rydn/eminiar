@@ -45,21 +45,24 @@ export interface SavingsSplit {
 type SplitRow = Pick<StatRow, "tool" | "raw_chars" | "returned_chars">;
 
 /**
+ * The one netting rule behind every saved-token figure (em_stats, the statusline, the
+ * dashboard, em_usage): ceil(raw / 4) - ceil(returned / 4) per stat row, floored at 0. A row
+ * that returned more than it read (em_symbols and em_reindex record raw 0) adds nothing and
+ * takes nothing away from the other rows.
+ */
+export function rowSavedTokens(r: Pick<StatRow, "raw_chars" | "returned_chars">): number {
+  return Math.max(0, estTokensFromChars(r.raw_chars) - estTokensFromChars(r.returned_chars));
+}
+
+/**
  * Split saved tokens into measured and counterfactual savings, from the stat rows already
- * recorded (no new data). Each kind is netted over its own rows and floored at 0, so a tool
- * that returned more than it read lowers its own kind only. Tokens are chars / 4 either way.
+ * recorded (no new data), with the same per-row rule as every total, so the two kinds add up
+ * to the total shown next to them.
  */
 export function splitSavings(rows: SplitRow[]): SavingsSplit {
-  const raw = { measured: 0, counterfactual: 0 };
-  const ret = { measured: 0, counterfactual: 0 };
-  for (const r of rows) {
-    const k = savingsKind(r.tool);
-    raw[k] += r.raw_chars;
-    ret[k] += r.returned_chars;
-  }
-  const saved = (k: SavingsKind) =>
-    Math.max(0, estTokensFromChars(raw[k]) - estTokensFromChars(ret[k]));
-  return { measuredTokens: saved("measured"), counterfactualTokens: saved("counterfactual") };
+  const saved = { measured: 0, counterfactual: 0 };
+  for (const r of rows) saved[savingsKind(r.tool)] += rowSavedTokens(r);
+  return { measuredTokens: saved.measured, counterfactualTokens: saved.counterfactual };
 }
 
 export interface PricedSavings {
@@ -153,10 +156,7 @@ export function pricedSavings(
   const laterBySession = new Map<string, number>();
   for (const row of stats) {
     if (windowed && !bySession.has(row.session_id)) continue;
-    const saved = Math.max(
-      0,
-      estTokensFromChars(row.raw_chars) - estTokensFromChars(row.returned_chars),
-    );
+    const saved = rowSavedTokens(row);
     if (saved === 0) continue;
     savedTokens += saved;
     if (savingsKind(row.tool) === "measured") measuredTokens += saved;

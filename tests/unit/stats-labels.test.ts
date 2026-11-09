@@ -1,8 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { getContext, type ProjectContext, resetContextCache } from "../../src/context.js";
 import { summarize } from "../../src/stats/record.js";
-import { savingsLine } from "../../src/stats/statusline.js";
+import { renderStatusline, savingsLine } from "../../src/stats/statusline.js";
+import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import type { StatRow } from "../../src/storage/types.js";
-import { formatSavingsStats, SAVINGS_LEGEND } from "../../src/tools/em_stats.js";
+import { emStats, formatSavingsStats, SAVINGS_LEGEND } from "../../src/tools/em_stats.js";
+import { loadUsage, summaryPayload } from "../../src/tools/em_usage.js";
+import { statsPayload } from "../../src/ui/api.js";
 import { pricedSavings, savingsKind, splitSavings } from "../../src/usage/savings.js";
 
 const row = (tool: string, raw: number, ret: number, session = "s1"): StatRow => ({
@@ -51,10 +58,14 @@ describe("splitSavings", () => {
     expect(splitSavings(rows)).toEqual({ measuredTokens: 9_000, counterfactualTokens: 6_300 });
   });
 
-  it("nets a kind over its own rows only, floored at 0", () => {
-    // em_symbols records raw 0: its returned text lowers counterfactual savings, never measured
-    const split = splitSavings([row("em_execute", 4_000, 400), row("em_symbols", 0, 8_000)]);
-    expect(split).toEqual({ measuredTokens: 900, counterfactualTokens: 0 });
+  it("nets each row on its own, floored at 0", () => {
+    // em_symbols records raw 0: its returned text takes nothing from the other rows
+    const split = splitSavings([
+      row("em_execute", 4_000, 400),
+      row("em_symbols", 0, 8_000),
+      row("em_search", 8_000, 800),
+    ]);
+    expect(split).toEqual({ measuredTokens: 900, counterfactualTokens: 1_800 });
   });
 
   it("is empty for no rows", () => {
@@ -117,5 +128,102 @@ describe("statusline savings", () => {
     );
     const none = summarize([]);
     expect(savingsLine(none, none, 0)).toBe("eminiar · ≈0 saved · ≈0 lifetime · 0% efficient");
+  });
+});
+
+describe("one saved total on every surface", () => {
+  let home: string;
+  const prevHome = process.env.EMINIAR_HOME;
+  const prevSession = process.env.EMINIAR_SESSION_ID;
+
+  beforeAll(() => {
+    home = mkdtempSync(join(tmpdir(), "em-savings-home-"));
+    process.env.EMINIAR_HOME = home;
+  });
+
+  afterAll(() => {
+    closeAllStorage();
+    if (prevHome === undefined) delete process.env.EMINIAR_HOME;
+    else process.env.EMINIAR_HOME = prevHome;
+    if (prevSession === undefined) delete process.env.EMINIAR_SESSION_ID;
+    else process.env.EMINIAR_SESSION_ID = prevSession;
+  });
+
+  /** Records the rows in a fresh project's current session, as the em_* tools do. */
+  function project(sessionId: string, stats: Array<[string, number, number]>): ProjectContext {
+    const root = mkdtempSync(join(tmpdir(), "em-savings-root-"));
+    writeFileSync(join(root, "package.json"), "{}");
+    resetContextCache();
+    const ctx = getContext(root);
+    process.env.EMINIAR_SESSION_ID = sessionId; // the session the MCP server attributes to
+    const db = getStorage(ctx, { vectors: false });
+    for (const [tool, rawChars, returnedChars] of stats)
+      db.statRecord(sessionId, tool, { rawChars, returnedChars, durationMs: 1 });
+    return ctx;
+  }
+
+  /** The saved total each surface shows for the project's current session. */
+  async function surfaces(ctx: ProjectContext, sessionId: string) {
+    const stats = await emStats.handler({ scope: "session" }, ctx);
+    const statsText = stats.content.map((c) => ("text" in c ? c.text : "")).join("\n");
+    const line = renderStatusline(JSON.stringify({ session_id: sessionId, cwd: ctx.root }));
+    const usage = summaryPayload(ctx, loadUsage(ctx, { ingest: false, scope: "session" }));
+    return {
+      emStats: statsText.match(/≈(\S+) tokens saved/)?.[1],
+      emStatsSplit: statsText.match(/measured ≈(\S+) .* counterfactual ≈(\S+) /)?.slice(1),
+      statusline: line.match(/^eminiar · ≈(\S+) saved/)?.[1],
+      dashboard: statsPayload(ctx).session.savedTokens,
+      emUsage: usage.savings.savedTokens,
+      emUsageSplit: [usage.savings.measuredTokens, usage.savings.counterfactualTokens],
+    };
+  }
+
+  it("gives one number when rows return more than they read", async () => {
+    // em_symbols and em_reindex record raw 0; they must not pull the em_execute saving down
+    const ctx = project("sv-case-1", [
+      ["em_execute", 40_000, 4_000],
+      ["em_symbols", 0, 30_000],
+      ["em_reindex", 0, 2_000],
+    ]);
+    expect(await surfaces(ctx, "sv-case-1")).toEqual({
+      emStats: "9.0k",
+      emStatsSplit: ["9.0k", "0"],
+      statusline: "9.0k",
+      dashboard: 9_000,
+      emUsage: 9_000,
+      emUsageSplit: [9_000, 0],
+    });
+  });
+
+  it("gives one number, and one split, when a knowledge tool returns more than it read", async () => {
+    const ctx = project("sv-case-2", [
+      ["em_execute", 40_000, 4_000],
+      ["em_graph_impact", 20_000, 2_000],
+      ["em_symbols", 0, 6_000],
+    ]);
+    expect(await surfaces(ctx, "sv-case-2")).toEqual({
+      emStats: "13.5k",
+      emStatsSplit: ["9.0k", "4.5k"],
+      statusline: "13.5k",
+      dashboard: 13_500,
+      emUsage: 13_500,
+      emUsageSplit: [9_000, 4_500],
+    });
+  });
+
+  it("gives the project total per session row, not per tool merged across sessions", async () => {
+    const ctx = project("sv-case-3", [["em_search", 8_000, 800]]);
+    getStorage(ctx, { vectors: false }).statRecord("sv-case-3b", "em_search", {
+      rawChars: 0,
+      returnedChars: 8_000,
+      durationMs: 1,
+    });
+    const stats = await emStats.handler({ scope: "project" }, ctx);
+    const statsText = stats.content.map((c) => ("text" in c ? c.text : "")).join("\n");
+    const usage = summaryPayload(ctx, loadUsage(ctx, { ingest: false, scope: "project" }));
+    expect(statsText).toMatch(/: 2 call\(s\), ≈1\.8k tokens saved/);
+    expect(statsText).toMatch(/ {2}em_search +counterfactual +2 +2\.0k +2\.2k +1\.8k$/m);
+    expect(statsPayload(ctx).projectTotals.savedTokens).toBe(1_800);
+    expect(usage.savings.savedTokens).toBe(1_800);
   });
 });

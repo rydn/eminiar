@@ -9,7 +9,7 @@ import type { StatRow } from "../storage/types.js";
 import { usageBrief } from "../usage/brief.js";
 import { ingestSession, usageEnabled } from "../usage/ingest.js";
 import { formatUsd } from "../usage/pricing.js";
-import { savingsKind, splitSavings } from "../usage/savings.js";
+import { rowSavedTokens, savingsKind, splitSavings } from "../usage/savings.js";
 import { defineTool, text } from "./types.js";
 
 export const emStats = defineTool({
@@ -42,7 +42,7 @@ export const emStats = defineTool({
       );
     }
     if (scope === "project" || scope === "all") {
-      parts.push(formatSavingsStats(`project ${ctx.root}`, mergeByTool(db.statsAll())));
+      parts.push(formatSavingsStats(`project ${ctx.root}`, db.statsAll()));
       parts.push(
         formatRoutingStats(
           "routing (project, last 2000 calls)",
@@ -112,41 +112,42 @@ export const SAVINGS_LEGEND =
 
 /**
  * One savings section: the estimated total split into measured and counterfactual savings,
- * then a per-tool table with each tool's kind. The total is the sum of the two kinds.
+ * then a per-tool table with each tool's kind. Rows may hold several sessions of a tool; every
+ * figure nets per row (rowSavedTokens), so the two kinds, the per-tool column and the total
+ * agree with each other and with the statusline, the dashboard and em_usage.
  */
 export function formatSavingsStats(title: string, rows: StatRow[]): string {
   const s = summarize(rows);
   const { measuredTokens, counterfactualTokens } = splitSavings(rows);
-  const saved = measuredTokens + counterfactualTokens;
-  const pct = s.rawTokens ? Math.round((saved / s.rawTokens) * 100) : 0;
+  const pct = s.rawTokens ? Math.round((s.savedTokens / s.rawTokens) * 100) : 0;
   const lines = [
-    `${title}: ${s.calls} call(s), ≈${fmtTokens(saved)} tokens saved of ≈${fmtTokens(s.rawTokens)} seen (${pct}% efficient, estimated)`,
+    `${title}: ${s.calls} call(s), ≈${fmtTokens(s.savedTokens)} tokens saved of ≈${fmtTokens(s.rawTokens)} seen (${pct}% efficient, estimated)`,
   ];
   if (!rows.length) return lines.join("\n");
   lines.push(
     `  measured ≈${fmtTokens(measuredTokens)} (execution output kept out) · counterfactual ≈${fmtTokens(counterfactualTokens)} (vs native calls)`,
   );
   lines.push("  tool                 kind            calls     seen  returned    saved");
-  for (const r of [...rows].sort((a, b) => b.raw_chars - a.raw_chars)) {
-    const seen = estTokens(r.raw_chars);
-    const ret = estTokens(r.returned_chars);
+  for (const r of mergeByTool(rows).sort((a, b) => b.raw_chars - a.raw_chars)) {
     lines.push(
-      `  ${r.tool.padEnd(20)} ${savingsKind(r.tool).padEnd(14)} ${String(r.calls).padStart(6)} ${fmtTokens(seen).padStart(8)} ${fmtTokens(ret).padStart(9)} ${fmtTokens(Math.max(0, seen - ret)).padStart(8)}`,
+      `  ${r.tool.padEnd(20)} ${savingsKind(r.tool).padEnd(14)} ${String(r.calls).padStart(6)} ${fmtTokens(estTokens(r.raw_chars)).padStart(8)} ${fmtTokens(estTokens(r.returned_chars)).padStart(9)} ${fmtTokens(r.saved).padStart(8)}`,
     );
   }
   return lines.join("\n");
 }
 
-function mergeByTool(rows: ReturnType<ReturnType<typeof getStorage>["statsAll"]>) {
-  const m = new Map<string, (typeof rows)[number]>();
+/** One table row per tool; `saved` is the sum of its rows' own savings. */
+function mergeByTool(rows: StatRow[]): Array<StatRow & { saved: number }> {
+  const m = new Map<string, StatRow & { saved: number }>();
   for (const r of rows) {
     const cur = m.get(r.tool);
-    if (!cur) m.set(r.tool, { ...r, session_id: "project" });
+    if (!cur) m.set(r.tool, { ...r, saved: rowSavedTokens(r) });
     else {
       cur.calls += r.calls;
       cur.raw_chars += r.raw_chars;
       cur.returned_chars += r.returned_chars;
       cur.duration_ms += r.duration_ms;
+      cur.saved += rowSavedTokens(r);
     }
   }
   return [...m.values()];

@@ -159,10 +159,9 @@ export function renderStatusline(raw: string): string {
   try {
     const ctx = getContext(input.cwd ?? input.workspace?.current_dir);
     const db = getStorage(ctx, { vectors: false });
-    const session = summarize(db.statsBySession(input.session_id ?? ""));
+    const rows = db.statsBySession(input.session_id ?? "");
     const life = summarize(globalDb().lifetime());
-    const measured = splitSavings(db.statsBySession(input.session_id ?? "")).measuredTokens;
-    line = savingsLine(session, life, measured);
+    line = savingsLine(summarize(rows), life, splitSavings(rows).measuredTokens);
     const usage = ctx.config.usage;
     if (usage.enabled && usage.statusline) {
       const segments = usageSegments(input);

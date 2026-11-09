@@ -3,6 +3,7 @@ import { getCurrentSession } from "../session/current.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import type { StatRow } from "../storage/types.js";
+import { rowSavedTokens } from "../usage/savings.js";
 import { globalDb } from "./global.js";
 
 export const estTokens = (chars: number): number => Math.ceil(chars / 4);
@@ -59,7 +60,8 @@ export function summarize(rows: StatRow[]): StatSummary {
   const ret = rows.reduce((a, r) => a + r.returned_chars, 0);
   const rawTokens = estTokens(raw);
   const returnedTokens = estTokens(ret);
-  const savedTokens = Math.max(0, rawTokens - returnedTokens);
+  // per row, like splitSavings and pricedSavings: one total everywhere
+  const savedTokens = rows.reduce((a, r) => a + rowSavedTokens(r), 0);
   return {
     calls,
     rawTokens,
