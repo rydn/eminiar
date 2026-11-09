@@ -75,6 +75,17 @@ describe("tools_profile: readonly", () => {
     expect(allowed).toContain("ToolSearch");
   });
 
+  it("an empty tools list narrows to ToolSearch and the read-only em_* tools, never widens", () => {
+    const allowed = fmLine(
+      render("        tools_profile: readonly\n        tools: []\n"),
+      "tools",
+    )!.split(", ");
+    for (const t of READONLY_BUILTINS) if (t !== "ToolSearch") expect(allowed).not.toContain(t);
+    expect(allowed).toContain("ToolSearch");
+    expect(allowed).toContain(`${EM_MCP_PREFIXES[0]}em_search`);
+    expect(allowed).toHaveLength(1 + EM_MCP_PREFIXES.length * READONLY_EM_TOOLS.length);
+  });
+
   it("rejects a tool that can write and a bad value", () => {
     const r = parse(file("        tools_profile: readonly\n        tools: [Read, Bash]\n"));
     expect(r.state).toBe("invalid");

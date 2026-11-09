@@ -106,9 +106,12 @@ export const READONLY_EM_TOOLS = [
 /** Tools a readonly role is told never to use, also written to `disallowedTools`. */
 const READONLY_DENY = ["Edit", "Write", "NotebookEdit"] as const;
 
-/** The allowlist of a readonly role: the built-ins (its own `tools`, when set) and read-only em_*. */
+/**
+ * The allowlist of a readonly role: the built-ins (its own `tools` when set, even an empty list,
+ * which narrows to ToolSearch) and read-only em_*.
+ */
 export function readonlyTools(role: Pick<RoleSpec, "tools">): string[] {
-  const builtins = role.tools?.length ? role.tools : READONLY_BUILTINS;
+  const builtins = role.tools ?? READONLY_BUILTINS;
   const out = builtins.includes("ToolSearch") ? [...builtins] : [...builtins, "ToolSearch"];
   for (const prefix of EM_MCP_PREFIXES) for (const t of READONLY_EM_TOOLS) out.push(prefix + t);
   return out;
