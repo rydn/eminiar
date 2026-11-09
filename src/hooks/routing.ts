@@ -944,15 +944,31 @@ function yaml(): typeof import("yaml") {
   return yamlLib;
 }
 
+/** Agent frontmatter is under 2 KB in practice; past these caps routing keeps denying. */
+const FRONTMATTER_MAX_CHARS = 16 * 1024;
+const FRONTMATTER_MAX_LINES = 400;
+
+/** Does `text` have more than `max` lines? Stops counting at the cap. */
+function lineCountOver(text: string, max: number): boolean {
+  let lines = 1;
+  for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1))
+    if (++lines > max) return true;
+  return false;
+}
+
 /**
  * `tools` and `disallowedTools` of a markdown file's YAML frontmatter, parsed with the yaml
  * package (flow and block lists, folded scalars, comments). Undefined, which keeps denying,
  * without a frontmatter, when it does not parse, or when either key holds anything but a
- * comma-separated string or a list of strings. An empty `tools` also answers undefined.
+ * comma-separated string or a list of strings. An empty `tools` also answers undefined, and so
+ * does a frontmatter over FRONTMATTER_MAX_CHARS or FRONTMATTER_MAX_LINES: yaml's duplicate-key
+ * check is quadratic in the keys, and a synchronous parse cannot be cut short by the hook's
+ * time budget (each hook call is a new process, so the mtime cache does not help either).
  */
 function frontmatterAgentTools(text: string): AgentTools | undefined {
   const fm = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(text)?.[1];
-  if (fm === undefined) return undefined;
+  if (fm === undefined || fm.length > FRONTMATTER_MAX_CHARS) return undefined;
+  if (lineCountOver(fm, FRONTMATTER_MAX_LINES)) return undefined;
   const doc: unknown = yaml().parse(fm); // throws on invalid YAML: the caller keeps denying
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) return undefined;
   const { tools, disallowedTools } = doc as Record<string, unknown>;

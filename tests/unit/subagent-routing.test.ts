@@ -183,6 +183,35 @@ describe("agentLacksEmTools", () => {
     }
   });
 
+  it("keeps denying, fast, when the frontmatter is too big to parse on the hook path", async () => {
+    // yaml's duplicate-key check is quadratic: 8k keys took ~250 ms per hook process.
+    const keys = Array.from({ length: 8000 }, (_, i) => `k${i}: v`).join("\n");
+    const big: Record<string, string> = {
+      "fm-8k-keys": `tools: Read, Bash\n${keys}`,
+      // under the size cap but over the line cap
+      "fm-many-lines": `tools: Read, Bash\n${Array.from({ length: 450 }, (_, i) => `k${i}: v`).join("\n")}`,
+      // one line over the size cap
+      "fm-long-line": `tools: Read, Bash\nx: {${Array.from({ length: 2500 }, (_, i) => `k${i}: v`).join(", ")}}`,
+    };
+    for (const [name, fm] of Object.entries(big)) {
+      writeFileSync(
+        join(root, ".claude", "agents", `${name}.md`),
+        `---\nname: ${name}\ndescription: x\n${fm}\n---\nbody\n`,
+      );
+      const t0 = performance.now();
+      expect(agentLacksTool(root, name, "em_execute_file"), name).toBeUndefined();
+      expect(performance.now() - t0, name).toBeLessThan(100);
+      const r = await read({ agent_id: "a12", agent_type: name });
+      expect(r?.hookSpecificOutput?.permissionDecision, name).toBe("deny");
+    }
+    // a normal-size frontmatter with the same tools is still read
+    writeFileSync(
+      join(root, ".claude", "agents", "fm-small-keys.md"),
+      `---\nname: fm-small-keys\ntools: Read, Bash\n${Array.from({ length: 300 }, (_, i) => `k${i}: v`).join("\n")}\n---\n`,
+    );
+    expect(agentLacksTool(root, "fm-small-keys", "em_execute_file")).toBe("all");
+  });
+
   it("answers per tool (agentLacksTool)", () => {
     expect(agentLacksTool(root, "ro", "em_execute_file")).toBe("tool");
     expect(agentLacksTool(root, "ro", "em_fetch_and_index")).toBe("tool");
