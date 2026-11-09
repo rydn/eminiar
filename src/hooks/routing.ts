@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { extname, join, relative, resolve } from "node:path";
 import type { ProjectContext } from "../context.js";
@@ -912,33 +913,36 @@ export function agentLacksEmTools(root: string, agentType: string | undefined): 
   return agentLacksTool(root, agentType, "em_search") === "all";
 }
 
-/** `tools` and `disallowedTools` of a markdown file's YAML frontmatter; undefined without one. */
-function frontmatterAgentTools(text: string): AgentTools | undefined {
-  if (!/^---\r?\n/.test(text)) return undefined;
-  return {
-    tools: frontmatterTools(text, "tools"),
-    disallowed: frontmatterTools(text, "disallowedTools") ?? [],
-  };
+/** `yaml` is loaded on first use: only the subagent deny path ever parses an agent file. */
+let yamlLib: typeof import("yaml") | undefined;
+function yaml(): typeof import("yaml") {
+  yamlLib ??= createRequire(import.meta.url)("yaml") as typeof import("yaml");
+  return yamlLib;
 }
 
-/** The `key:` entries of a markdown file's YAML frontmatter, or undefined when it has none. */
-function frontmatterTools(text: string, key: string): string[] | undefined {
-  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
+/**
+ * `tools` and `disallowedTools` of a markdown file's YAML frontmatter, parsed with the yaml
+ * package (flow and block lists, folded scalars, comments). Undefined, which keeps denying,
+ * without a frontmatter, when it does not parse, or when either key holds anything but a
+ * comma-separated string or a list of strings. An empty `tools` also answers undefined.
+ */
+function frontmatterAgentTools(text: string): AgentTools | undefined {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(text)?.[1];
   if (fm === undefined) return undefined;
-  const lines = fm.split(/\r?\n/);
-  const keyRe = new RegExp(`^${key}\\s*:`);
-  const at = lines.findIndex((l) => keyRe.test(l));
-  if (at < 0) return undefined;
-  const rest = (lines[at] ?? "").replace(keyRe, "").trim();
-  const items: string[] = [];
-  if (rest) items.push(...rest.replace(/^\[|\]$/g, "").split(","));
-  else
-    for (const l of lines.slice(at + 1)) {
-      const m = /^\s+-\s*(.+)$/.exec(l);
-      if (!m) break;
-      items.push(m[1] ?? "");
-    }
-  return items.map((t) => t.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+  const doc: unknown = yaml().parse(fm); // throws on invalid YAML: the caller keeps denying
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return undefined;
+  const { tools, disallowedTools } = doc as Record<string, unknown>;
+  const allow = tools === undefined ? undefined : toolList(tools);
+  const deny = disallowedTools === undefined ? [] : toolList(disallowedTools);
+  if ((tools !== undefined && !allow?.length) || !deny) return undefined;
+  return { tools: allow, disallowed: deny };
+}
+
+/** A frontmatter tool list: "A, B" or [A, B]; undefined for any other shape. */
+function toolList(v: unknown): string[] | undefined {
+  const items = typeof v === "string" ? v.split(",") : Array.isArray(v) ? v : undefined;
+  if (!items?.every((t) => typeof t === "string")) return undefined;
+  return items.map((t: string) => t.trim()).filter(Boolean);
 }
 
 /** Native tools routing may redirect; their every call is counted, denied or not. */

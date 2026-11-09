@@ -143,6 +143,45 @@ describe("agentLacksEmTools", () => {
     expect(agentLacksEmTools(join(root, "nope"), "no-em")).toBe(false);
   });
 
+  it("parses the frontmatter as YAML: wrapped, folded, commented and server-wide forms", async () => {
+    const forms: Record<string, string> = {
+      "fm-flow-wrapped": "tools: [Read, Bash,\n  mcp__eminiar__em_execute_file]",
+      "fm-folded": "tools: >-\n  Read,\n  mcp__eminiar__em_execute_file",
+      "fm-comment": "tools:\n  # eminiar\n  - Read\n  - mcp__eminiar__em_execute_file # runner",
+      "fm-server": "tools: Read, mcp__plugin_eminiar_eminiar",
+      "fm-wildcard": "tools: Read, mcp__eminiar__*",
+      "fm-quoted": "tools: ['Read', \"mcp__eminiar__em_execute_file\"]",
+    };
+    for (const [name, tools] of Object.entries(forms)) {
+      writeFileSync(
+        join(root, ".claude", "agents", `${name}.md`),
+        `---\nname: ${name}\ndescription: x\n${tools}\n---\nbody\n`,
+      );
+      expect(agentLacksEmTools(root, name), name).toBe(false);
+      const r = await read({ agent_id: "a7", agent_type: name });
+      expect(r?.hookSpecificOutput?.permissionDecision, name).toBe("deny");
+    }
+  });
+
+  it("keeps denying when the frontmatter does not parse or a tools value has another shape", async () => {
+    const bad: Record<string, string> = {
+      "fm-invalid": "tools: [Read, Bash",
+      "fm-nested": "tools:\n  - [Read]\n  - Bash",
+      "fm-empty": "tools:",
+      "fm-number": "tools: 3",
+      "fm-dup": "tools: Read\ntools: Bash",
+    };
+    for (const [name, tools] of Object.entries(bad)) {
+      writeFileSync(
+        join(root, ".claude", "agents", `${name}.md`),
+        `---\nname: ${name}\ndescription: x\n${tools}\n---\nbody\n`,
+      );
+      expect(agentLacksEmTools(root, name), name).toBe(false);
+      const r = await read({ agent_id: "a8", agent_type: name });
+      expect(r?.hookSpecificOutput?.permissionDecision, name).toBe("deny");
+    }
+  });
+
   it("answers per tool (agentLacksTool)", () => {
     expect(agentLacksTool(root, "ro", "em_execute_file")).toBe("tool");
     expect(agentLacksTool(root, "ro", "em_fetch_and_index")).toBe("tool");
