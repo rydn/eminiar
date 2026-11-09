@@ -146,6 +146,17 @@ export function pruneDefaults(raw: Obj, defaults: Obj = schemaDefaults()): Obj {
   return out;
 }
 
+function leafCount(o: Obj): number {
+  let n = 0;
+  for (const v of Object.values(o)) n += isObj(v) ? leafCount(v) : 1;
+  return n;
+}
+
+/** How many keys of a personal config equal the current default (and so freeze it). */
+export function frozenDefaultCount(raw: Obj): number {
+  return leafCount(raw) - leafCount(pruneDefaults(raw));
+}
+
 /** graph.include / graph.exclude lists that are a strict subset of the current default list. */
 export function staleGraphLists(raw: Obj): string[] {
   const graph = raw.graph;
@@ -435,6 +446,12 @@ export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]>
       const raw = readRawConfig(file);
       if (raw) for (const w of configWarnings(raw, ctx.root)) warnings.push(`${label}: ${w}`);
     }
+    const personal = readRawConfig(paths().configFile);
+    const frozen = personal ? frozenDefaultCount(personal) : 0;
+    if (frozen)
+      warnings.push(
+        `~/.eminiar/config.json: ${frozen} key${frozen === 1 ? " equals" : "s equal"} the current default and freeze it; run \`eminiar doctor --fix\` to drop them`,
+      );
     const denyWarn = sandboxDenyWarning(ctx.root, ctx.config);
     if (denyWarn) warnings.push(denyWarn);
     if (warnings.length)

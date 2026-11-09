@@ -1,10 +1,13 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConfigSchema } from "../../src/config.js";
+import { resetContextCache } from "../../src/context.js";
 import {
   configWarnings,
+  frozenDefaultCount,
+  fullDoctor,
   pruneDefaults,
   sandboxDenyWarning,
   staleGraphLists,
@@ -106,5 +109,59 @@ describe("sandbox deny warning", () => {
       "csharp",
     ];
     expect(sandboxDenyWarning(root, cfg({ sandbox: { disabledLanguages: all } }))).toBeUndefined();
+  });
+});
+
+describe("doctor reports frozen defaults in ~/.eminiar/config.json", () => {
+  const KEYS = ["HOME", "EMINIAR_HOME", "CLAUDE_CONFIG_DIR", "EMINIAR_PROJECT_ROOT"];
+  const saved: Record<string, string | undefined> = {};
+  let home: string;
+  let cfgFile: string;
+
+  beforeEach(() => {
+    for (const k of KEYS) saved[k] = process.env[k];
+    home = mkdtempSync(join(tmpdir(), "em-frozen-home-"));
+    const project = mkdtempSync(join(tmpdir(), "em-frozen-proj-"));
+    writeFileSync(join(project, "package.json"), "{}");
+    process.env.HOME = home;
+    process.env.EMINIAR_HOME = join(home, ".eminiar");
+    process.env.CLAUDE_CONFIG_DIR = join(home, ".claude");
+    process.env.EMINIAR_PROJECT_ROOT = project;
+    mkdirSync(join(home, ".eminiar"), { recursive: true });
+    cfgFile = join(home, ".eminiar", "config.json");
+    resetContextCache();
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    resetContextCache();
+  });
+
+  const warning = async (opts: { fix?: boolean } = {}) =>
+    (await fullDoctor(opts)).find((c) => c.name === "config warnings")?.detail ?? "";
+
+  it("counts keys equal to the default", () => {
+    const d = ConfigSchema.parse({});
+    expect(frozenDefaultCount({})).toBe(0);
+    expect(
+      frozenDefaultCount({
+        routing: { mode: d.routing.mode },
+        search: { defaultLimit: d.search.defaultLimit + 1 },
+      }),
+    ).toBe(1);
+  });
+
+  it("warns without --fix, and neither warns after the prune", async () => {
+    const d = ConfigSchema.parse({});
+    writeFileSync(
+      cfgFile,
+      JSON.stringify({ routing: { mode: d.routing.mode }, search: { defaultLimit: 7 } }),
+    );
+    expect(await warning()).toMatch(/1 key equals the current default.*doctor --fix/);
+    expect(await warning({ fix: true })).toBe("");
+    expect(JSON.parse(readFileSync(cfgFile, "utf8"))).toEqual({ search: { defaultLimit: 7 } });
+    expect(await warning()).toBe("");
   });
 });
