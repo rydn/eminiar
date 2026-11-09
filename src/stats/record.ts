@@ -77,20 +77,3 @@ export function fmtTokens(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
 }
-
-export function formatStats(title: string, rows: StatRow[]): string {
-  const s = summarize(rows);
-  const lines = [
-    `${title}: ${s.calls} call(s), ${fmtTokens(s.savedTokens)} tokens saved of ${fmtTokens(s.rawTokens)} seen (${Math.round(s.efficiency * 100)}% efficient)`,
-  ];
-  if (!rows.length) return lines.join("\n");
-  lines.push("  tool                 calls     seen  returned    saved");
-  for (const r of rows.sort((a, b) => b.raw_chars - a.raw_chars)) {
-    const seen = estTokens(r.raw_chars);
-    const ret = estTokens(r.returned_chars);
-    lines.push(
-      `  ${r.tool.padEnd(20)} ${String(r.calls).padStart(5)} ${fmtTokens(seen).padStart(8)} ${fmtTokens(ret).padStart(9)} ${fmtTokens(Math.max(0, seen - ret)).padStart(8)}`,
-    );
-  }
-  return lines.join("\n");
-}
