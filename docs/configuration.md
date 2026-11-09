@@ -58,9 +58,12 @@ built-in list and the earlier layers, for example `"!**/vendor/**"` to parse ven
 A value the schema refuses (a wrong type, or a number above its limit) makes only the file that
 holds it invalid. eminiar ignores that whole file, prints a note on stderr naming it, and uses
 the other layers. A bad `recall.maxMemories` in your personal config therefore leaves the team's
-`routing.mode` in force. Only when every invalid file is left out and the config is still
-invalid does eminiar fall back to the built-in defaults. `eminiar doctor` names the invalid
-values of `eminiar.config.json`.
+`routing.mode` in force. A file can also be valid on its own but not on top of the earlier ones,
+for example when the project file's `adjudicator.weights.features` and yours together hold more
+than 64 keys. Then eminiar ignores only the fields the schema names in the later file (here the
+project file's `adjudicator.weights.features`), or that whole file when that is not enough, and
+names the file and the fields on stderr. A later file never costs an earlier one its settings.
+`eminiar doctor` names the invalid values of `eminiar.config.json`.
 
 Keys the schema does not know, such as a typo like `recall.maxMemory`, are ignored when the
 config loads and never make a file invalid, so a config written for a newer eminiar still

@@ -976,23 +976,69 @@ export function loadConfig(projectRoot: string): Config {
   if (parsed.success) return parsed.data;
   // A value the schema refuses costs only the layer that holds it: a bad recall.maxMemories in
   // one file must not reset the other file's routing.mode. Each layer is checked on its own
-  // (over the defaults) and the invalid ones are left out; only when the rest still fails, or no
-  // single layer is to blame, does everything fall back to the defaults.
+  // (over the defaults) and the invalid ones are left out. The rest are then merged in order;
+  // a layer that is valid alone but not on top of the earlier ones (e.g. more than 64
+  // adjudicator.weights.features once its keys join the personal ones) loses only the fields the
+  // schema names, or the whole layer when that is not enough. An earlier layer is never blamed.
   const sources = [paths().configFile, "eminiar.config.json", "EMINIAR_* environment"];
-  const kept = layers.filter((layer, i) => {
+  const acc: Record<string, unknown>[] = [];
+  layers.forEach((layer, i) => {
     const alone = parseLayers([layer]);
-    if (!alone.success)
+    if (!alone.success) {
       process.stderr.write(
         `eminiar: invalid config in ${sources[i]}, ignoring it: ${alone.error.message}\n`,
       );
-    return alone.success;
+      return;
+    }
+    const merged = parseLayers([...acc, layer]);
+    if (merged.success) {
+      acc.push(layer);
+      return;
+    }
+    const issuePaths = merged.error.issues.map((is) => is.path.map(String));
+    const trimmed = withoutPaths(layer, issuePaths);
+    if (trimmed && parseLayers([...acc, trimmed.layer]).success) {
+      acc.push(trimmed.layer);
+      process.stderr.write(
+        `eminiar: ignoring ${trimmed.removed.join(", ")} in ${sources[i]}: invalid together with the earlier config: ${merged.error.message}\n`,
+      );
+      return;
+    }
+    process.stderr.write(
+      `eminiar: invalid config in ${sources[i]} together with the earlier config, ignoring it: ${merged.error.message}\n`,
+    );
   });
-  if (kept.length < layers.length) {
-    const retry = parseLayers(kept);
-    if (retry.success) return retry.data;
-  }
+  const retry = parseLayers(acc);
+  if (retry.success) return retry.data;
   process.stderr.write(`eminiar: invalid config, using defaults: ${parsed.error.message}\n`);
   return { ...BaseConfigSchema.parse({}), adjudicator: adjudicatorDefaults() };
+}
+
+/**
+ * `layer` without the deepest key it holds on each issue path (dotted names in `removed`), or
+ * undefined when it holds none of them, so the caller drops the whole layer instead.
+ */
+function withoutPaths(
+  layer: Record<string, unknown>,
+  issuePaths: string[][],
+): { layer: Record<string, unknown>; removed: string[] } | undefined {
+  const out = ownJson(layer) as Record<string, unknown>;
+  const removed: string[] = [];
+  for (const p of issuePaths) {
+    let node: Record<string, unknown> = out;
+    let depth = 0;
+    for (; depth < p.length - 1; depth++) {
+      const next = node[p[depth] as string];
+      if (!Object.hasOwn(node, p[depth] as string) || !isPlainObject(next)) break;
+      node = next;
+    }
+    const key = p[depth];
+    if (key === undefined || !Object.hasOwn(node, key)) return undefined;
+    delete node[key];
+    const name = p.slice(0, depth + 1).join(".");
+    if (!removed.includes(name)) removed.push(name);
+  }
+  return removed.length ? { layer: out, removed } : undefined;
 }
 
 /** parseConfig of the merged layers. */

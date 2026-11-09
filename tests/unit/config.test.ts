@@ -147,6 +147,41 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     expect(stderr()).toContain("invalid config in eminiar.config.json");
   });
 
+  it("project weights.features that pass alone but overflow on merge cost only that field", () => {
+    personal({
+      permissions: { extraDeny: ["Bash(curl *)"] },
+      routing: { mode: "enforce" },
+      adjudicator: { weights: { features: { design: 2 } } },
+    });
+    const features = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`f${i}`, 1]));
+    project({ search: { defaultLimit: 9 }, adjudicator: { weights: { features } } });
+    const c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(curl *)"]);
+    expect(c.routing.mode).toBe("enforce");
+    expect(c.adjudicator.weights.features).toEqual({ design: 2 });
+    expect(c.search.defaultLimit).toBe(9);
+    expect(stderr()).toContain("ignoring adjudicator.weights.features in eminiar.config.json");
+    expect(stderr()).not.toContain("using defaults");
+  });
+
+  it("project weights.tierCenters that overflow on merge cost only that field", () => {
+    personal({
+      permissions: { extraDeny: ["Bash(curl *)"] },
+      routing: { mode: "enforce" },
+      adjudicator: { weights: { tierCenters: { haiku: 1 } } },
+    });
+    const tierCenters = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`t${i}`, i]));
+    project({ adjudicator: { weights: { tierCenters, lowConfidence: 0.3 } } });
+    const c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(curl *)"]);
+    expect(c.routing.mode).toBe("enforce");
+    expect(c.adjudicator.weights.tierCenters.haiku).toBe(1);
+    expect(c.adjudicator.weights.tierCenters.t0).toBeUndefined();
+    expect(c.adjudicator.weights.lowConfidence).toBe(0.3);
+    expect(stderr()).toContain("ignoring adjudicator.weights.tierCenters in eminiar.config.json");
+    expect(stderr()).not.toContain("using defaults");
+  });
+
   it("unknown keys are ignored and never invalidate a layer", () => {
     personal({ routing: { mode: "enforce" }, recall: { maxMemory: 5 }, nope: { x: 1 } });
     const c = loadConfig(root) as unknown as Record<string, Record<string, unknown>>;
