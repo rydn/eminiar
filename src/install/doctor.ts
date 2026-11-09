@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { ConfigSchema, parseJsonSafe } from "../config.js";
 import { getContext } from "../context.js";
@@ -191,8 +191,8 @@ export function configWarnings(raw: Obj, root: string): string[] {
   const dir = isObj(raw.memories) ? raw.memories.dir : undefined;
   if (typeof dir === "string") {
     const rel = relative(root, resolve(root, dir));
-    if (isAbsolute(dir) || rel.startsWith("..") || isAbsolute(rel))
-      out.push(`memories.dir "${dir}" resolves outside the project`);
+    const inside = rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    if (!inside) out.push(`memories.dir "${dir}" resolves outside the project`);
   }
   return out;
 }

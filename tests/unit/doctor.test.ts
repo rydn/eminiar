@@ -60,6 +60,12 @@ describe("doctor config checks", () => {
       "outside the project",
     );
     expect(configWarnings({ memories: { dir: ".eminiar/memories" } }, root)).toEqual([]);
+    // an absolute path inside the project is fine
+    expect(configWarnings({ memories: { dir: join(root, ".eminiar", "memories") } }, root)).toEqual(
+      [],
+    );
+    // a name that merely starts with two dots is a child, not a parent escape
+    expect(configWarnings({ memories: { dir: "..foo/mem" } }, root)).toEqual([]);
   });
 });
 
