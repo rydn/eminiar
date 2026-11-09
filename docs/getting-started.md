@@ -182,7 +182,7 @@ repositories are not deleted.
 
 eminiar started as a clean-room reimplementation of the context-mode plugin. Both can be
 installed at the same time. While context-mode is installed, eminiar stops suggesting `em_*` tools for
-`Bash`, `Read`, `Grep` and `WebFetch` (and `auto` mode only annotates), but keeps its own symbol,
+`Bash`, `Read`, `Grep` and `WebFetch` (in every routing mode except `off`), but keeps its own symbol,
 coverage and file-memo hints, so the two plugins never block each other (see [routing](how-it-works.md#routing)).
 
 When you are satisfied with eminiar, remove context-mode:
