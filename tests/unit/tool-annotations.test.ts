@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -116,36 +116,63 @@ describe("destructiveHint follows the input schema", () => {
 });
 
 const repo = join(__dirname, "..", "..");
+const TSX = join(repo, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+
+/**
+ * A fresh temp dir with a short path: tsx's IPC socket lives under the child's tmpdir, and a
+ * long macOS TMPDIR overflows the 104-char socket path limit (listen EINVAL). Prefers /tmp.
+ */
+function shortTempDir(prefix: string): string {
+  if (process.platform !== "win32")
+    try {
+      return realpathSync(mkdtempSync(join("/tmp", prefix)));
+    } catch {
+      // no writable /tmp: fall back to the default
+    }
+  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+}
 
 describe("the MCP server's tools/list", () => {
   // Starts src/server.ts (through tsx) in an empty project: the annotations a client sees are
   // what server.ts passes to registerTool, so dropping them there fails this test.
   it("carries every tool's annotations", { timeout: 60_000 }, async () => {
-    const project = realpathSync(mkdtempSync(join(tmpdir(), "em-ann-")));
-    writeFileSync(join(project, "package.json"), "{}");
+    // One temp dir holds the project, EMINIAR_HOME and the child's TMPDIR; removed at the end.
+    const dir = shortTempDir("em-ann-");
+    const project = join(dir, "p");
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env))
       if (v !== undefined && k !== "CLAUDE_PROJECT_DIR") env[k] = v;
-    env.EMINIAR_HOME = mkdtempSync(join(tmpdir(), "em-ann-home-"));
+    env.EMINIAR_HOME = join(dir, "h");
     env.EMINIAR_PROJECT_ROOT = project;
+    env.TMPDIR = join(dir, "t");
+    for (const d of [project, env.EMINIAR_HOME, env.TMPDIR]) mkdirSync(d);
+    writeFileSync(join(project, "package.json"), "{}");
+    const transport = new StdioClientTransport({
+      command: TSX,
+      args: [join(repo, "src", "server.ts")],
+      cwd: project,
+      env,
+      stderr: "pipe",
+    });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-8000);
+    });
     const client = new Client({ name: "annotations-test", version: "0" });
-    await client.connect(
-      new StdioClientTransport({
-        command: join(repo, "node_modules", ".bin", "tsx"),
-        args: [join(repo, "src", "server.ts")],
-        cwd: project,
-        env,
-        stderr: "ignore",
-      }),
-    );
     try {
+      await client.connect(transport);
       const { tools: listed } = await client.listTools();
       expect(listed.length).toBeGreaterThan(10);
       for (const t of listed) expect(t.annotations, t.name).toEqual(byName(t.name).annotations);
       const swarm = listed.find((t) => t.name === "em_swarm");
       expect(swarm?.annotations?.destructiveHint).toBe(true);
+    } catch (err) {
+      // A server that fails to start only shows up as "Connection closed": add what it printed.
+      if (err instanceof Error) err.message += `\nserver stderr:\n${stderr.trim() || "(empty)"}`;
+      throw err;
     } finally {
       await client.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
