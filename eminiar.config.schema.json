@@ -183,19 +183,6 @@
         }
       }
     },
-    "code": {
-      "default": {},
-      "type": "object",
-      "properties": {
-        "backend": {
-          "default": "tree-sitter",
-          "type": "string",
-          "enum": [
-            "tree-sitter"
-          ]
-        }
-      }
-    },
     "memories": {
       "default": {},
       "type": "object",

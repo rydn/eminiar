@@ -9,13 +9,13 @@ documentation that Claude uses, from your terminal. Run `eminiar help` for the f
 
 | Command | What it does |
 |---|---|
-| `eminiar install` | Install into Claude Code. Options: `--no-model`, `--method plugin\|settings`, `--cursor`, `--team`, `--marketplace github:org/repo`, `--statusline`, `--yes`, `--force` |
+| `eminiar install` | Install into Claude Code. Options: `--no-model`, `--method plugin\|settings`, `--cursor`, `--team`, `--marketplace github:org/repo`, `--statusline`, `--node PATH` (Node.js binary the hooks and MCP server run), `--yes`, `--force` |
 | `eminiar install --adjudicator[=X] [--accept-remote]` | Also turn on the [adjudicator](adjudicator.md) with provider `X` (`heuristic`, `embedding`, `typesafe`, `groq`, `cerebras`, `ollama`, `lmstudio` or `llamacpp`; bare `--adjudicator` = `heuristic`). Without the flag, an interactive install asks *"Use the adjudicator for tool, model and agent selection?"* (default No); `--yes` skips the question. A remote provider needs consent, and without a terminal only `--accept-remote` gives it |
 | `eminiar install --cursor` | Also register with Cursor: hooks in `~/.cursor/hooks.json`, the MCP server in `~/.cursor/mcp.json`, skills in `~/.cursor/skills/`. Without the `claude` CLI this installs for Cursor only |
 | `eminiar upgrade` | Update to the latest version and re-register with every client from the last install |
-| `eminiar uninstall [--purge-data]` | Remove from Claude Code and Cursor. Data is kept unless you add `--purge-data` |
+| `eminiar uninstall [--purge-data] [--yes]` | Remove from Claude Code and Cursor. Data is kept unless you add `--purge-data`. `--yes` skips the confirmation |
 | `eminiar doctor [--json] [--fix]` | Check installation health. `--fix` re-pins Node.js and the root, and clears Claude Code's cached launch failure |
-| `eminiar replace-context-mode [--yes]` | Remove the context-mode plugin after you are satisfied with eminiar |
+| `eminiar replace-context-mode [--yes] [--revert-gateway]` | Remove the context-mode plugin after you are satisfied with eminiar. `--revert-gateway` restores the gateway the replacement changed |
 
 ## Search and recall
 
@@ -50,6 +50,7 @@ eminiar graph path src/a.ts --to src/b.ts
 eminiar graph find parseFile
 
 eminiar graph hotspots | routes | dead_code | cycles | clusters | coupled | orphans | stats
+eminiar graph hotspots --limit 20              # --limit N caps the rows of any graph command
 eminiar graph pattern '{"from":{"kind":"route"},"edge":{"kinds":["handles"],"direction":"in"}}'
 ```
 
@@ -63,7 +64,7 @@ eminiar docs add --provider npm:zod
 eminiar docs add --path specs/openapi.yaml
 eminiar docs list
 eminiar docs sync [name ...] [--force]
-eminiar docs lookup "webhook signatures" [--name stripe]
+eminiar docs lookup "webhook signatures" [--name stripe] [--limit 5]
 eminiar docs resolve npm:zod
 eminiar docs remove example
 ```
@@ -183,7 +184,8 @@ Exit codes: 2 for a usage error (unknown provider, preset or mode, a key on the 
 ## Dashboard and status line
 
 ```sh
-eminiar ui [--port 7331] [--no-open]           # local web dashboard (alias: serve)
+eminiar ui [--port 7331] [--no-open]           # local web dashboard; opens the browser
+eminiar serve [--port 7331] [--open]           # the same server; opens the browser only with --open
 eminiar statusline                             # Claude Code statusLine command
 ```
 
@@ -191,6 +193,6 @@ eminiar statusline                             # Claude Code statusLine command
 
 ```sh
 eminiar hook [--event E] [--client cursor]     # run the hook handler by hand (JSON on stdin)
-eminiar version
-eminiar help
+eminiar version                                # also -v and --version
+eminiar help                                   # also -h and --help; `adjudicator --help` and `swarm --help` print their own help
 ```

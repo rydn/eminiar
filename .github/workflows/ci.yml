@@ -15,6 +15,12 @@ jobs:
       - run: npm ci
       - run: node scripts/sync-plugin-version.mjs --check
       - run: npm run build
+      # eminiar.config.schema.json is generated from the zod schema; fail when a config change
+      # did not regenerate it.
+      - name: Config schema is up to date
+        run: |
+          npx tsx scripts/gen-schema.ts
+          git diff --exit-code -- eminiar.config.schema.json
       - run: npm run typecheck
       - run: npm run lint
       # The embedding-model test stays skipped (opt in with EMINIAR_TEST_EMBED=1).

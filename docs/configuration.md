@@ -126,12 +126,6 @@ tables below.
 |---|---|---|
 | `extraDeny` | `[]` | Extra Bash deny rules for the sandbox, in addition to Claude Code's `permissions.deny`. Adds to the earlier layers; a project file cannot remove a personal rule |
 
-### `code`
-
-| Key | Default | Description |
-|---|---|---|
-| `backend` | `"tree-sitter"` | Code parser backend |
-
 ### `memories`
 
 | Key | Default | Description |
