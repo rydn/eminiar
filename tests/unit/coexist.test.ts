@@ -58,6 +58,16 @@ beforeAll(() => {
       source: "tree-sitter",
     },
   ]);
+  db.fileIndexSet({
+    path: "big.log",
+    hash: "h",
+    mtime: 0,
+    size: 30 * 1024,
+    language: null,
+    document_id: null,
+    status: "skipped",
+    reason: "over the size limit",
+  });
 });
 
 afterAll(() => {
@@ -80,13 +90,17 @@ describe("context-mode coexistence", () => {
       expect(grep.hookSpecificOutput?.permissionDecision).toBeUndefined();
       expect(grep.hookSpecificOutput?.additionalContext).toContain("symbols matching");
       expect(grep.hookSpecificOutput?.additionalContext).not.toContain("em_search");
-      // a heavy read is denied in enforce mode without context-mode; here it is left alone
+      // a heavy read is routed without context-mode; here it is left alone, but the
+      // coverage warning (only eminiar knows it) still comes with it
       const read = (await pre("Read", { file_path: join(root, "big.log") })) as
         | {
-            hookSpecificOutput?: { permissionDecision?: string };
+            hookSpecificOutput?: { additionalContext?: string; permissionDecision?: string };
           }
         | undefined;
       expect(read?.hookSpecificOutput?.permissionDecision).toBeUndefined();
+      expect(read?.hookSpecificOutput?.additionalContext).toContain(
+        "eminiar graph: big.log is skipped (over the size limit)",
+      );
     });
   }
 

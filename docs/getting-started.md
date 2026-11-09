@@ -154,7 +154,10 @@ Add this to `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when y
 { "statusLine": { "type": "command", "command": "eminiar statusline" } }
 ```
 
-It shows: `eminiar · 12.3k saved · 1.1M lifetime · 87% efficient`.
+It shows: `eminiar · ≈12.3k saved (≈8.1k measured) · ≈1.1M lifetime · 87% efficient`.
+Token figures are estimates (4 characters per token), hence the `≈`. The measured part is
+execution output that was produced and kept out of context; the rest is counterfactual, what
+native calls might have returned (see [`em_stats`](tools.md)).
 
 ## Upgrade
 

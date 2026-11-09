@@ -7,7 +7,7 @@ import { getContext, type ProjectContext, resetContextCache } from "../../src/co
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import type { ApiCallRow, ToolUseRow } from "../../src/storage/types.js";
-import { emStats } from "../../src/tools/em_stats.js";
+import { emStats, SAVINGS_LEGEND } from "../../src/tools/em_stats.js";
 import {
   type BlocksPayload,
   CSV_VIEWS,
@@ -653,6 +653,19 @@ describe("em_usage views", () => {
   it("em_stats ends with a usage line that points at em_usage", async () => {
     const out = text(await emStats.handler({ scope: "session" }, ctx));
     expect(out).toMatch(/\nusage: today \$[\d.,]+ · session \$[\d.,]+ · see em_usage$/);
+  });
+
+  it("em_stats labels the session's savings as estimates, split by kind, with the legend", async () => {
+    const out = text(await emStats.handler({ scope: "session" }, ctx));
+    // sess-a's stat row: em_execute 40000 → 2000 chars, ≈9.5k tokens kept out (measured)
+    expect(out).toMatch(
+      /^session sess-a: \d+ call\(s\), ≈[\d.]+k tokens saved of ≈[\d.]+k seen \(\d+% efficient, estimated\)$/m,
+    );
+    expect(out).toMatch(
+      /^ {2}measured ≈9\.5k \(execution output kept out\) · counterfactual ≈\S+ \(vs native calls\)$/m,
+    );
+    expect(out).toMatch(/^ {2}em_execute +measured +1 /m);
+    expect(out).toContain(SAVINGS_LEGEND);
   });
 });
 
