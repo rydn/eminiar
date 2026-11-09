@@ -9,7 +9,8 @@ export { MEMORY_KINDS };
 
 export const emRemember = defineTool({
   name: "em_remember",
-  annotations: { ...LOCAL_WRITE, idempotentHint: false },
+  // replace:true overwrites an existing memory file
+  annotations: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: false },
   description:
     "Record something worth keeping across sessions as a named markdown memory under .eminiar/memories/<topic>/<name>.md (human-editable, git-shareable): a decision and why, a constraint, a project fact, a user preference, a todo, a note, or onboarding knowledge. It is indexed for em_search / em_recall and linked in the graph to related_files / related_nodes. Manage existing memories with em_memory.",
   schema: {

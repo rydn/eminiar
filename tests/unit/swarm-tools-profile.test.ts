@@ -65,6 +65,19 @@ describe("tools_profile: readonly", () => {
     expect(tools.find((d) => d.name === "em_swarm")?.annotations.readOnlyHint).toBe(false);
   });
 
+  it("lists every READ_ONLY annotated worker tool: the registry and the allowlist match both ways", () => {
+    // Read-only, but about the installation or the index rather than the code: not worker tools.
+    const notWorkerTools = ["em_doctor", "em_stats", "em_index_status", "em_graph_changes"];
+    const readOnly = tools
+      .filter((t) => t.annotations.readOnlyHint && !notWorkerTools.includes(t.name))
+      .map((t) => t.name)
+      .sort();
+    const allowlisted = READONLY_EM_TOOLS.filter((t) => t !== "em_swarm").sort();
+    expect(allowlisted).toEqual(readOnly);
+    for (const t of notWorkerTools)
+      expect(tools.find((d) => d.name === t)?.annotations.readOnlyHint, t).toBe(true);
+  });
+
   it("a tools list narrows the built-ins", () => {
     const allowed = fmLine(
       render("        tools_profile: readonly\n        tools: [Read]\n"),
