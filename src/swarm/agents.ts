@@ -132,13 +132,15 @@ export function roleHasShell(
  * Does the role's generated agent file give it the em_* tool `tool` (a bare name such as
  * em_execute_file)? Mirrors frontmatter(): a readonly profile gets READONLY_EM_TOOLS, a `tools`
  * list gets WORKER_EM_TOOLS, an unset `tools` inherits every tool; the command runners need
- * Bash, and a `disallowed_tools` entry under any name form removes the tool.
+ * Bash, and `disallowed_tools` removes the tool only when it names it under both MCP name forms
+ * (disallowsEmTool): frontmatter() writes the list verbatim, and Claude Code ignores a bare
+ * name or another server's tool.
  */
 export function roleHasEmTool(
   role: Pick<RoleSpec, "tools" | "disallowedTools"> & Partial<Pick<RoleSpec, "toolsProfile">>,
   tool: string,
 ): boolean {
-  if (role.disallowedTools?.some((t) => t === tool || t.endsWith(`__${tool}`))) return false;
+  if (role.disallowedTools && disallowsEmTool(role.disallowedTools, tool)) return false;
   if (EXEC_TOOLS.has(tool) && !roleHasShell(role)) return false;
   if (role.toolsProfile === "readonly")
     return (READONLY_EM_TOOLS as readonly string[]).includes(tool);
@@ -148,6 +150,30 @@ export function roleHasEmTool(
 
 /** MCP tool name prefixes: plugin install and `install --method settings`. */
 export const EM_MCP_PREFIXES = ["mcp__plugin_eminiar_eminiar__", "mcp__eminiar__"] as const;
+
+/**
+ * Is `entry` a server-wide tool-list entry (`mcp__<server>` or `mcp__<server>__*`) for the
+ * eminiar server behind the MCP name prefix `prefix` (one of EM_MCP_PREFIXES)?
+ */
+export function isEmServerEntry(entry: string, prefix: string): boolean {
+  return entry === prefix.slice(0, -2) || entry === `${prefix}*`;
+}
+
+/**
+ * Does the tool list name the em_* tool `tool` under the MCP name prefix `prefix`, by its full
+ * name or a server-wide entry? A bare name or another server's tool does not count.
+ */
+export function namesEmTool(list: readonly string[], prefix: string, tool: string): boolean {
+  return list.some((t) => t === prefix + tool || isEmServerEntry(t, prefix));
+}
+
+/**
+ * Does a `disallowedTools` list remove the em_* tool `tool` under every MCP name form? The
+ * agent may reach eminiar under either install, so naming one form leaves the other.
+ */
+export function disallowsEmTool(disallowed: readonly string[], tool: string): boolean {
+  return EM_MCP_PREFIXES.every((p) => namesEmTool(disallowed, p, tool));
+}
 
 export const AGENTS_REL = ".claude/agents";
 

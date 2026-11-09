@@ -20,6 +20,7 @@ import { type RoutingEvent, recordRouting } from "../session/routing-stats.js";
 import { serverAlive } from "../session/server-alive.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
+import { EM_MCP_PREFIXES, isEmServerEntry, namesEmTool } from "../swarm/agents.js";
 import {
   isSwarmTool,
   spawnType,
@@ -870,25 +871,36 @@ interface AgentTools {
 
 const agentToolsCache = new Map<string, { mtimeMs: number; tools: AgentTools | undefined }>();
 
-/** An MCP server-wide grant (`mcp__<server>` or `mcp__<server>__*`) for eminiar's server. */
-const EM_SERVER_GRANT = /^mcp__(plugin_eminiar_eminiar|eminiar)(__\*)?$/;
+/** Is `entry` one of eminiar's full MCP tool names (either install form)? */
+const isEmFullName = (entry: string): boolean => EM_MCP_PREFIXES.some((p) => entry.startsWith(p));
 
-/** Does the tool-list entry `entry` name the em_* tool `tool` (bare or under an MCP prefix)? */
-function namesTool(entry: string, tool: string): boolean {
-  return entry === tool || entry.endsWith(`__${tool}`);
+/**
+ * Does the `tools:` entry `entry` grant the em_* tool `tool` under the MCP name prefix `prefix`?
+ * Its full name or a server-wide entry for that server does. A bare name or another server's
+ * tool of that name is unsure, so it counts for every form (keep denying); the other install
+ * form's full name does not.
+ */
+function grantsUnder(entry: string, prefix: string, tool: string): boolean {
+  if (entry === prefix + tool || isEmServerEntry(entry, prefix)) return true;
+  return !isEmFullName(entry) && (entry === tool || entry.endsWith(`__${tool}`));
 }
 
-/** Does `entry` grant the em_* tool `tool`, a server-wide grant included? */
-function grantsTool(entry: string, tool: string): boolean {
-  return namesTool(entry, tool) || EM_SERVER_GRANT.test(entry);
+/** Does the `tools:` entry `entry` grant some em_* tool under `prefix` (unsure forms included)? */
+function grantsSomeUnder(entry: string, prefix: string): boolean {
+  if (entry.startsWith(`${prefix}em_`) || isEmServerEntry(entry, prefix)) return true;
+  return !isEmFullName(entry) && /(^|__)em_[a-z_]+$/.test(entry);
 }
 
 /**
  * Can the subagent `agentType` not call the em_* tool `tool`, by the project's
- * `.claude/agents/<type>.md` frontmatter? "all": its `tools:` allowlist has no em_* tool at
- * all; "tool": it has some but not this one, or `disallowedTools` names it. Only asked on the
- * deny path. An agent without a file or without a `tools:` key inherits every tool. Cached by
- * file mtime. Never throws: any error answers undefined (keep denying).
+ * `.claude/agents/<type>.md` frontmatter? The agent may reach eminiar under either MCP name
+ * form (plugin or settings install), so it lacks the tool only when no form reaches it: its
+ * `tools:` allowlist does not grant that form, or `disallowedTools` removes it by full name or a
+ * server-wide entry. Bare names and other servers' tools never remove one (Claude Code does not
+ * match them to eminiar's tool). "all": no form reaches any em_* tool; "tool": it lacks this
+ * one only. Only asked on the deny path. An agent without a file or without a `tools:` key
+ * inherits every tool. Cached by file mtime. Never throws: any error answers undefined (keep
+ * denying).
  */
 export function agentLacksTool(
   root: string,
@@ -907,10 +919,14 @@ export function agentLacksTool(
     }
     const a = hit.tools;
     if (!a) return undefined;
-    if (a.disallowed.some((t) => EM_SERVER_GRANT.test(t))) return "all";
-    if (a.disallowed.some((t) => namesTool(t, tool))) return "tool";
-    if (!a.tools || a.tools.some((t) => grantsTool(t, tool))) return undefined;
-    return a.tools.some((t) => /(^|__)em_[a-z_]+$/.test(t)) ? "tool" : "all";
+    const { tools, disallowed } = a;
+    const reaches = (p: string) =>
+      !namesEmTool(disallowed, p, tool) && (!tools || tools.some((t) => grantsUnder(t, p, tool)));
+    if (EM_MCP_PREFIXES.some(reaches)) return undefined;
+    const reachesSome = (p: string) =>
+      !disallowed.some((t) => isEmServerEntry(t, p)) &&
+      (!tools || tools.some((t) => grantsSomeUnder(t, p)));
+    return EM_MCP_PREFIXES.some(reachesSome) ? "tool" : "all";
   } catch {
     return undefined;
   }

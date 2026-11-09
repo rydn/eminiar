@@ -8,6 +8,7 @@ import { agentLacksEmTools, agentLacksTool } from "../../src/hooks/routing.js";
 import type { HookInput } from "../../src/hooks/types.js";
 import { markServerAlive } from "../../src/session/server-alive.js";
 import { closeAllStorage } from "../../src/storage/index.js";
+import { roleHasEmTool } from "../../src/swarm/agents.js";
 
 const savedEnv = {
   EMINIAR_HOME: process.env.EMINIAR_HOME,
@@ -192,5 +193,96 @@ describe("agentLacksEmTools", () => {
     expect(agentLacksTool(root, "no-file-tool", "em_execute_file")).toBe("tool");
     expect(agentLacksTool(root, "no-file-tool", "em_execute")).toBeUndefined();
     expect(agentLacksTool(root, "inherits", "em_execute")).toBeUndefined();
+  });
+});
+
+describe("disallowedTools on an agent that inherits every tool", () => {
+  const denied = (name: string, disallowed: string) =>
+    writeFileSync(
+      join(root, ".claude", "agents", `${name}.md`),
+      `---\nname: ${name}\ndescription: x\ndisallowedTools: ${disallowed}\n---\nbody\n`,
+    );
+
+  it("keeps denying when an entry does not remove eminiar's tool under every install form", async () => {
+    // Claude Code does not match a bare name or another server's tool to eminiar's tool, and
+    // one install form's name leaves the other form reachable.
+    const probes: Record<string, string> = {
+      "dis-other-server": "mcp__other__em_execute_file",
+      "dis-bare": "em_execute_file",
+      "dis-settings-only": "mcp__eminiar__em_execute_file",
+      "dis-plugin-only": "mcp__plugin_eminiar_eminiar__em_execute_file",
+      "dis-settings-server": "mcp__eminiar__*",
+      "dis-other-wide": "mcp__other__*, mcp__other",
+      "dis-mixed": "mcp__other__em_execute_file, em_execute_file, mcp__eminiar__em_execute_file",
+    };
+    for (const [name, disallowed] of Object.entries(probes)) {
+      denied(name, disallowed);
+      expect(agentLacksTool(root, name, "em_execute_file"), name).toBeUndefined();
+      expect(agentLacksEmTools(root, name), name).toBe(false);
+      const r = await read({ agent_id: "a9", agent_type: name });
+      expect(r?.hookSpecificOutput?.permissionDecision, name).toBe("deny");
+      expect(String(r?.hookSpecificOutput?.additionalContext ?? ""), name).not.toContain(
+        "no em_* tools",
+      );
+    }
+  });
+
+  it("counts the tool as removed when both install forms are named, by name or server-wide", async () => {
+    const both: Record<string, string> = {
+      "dis-both-names":
+        "mcp__eminiar__em_execute_file, mcp__plugin_eminiar_eminiar__em_execute_file",
+      "dis-name-and-server": "mcp__eminiar__em_execute_file, mcp__plugin_eminiar_eminiar__*",
+    };
+    for (const [name, disallowed] of Object.entries(both)) {
+      denied(name, disallowed);
+      expect(agentLacksTool(root, name, "em_execute_file"), name).toBe("tool");
+      expect(agentLacksTool(root, name, "em_search"), name).toBeUndefined();
+      const r = await read({ agent_id: "a10", agent_type: name });
+      expect(r?.hookSpecificOutput?.permissionDecision, name).toBeUndefined();
+    }
+  });
+
+  it("reports no em_* tools only when both eminiar servers are disallowed", async () => {
+    for (const [name, disallowed] of Object.entries({
+      "dis-both-servers": "mcp__eminiar__*, mcp__plugin_eminiar_eminiar__*",
+      "dis-both-servers-bare": "mcp__eminiar, mcp__plugin_eminiar_eminiar",
+    })) {
+      denied(name, disallowed);
+      expect(agentLacksTool(root, name, "em_execute_file"), name).toBe("all");
+      expect(agentLacksEmTools(root, name), name).toBe(true);
+      const r = await read({ agent_id: "a11", agent_type: name });
+      expect(r?.hookSpecificOutput?.permissionDecision, name).toBeUndefined();
+      expect(String(r?.hookSpecificOutput?.additionalContext), name).toContain("no em_* tools");
+    }
+    // one server-wide entry plus the other form's tools allowlist: still no em_* tool at all
+    writeFileSync(
+      join(root, ".claude", "agents", "dis-plugin-server-listed.md"),
+      `---\nname: dis-plugin-server-listed\ntools: Read, ${EM}\ndisallowedTools: mcp__plugin_eminiar_eminiar__*\n---\n`,
+    );
+    expect(agentLacksTool(root, "dis-plugin-server-listed", "em_search")).toBe("all");
+  });
+});
+
+describe("roleHasEmTool with disallowed_tools", () => {
+  it("ignores bare names, other servers and a single install form", () => {
+    for (const disallowedTools of [
+      ["em_docs"],
+      ["mcp__other__em_docs"],
+      ["mcp__eminiar__em_docs"],
+      ["mcp__plugin_eminiar_eminiar__em_docs"],
+      ["mcp__eminiar__*"],
+      ["mcp__other__*"],
+    ])
+      expect(roleHasEmTool({ disallowedTools }, "em_docs"), disallowedTools.join()).toBe(true);
+  });
+
+  it("removes the tool when both install forms are named, by name or server-wide", () => {
+    for (const disallowedTools of [
+      ["mcp__eminiar__em_docs", "mcp__plugin_eminiar_eminiar__em_docs"],
+      ["mcp__eminiar", "mcp__plugin_eminiar_eminiar__*"],
+    ])
+      expect(roleHasEmTool({ disallowedTools }, "em_docs"), disallowedTools.join()).toBe(false);
+    // the generated runner disallows (Bash off) still remove the command runners
+    expect(roleHasEmTool({ disallowedTools: ["Bash"] }, "em_execute")).toBe(false);
   });
 });
