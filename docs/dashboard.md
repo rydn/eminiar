@@ -211,7 +211,7 @@ snapshot every 5. Otherwise the run list refreshes every 15 seconds.
 With no runs yet, the page says so and shows the command to start one
 (`/eminiar:em-swarm <swarm> <goal>`) with a preview of each swarm. Without a swarm file, the
 tab explains the feature, shows the starter file read-only, and offers a **Create
-.eminiar/swarm.yaml** button and the command `eminiar swarm init`. An invalid file lists its
+from the starter** button, which writes `.eminiar/swarm.yaml`, and the command `eminiar swarm init`. An invalid file lists its
 errors with their line numbers and a Configure link. A file with `enabled: false` shows "Swarms
 are disabled", because the hooks ignore the swarms until it is switched back on.
 

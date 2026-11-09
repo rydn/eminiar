@@ -98,7 +98,7 @@ Restart Claude Code after you install.
 3. **Look at the results.**
 
    ```text
-   /em-stats                 # tokens kept out of context
+   /eminiar:em-stats         # tokens kept out of context
    ```
 
    ```sh

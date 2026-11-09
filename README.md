@@ -227,7 +227,7 @@ Restart Claude Code (or Cursor). Then, in your project:
 ```
 
 That is all. Use Claude Code or Cursor as usual. To see how much context eminiar saves, run
-`/em-stats` or open the dashboard with `eminiar ui`. One flag covers Cursor because the hook
+`/eminiar:em-stats` or open the dashboard with `eminiar ui`. One flag covers Cursor because the hook
 runner speaks both dialects; see [Cursor](docs/getting-started.md#cursor) for what differs.
 
 **For a team:** run `npx eminiar install --team` once and commit `eminiar.config.json` and

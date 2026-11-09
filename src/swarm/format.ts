@@ -100,7 +100,7 @@ export function formatInvalid(rel: string, issues: ConfigIssue[]): string {
 export function formatNotOptedIn(rel: string): string {
   return [
     `Agent swarms are opt-in and this project has not opted in (no ${rel}).`,
-    "To enable them, ask the user to run `eminiar swarm init` (writes a starter file and generates the worker agents), use “Create starter swarm.yaml” on the Swarms tab of the dashboard (`eminiar ui`), or write the file by hand (https://github.com/rydn/eminiar/blob/main/docs/swarms.md).",
+    "To enable them, ask the user to run `eminiar swarm init` (writes a starter file and generates the worker agents), use “Create from the starter” on the Swarms tab of the dashboard (`eminiar ui`), or write the file by hand (https://github.com/rydn/eminiar/blob/main/docs/swarms.md).",
     "Until then, do not improvise a swarm: use ordinary subagents or do the work directly.",
   ].join("\n");
 }

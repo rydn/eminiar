@@ -101,7 +101,7 @@ Swarms are opt-in: without `.eminiar/swarm.yaml` every swarm path below returns 
 | Event | Swarm work |
 |---|---|
 | `SessionStart` | With `sync: auto`, regenerates `.claude/agents/swarm-<swarm>-<role>.md` from the YAML. Adds one line naming the swarms and any active run, or a warning naming the first problem in an invalid file |
-| `PreToolUse` `Agent` / `Task` | For a `swarm-*` agent: checks `max_agents` and the role's `count`, and reserves the slot. Over capacity, the spawn is denied with the reason. Routing still adds its prompt prefix, but not the prompt brief: `SubagentStart` briefs the worker instead |
+| `PreToolUse` `Agent` / `Task` | For a `swarm-*` agent: checks `max_agents` and the role's `count`, and reserves the slot. Over capacity, the spawn is denied with the reason. In `enforce` routing mode, routing still adds its prompt prefix, but not the prompt brief: `SubagentStart` briefs the worker instead. In `annotate` mode the prompt is left unchanged |
 | `PreToolUse` `em_swarm` | Drops any `caller_*` fields the model passed and stamps the call with the real caller from the hook payload: main session or subagent, `agent_id`, `agent_type` and `session_id`, signed with a per-machine key (`~/.eminiar/swarm.key`). The tool trusts only stamps that verify, so nobody can pose as the coordinator or another worker; an unstamped call can only `list`, `status` and `read`. Never routed or annotated |
 | `SubagentStart` | Registers the worker in its run and injects the worker brief: goal, blackboard, memories, history and hot files for its scope. The worker claims the `task #N` its spawn prompt names itself, because parallel spawns of one role cannot be told apart here |
 | `PostToolUse` / `PostToolUseFailure` | Counts the worker's tool calls and errors, and adds them to the run's activity feed |
@@ -282,7 +282,7 @@ adapter can be added later for a shared team knowledge base. The global database
 | `~/.eminiar/config.json` | Your personal configuration, including adjudicator consent |
 | `~/.eminiar/hook.log` | Hook diagnostics, including the first 120 characters of each command, path or URL that routing denied |
 | `~/.eminiar/swarm.key` | The per-machine key that signs `em_swarm` caller stamps |
-| `~/.eminiar/adjudicator.key` | Adjudicator provider keys, written only by `eminiar adjudicator key set` |
+| `~/.eminiar/adjudicator.key` | Adjudicator provider keys, written by `eminiar adjudicator key set`, and by the hidden key prompt that the adjudicator step of `eminiar install` and `eminiar adjudicator enable` show in a terminal when the chosen provider needs a key and none is stored |
 | `~/.eminiar/tmp/` | Scratch files for sandbox snippets, deleted after each run |
 | `~/.eminiar/install.json`, `node-path`, `root-path` | The install record and the pinned Node.js and plugin paths |
 | `~/.eminiar/models/` | The embedding model |
