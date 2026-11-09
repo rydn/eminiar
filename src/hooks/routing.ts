@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, relative, resolve } from "node:path";
 import type { ProjectContext } from "../context.js";
@@ -819,6 +819,15 @@ async function route(
       record("allow", "no-shell");
       return withContext(undefined, hint);
     }
+    // Nor if the subagent's own tool list has no em_* tool at all: the denial would name a
+    // replacement it cannot call. Annotate so it carries on with the native tool.
+    if (input.agent_id && agentLacksEmTools(ctx.root, input.agent_type)) {
+      record("annotate", "no-em-tools");
+      return withContext(
+        annotate(s, " This agent has no em_* tools, so the call is allowed."),
+        hint,
+      );
+    }
     record("deny");
     hookLog("info", `deny ${input.tool_name} → ${s.tool} [${s.rule ?? "?"}]: ${callHead(input)}`);
     return {
@@ -836,6 +845,49 @@ async function route(
       ? joinHints((await briefFor(ctx, String(input.tool_input.prompt ?? ""))).trim(), hint)
       : hint;
   return withContext(annotate(s), extra);
+}
+
+const agentToolsCache = new Map<string, { mtimeMs: number; lacks: boolean }>();
+
+/**
+ * Does the subagent `agentType` have a `tools:` allowlist in the project's
+ * `.claude/agents/<type>.md` frontmatter with no em_* tool in it? Only asked on the deny path.
+ * An agent without a file or without a `tools:` key inherits every tool, so it is not lacking.
+ * Cached by file mtime. Never throws: any error answers false (keep denying).
+ */
+export function agentLacksEmTools(root: string, agentType: string | undefined): boolean {
+  if (!agentType || !/^[A-Za-z0-9][\w.-]*$/.test(agentType)) return false;
+  try {
+    const file = join(root, ".claude", "agents", `${agentType}.md`);
+    const mtimeMs = statSync(file).mtimeMs;
+    const hit = agentToolsCache.get(file);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.lacks;
+    const tools = frontmatterTools(readFileSync(file, "utf8"));
+    const lacks = tools !== undefined && !tools.some((t) => /(^|__)em_[a-z_]+$/.test(t));
+    agentToolsCache.set(file, { mtimeMs, lacks });
+    return lacks;
+  } catch {
+    return false;
+  }
+}
+
+/** The `tools:` entries of a markdown file's YAML frontmatter, or undefined when it has none. */
+function frontmatterTools(text: string): string[] | undefined {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
+  if (fm === undefined) return undefined;
+  const lines = fm.split(/\r?\n/);
+  const at = lines.findIndex((l) => /^tools\s*:/.test(l));
+  if (at < 0) return undefined;
+  const rest = (lines[at] ?? "").replace(/^tools\s*:/, "").trim();
+  const items: string[] = [];
+  if (rest) items.push(...rest.replace(/^\[|\]$/g, "").split(","));
+  else
+    for (const l of lines.slice(at + 1)) {
+      const m = /^\s+-\s*(.+)$/.exec(l);
+      if (!m) break;
+      items.push(m[1] ?? "");
+    }
+  return items.map((t) => t.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
 }
 
 /** Native tools routing may redirect; their every call is counted, denied or not. */
