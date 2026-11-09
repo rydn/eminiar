@@ -2,10 +2,11 @@ import { z } from "zod";
 import { kickEmbedding } from "../embeddings/queue.js";
 import { indexContent, indexPath } from "../index/indexer.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export const emIndex = defineTool({
   name: "em_index",
+  annotations: LOCAL_WRITE,
   description:
     "Index content into the local knowledge base so em_search can find it. Pass `content` (with a title) or a `path` (file or directory; directories use `glob`, default **/*.md). Markdown is chunked by heading, JSON by key path, code by declaration. Unchanged files are skipped.",
   schema: {

@@ -46,7 +46,7 @@ import {
   workerStatus,
 } from "../swarm/runtime.js";
 import type { RunRow, SwarmConfig, SwarmSpec, TaskRow } from "../swarm/types.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export const SWARM_ACTIONS = [
   "list",
@@ -120,6 +120,7 @@ type Args = z.infer<z.ZodObject<typeof schema>>;
 
 export const emSwarm = defineTool({
   name: "em_swarm",
+  annotations: { ...LOCAL_WRITE, idempotentHint: false },
   description:
     'Agent swarms, opt-in via .eminiar/swarm.yaml. The coordinator (main session): start {swarm, goal} → plan {tasks} → spawn workers with the Agent tool (subagent_type swarm-<swarm>-<role>, a prompt naming "task #N"; the worker claims it) → status → finish {status, summary, remember}; release frees stuck workers. Workers: claim, update {task, status, result}, plan, post/read the blackboard. The em-swarm skill has the playbook.',
   schema,

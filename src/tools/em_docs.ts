@@ -28,7 +28,7 @@ import { recordStat } from "../stats/record.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import type { SourceStatRow } from "../storage/types.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 const sourceShape = {
   name: z.string().optional(),
@@ -212,6 +212,7 @@ export function formatDiscovery(d: Discovery, max = 40): string {
 
 export const emDocs = defineTool({
   name: "em_docs",
+  annotations: { ...LOCAL_WRITE, openWorldHint: true },
   description:
     "The project's documentation knowledge base (manifest .eminiar/docs.json, committed). `discover` scans the project for local docs, specs and instructions plus the third-party libraries, services, infrastructure and APIs it calls, and maps them to their documentation. `add` registers sources (by url, path, provider or a discovery `pick`) and crawls/indexes them under `docs:<name>`; `sync` refreshes; `lookup` answers a question from the indexed documentation — use it before WebFetch/WebSearch for anything the project depends on. `list`, `remove`, `resolve` manage the set.",
   schema: {

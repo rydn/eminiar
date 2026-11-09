@@ -27,7 +27,7 @@ import { indexPath } from "../index/indexer.js";
 import { reconcile } from "../memory/store.js";
 import { fileBytes, recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, READ_ONLY, text } from "./types.js";
 
 export async function ensureGraph(ctx: Parameters<typeof getStorage>[0]) {
   const db = getStorage(ctx);
@@ -54,6 +54,7 @@ const NodeFilterSchema = z.object({
 
 export const emGraphQuery = defineTool({
   name: "em_graph_query",
+  annotations: READ_ONLY,
   description:
     'Look up nodes in the project knowledge graph (files, functions, classes, routes, packages, people, concepts, memories) by name/path, run a preset (hotspots, coupled, orphans, dead_code, routes, cycles, clusters, stats), or run a structured pattern: start at nodes matching `from`, walk `edge.kinds` in `edge.direction` for `edge.depth` hops, keep what matches `to` — e.g. {from:{kind:"route"}, edge:{kinds:["handles"], direction:"in"}} lists every route handler, {from:{name:"^parseFile$"}, edge:{kinds:["calls"], direction:"in", depth:2}} its callers two levels up. Built from tree-sitter (TS/JS, Python, Go, PHP), git history, memories and em_graph_add.',
   schema: {
@@ -228,6 +229,7 @@ export const emGraphQuery = defineTool({
 
 export const emGraphImpact = defineTool({
   name: "em_graph_impact",
+  annotations: READ_ONLY,
   description:
     "What depends on a file or symbol (impact of changing it), what it depends on, its neighbourhood, or the path between two nodes. Combines import/call/extends/route edges from tree-sitter with git co-change coupling and memories, and explains each hit. Use before refactors and when a change breaks something far away.",
   schema: {
@@ -296,6 +298,7 @@ export const emGraphImpact = defineTool({
 
 export const emGraphAdd = defineTool({
   name: "em_graph_add",
+  annotations: LOCAL_WRITE,
   description:
     "Add curated knowledge to the graph: concept nodes (components, services, decisions) and relations between them or to files/symbols. Node ids: file:<path>, sym:<path>#<Name>, pkg:<name>, person:<name>, concept:<slug>. Bare names become concepts.",
   schema: {
@@ -375,6 +378,7 @@ export const emGraphAdd = defineTool({
 
 export const emReindex = defineTool({
   name: "em_reindex",
+  annotations: LOCAL_WRITE,
   description:
     "Rebuild parts of the local index: code (tree-sitter graph + code search, then the link pass and metrics), git (co-change/hotspots), metrics (fan-in, hotspot scores, clusters, cycles only), docs (markdown per eminiar.config.json index.docs), memories (re-import .eminiar/memories files edited by hand), embeddings (vectors for unembedded chunks), or all. Incremental unless full: true.",
   schema: {

@@ -52,6 +52,7 @@ for (const tool of listed) {
     tool.name,
     {
       description: tool.description,
+      annotations: tool.annotations,
       // Every tool accepts an optional project_root because the MCP server is not told
       // CLAUDE_PROJECT_DIR; without it the root is resolved from cwd.
       inputSchema: { ...tool.schema, project_root: z.string().optional() },

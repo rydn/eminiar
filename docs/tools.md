@@ -13,6 +13,11 @@ use them. This page helps you understand what Claude does and what to ask for.
 [History](#history) · [Agent swarms](#agent-swarms) · [Adjudicator](#adjudicator) ·
 [Housekeeping](#housekeeping) · [Slash commands](#slash-commands)
 
+Every tool carries MCP behaviour annotations (`readOnlyHint`, `destructiveHint`,
+`idempotentHint`, `openWorldHint`) so clients can decide what to confirm. Search, recall, symbols,
+architecture and the other graph and history readers are read-only. A tool with both read and
+write actions counts as not read-only. `em_purge` and the code runners are marked destructive.
+
 ## Run code
 
 Use these instead of `Bash` or `Read` when the output can be large.

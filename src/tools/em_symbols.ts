@@ -12,7 +12,7 @@ import { recordStat } from "../stats/record.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { GraphEdgeRow, GraphNodeRow } from "../storage/types.js";
 import { ensureGraph } from "./em_graph.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, READ_ONLY, text } from "./types.js";
 
 function fence(body: string, budget: number, docId: number | undefined): string {
   const cut = body.length > budget;
@@ -29,6 +29,7 @@ function referrerLabel(db: StorageAdapter, id: string, nodes: Map<string, GraphN
 
 export const emSymbols = defineTool({
   name: "em_symbols",
+  annotations: READ_ONLY,
   description:
     "Symbol-level code navigation on the tree-sitter graph (TS/JS, Python, Go, PHP): overview lists every symbol in a file with kinds and line ranges; find matches a name path (`method`, `Class/method`, `Class.method`, `/Class/method` for whole-name, `src/x.ts#Class.method`), optionally with the body; references lists what calls, references, extends or implements a symbol, grouped by the referencing symbol. Compact output; prefer this over reading whole files.",
   schema: {
