@@ -114,9 +114,33 @@ export function readonlyTools(role: Pick<RoleSpec, "tools">): string[] {
   return out;
 }
 
-/** Does the role keep Bash? An unset `tools` means every tool; `disallowed_tools` wins. */
-export function roleHasShell(role: Pick<RoleSpec, "tools" | "disallowedTools">): boolean {
+/**
+ * Does the role keep Bash? An unset `tools` means every tool; `disallowed_tools` wins. A
+ * readonly profile never has Bash (its allowlist is READONLY_BUILTINS or a subset).
+ */
+export function roleHasShell(
+  role: Pick<RoleSpec, "tools" | "disallowedTools"> & Partial<Pick<RoleSpec, "toolsProfile">>,
+): boolean {
+  if (role.toolsProfile === "readonly") return false;
   return (role.tools?.includes("Bash") ?? true) && !role.disallowedTools?.includes("Bash");
+}
+
+/**
+ * Does the role's generated agent file give it the em_* tool `tool` (a bare name such as
+ * em_execute_file)? Mirrors frontmatter(): a readonly profile gets READONLY_EM_TOOLS, a `tools`
+ * list gets WORKER_EM_TOOLS, an unset `tools` inherits every tool; the command runners need
+ * Bash, and a `disallowed_tools` entry under any name form removes the tool.
+ */
+export function roleHasEmTool(
+  role: Pick<RoleSpec, "tools" | "disallowedTools"> & Partial<Pick<RoleSpec, "toolsProfile">>,
+  tool: string,
+): boolean {
+  if (role.disallowedTools?.some((t) => t === tool || t.endsWith(`__${tool}`))) return false;
+  if (EXEC_TOOLS.has(tool) && !roleHasShell(role)) return false;
+  if (role.toolsProfile === "readonly")
+    return (READONLY_EM_TOOLS as readonly string[]).includes(tool);
+  if (role.tools) return (WORKER_EM_TOOLS as readonly string[]).includes(tool);
+  return true;
 }
 
 /** MCP tool name prefixes: plugin install and `install --method settings`. */

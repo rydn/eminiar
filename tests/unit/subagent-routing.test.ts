@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getContext, resetContextCache } from "../../src/context.js";
 import { handlers } from "../../src/hooks/index.js";
-import { agentLacksEmTools } from "../../src/hooks/routing.js";
+import { agentLacksEmTools, agentLacksTool } from "../../src/hooks/routing.js";
 import type { HookInput } from "../../src/hooks/types.js";
 import { markServerAlive } from "../../src/session/server-alive.js";
 import { closeAllStorage } from "../../src/storage/index.js";
@@ -38,10 +38,17 @@ beforeAll(() => {
     JSON.stringify({ routing: { mode: "enforce", deferToContextMode: false } }),
   );
   mkdirSync(join(root, ".claude", "agents"), { recursive: true });
-  agent("with-em", `Read, Bash, ${EM}, ToolSearch`);
+  agent("with-em", `Read, Bash, ${EM}, mcp__eminiar__em_execute_file, ToolSearch`);
   agent("no-em", "Read, Bash, WebFetch");
   agent("listed-no-em", "[Read, Bash]");
   agent("inherits");
+  // read-only em_* tools only, like a tools_profile: readonly worker
+  agent("ro", `Read, WebFetch, ToolSearch, ${EM}, mcp__eminiar__em_history`);
+  agent("all-em", "Read, WebFetch, mcp__plugin_eminiar_eminiar");
+  writeFileSync(
+    join(root, ".claude", "agents", "no-file-tool.md"),
+    `---\nname: no-file-tool\ndescription: x\ndisallowedTools: mcp__eminiar__em_execute_file, mcp__plugin_eminiar_eminiar__em_execute_file\n---\nbody\n`,
+  );
   writeFileSync(join(root, ".claude", "agents", "broken.md"), "no frontmatter at all");
   mkdirSync(join(root, ".claude", "agents", "unreadable.md"));
   writeFileSync(join(root, "big.txt"), "x".repeat(300 * 1024));
@@ -75,7 +82,7 @@ describe("enforce routing inside subagents without em_* tools", () => {
     expect(r?.hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 
-  it("keeps denying a subagent whose tools include an em_* tool", async () => {
+  it("keeps denying a subagent whose tools include the suggested em_* tool", async () => {
     const r = await read({ agent_id: "a1", agent_type: "with-em" });
     expect(r?.hookSpecificOutput?.permissionDecision).toBe("deny");
   });
@@ -91,6 +98,28 @@ describe("enforce routing inside subagents without em_* tools", () => {
   it("does not treat the main session's agent_type alone as a subagent", async () => {
     const r = await read({ agent_type: "no-em" });
     expect(r?.hookSpecificOutput?.permissionDecision).toBe("deny");
+  });
+
+  it("lets a subagent through when it has em_* tools but not the suggested one", async () => {
+    const r = await read({ agent_id: "a4", agent_type: "ro" });
+    expect(r?.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    expect(String(r?.hookSpecificOutput?.additionalContext ?? "")).not.toContain("em_execute_file");
+    const fetched = await handlers.PreToolUse!({
+      session_id: "s1",
+      cwd: root,
+      hook_event_name: "PreToolUse",
+      tool_name: "WebFetch",
+      tool_input: { url: "https://example.com/x" },
+      agent_id: "a4",
+      agent_type: "ro",
+    });
+    expect(fetched?.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    // disallowedTools naming the suggested tool counts as lacking it
+    const off = await read({ agent_id: "a5", agent_type: "no-file-tool" });
+    expect(off?.hookSpecificOutput?.permissionDecision).toBeUndefined();
+    // a server-wide grant gives every em_* tool: keep denying
+    const all = await read({ agent_id: "a6", agent_type: "all-em" });
+    expect(all?.hookSpecificOutput?.permissionDecision).toBe("deny");
   });
 
   it("fails open to denying when the agent file is missing, unreadable or has no tools key", async () => {
@@ -112,5 +141,17 @@ describe("agentLacksEmTools", () => {
     expect(agentLacksEmTools(root, "yaml-list")).toBe(false);
     expect(agentLacksEmTools(root, undefined)).toBe(false);
     expect(agentLacksEmTools(join(root, "nope"), "no-em")).toBe(false);
+  });
+
+  it("answers per tool (agentLacksTool)", () => {
+    expect(agentLacksTool(root, "ro", "em_execute_file")).toBe("tool");
+    expect(agentLacksTool(root, "ro", "em_fetch_and_index")).toBe("tool");
+    expect(agentLacksTool(root, "ro", "em_history")).toBeUndefined();
+    expect(agentLacksTool(root, "ro", "em_search")).toBeUndefined();
+    expect(agentLacksTool(root, "no-em", "em_execute")).toBe("all");
+    expect(agentLacksTool(root, "all-em", "em_execute_file")).toBeUndefined();
+    expect(agentLacksTool(root, "no-file-tool", "em_execute_file")).toBe("tool");
+    expect(agentLacksTool(root, "no-file-tool", "em_execute")).toBeUndefined();
+    expect(agentLacksTool(root, "inherits", "em_execute")).toBeUndefined();
   });
 });

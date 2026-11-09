@@ -567,6 +567,50 @@ describe("routing for a swarm worker without Bash", () => {
     expect(await spawned("Explore")).toMatch(/^Use the eminiar tools \(em_execute, /);
     sessionRoot();
   });
+
+  it("lets a readonly worker's big Read and WebFetch through: it has neither em_execute_file nor em_fetch_and_index", async () => {
+    const root = project(
+      "readonly",
+      `swarms:
+  s:
+    description: test swarm
+    agents:
+      r: { description: reviews, tools_profile: readonly }
+      w: { description: writes }
+`,
+    );
+    sessionRoot(root);
+    resetSwarmConfigCache();
+    unmarks.push(markServerAlive(getContext(root)));
+    writeFileSync(join(root, "big.txt"), "x".repeat(300 * 1024));
+    const call = (agent_type: string, tool_name: string, tool_input: Record<string, unknown>) =>
+      handlers.PreToolUse!(
+        input(root, {
+          hook_event_name: "PreToolUse",
+          tool_name,
+          tool_input,
+          agent_id: `a-${agent_type}`,
+          agent_type,
+        }),
+      );
+    const bigRead = { file_path: join(root, "big.txt") };
+    const fetch = { url: "https://example.com/x" };
+    for (const [tool, args] of [
+      ["Read", bigRead],
+      ["WebFetch", fetch],
+    ] as const) {
+      const r = await call("swarm-s-r", tool, args);
+      expect(r?.hookSpecificOutput?.permissionDecision, tool).toBeUndefined();
+      expect(String(r?.hookSpecificOutput?.additionalContext ?? ""), tool).not.toMatch(
+        /em_execute_file|em_fetch_and_index/,
+      );
+      // a role with every tool is still routed
+      expect((await call("swarm-s-w", tool, args))?.hookSpecificOutput?.permissionDecision).toBe(
+        "deny",
+      );
+    }
+    sessionRoot();
+  });
 });
 
 describe("swarm hooks with an invalid swarm file", () => {

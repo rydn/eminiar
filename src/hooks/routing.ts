@@ -813,20 +813,26 @@ async function route(
         hint,
       );
     }
-    // Nor if the caller cannot call it: a swarm worker without Bash has no em_execute*, so
-    // the native call is its only way and the suggestion would be noise.
-    if (input.agent_id && workerLacksTool(input, input.agent_type, s.tool)) {
-      record("allow", "no-shell");
-      return withContext(undefined, hint);
-    }
-    // Nor if the subagent's own tool list has no em_* tool at all: the denial would name a
-    // replacement it cannot call. Annotate so it carries on with the native tool.
-    if (input.agent_id && agentLacksEmTools(ctx.root, input.agent_type)) {
-      record("annotate", "no-em-tools");
-      return withContext(
-        annotate(s, " This agent has no em_* tools, so the call is allowed."),
-        hint,
-      );
+    // Nor if the subagent cannot call the suggested tool: a denial would be a dead end. A
+    // swarm worker's role config decides (no Bash: no em_execute*; readonly: read-only em_*
+    // only), else the agent file's own `tools` / `disallowedTools`.
+    if (input.agent_id) {
+      const lacks = workerLacksTool(input, input.agent_type, s.tool)
+        ? "tool"
+        : agentLacksTool(ctx.root, input.agent_type, s.tool);
+      // No em_* tool at all: say so, so it carries on with the native tool.
+      if (lacks === "all") {
+        record("annotate", "no-em-tools");
+        return withContext(
+          annotate(s, " This agent has no em_* tools, so the call is allowed."),
+          hint,
+        );
+      }
+      // Some em_* tools but not this one: pointing at it would be noise.
+      if (lacks === "tool") {
+        record("allow", "no-tool");
+        return withContext(undefined, hint);
+      }
     }
     record("deny");
     hookLog("info", `deny ${input.tool_name} → ${s.tool} [${s.rule ?? "?"}]: ${callHead(input)}`);
@@ -847,38 +853,83 @@ async function route(
   return withContext(annotate(s), extra);
 }
 
-const agentToolsCache = new Map<string, { mtimeMs: number; lacks: boolean }>();
+interface AgentTools {
+  /** The `tools:` allowlist; undefined: every tool is inherited. */
+  tools: string[] | undefined;
+  disallowed: string[];
+}
+
+const agentToolsCache = new Map<string, { mtimeMs: number; tools: AgentTools | undefined }>();
+
+/** An MCP server-wide grant (`mcp__<server>` or `mcp__<server>__*`) for eminiar's server. */
+const EM_SERVER_GRANT = /^mcp__(plugin_eminiar_eminiar|eminiar)(__\*)?$/;
+
+/** Does the tool-list entry `entry` name the em_* tool `tool` (bare or under an MCP prefix)? */
+function namesTool(entry: string, tool: string): boolean {
+  return entry === tool || entry.endsWith(`__${tool}`);
+}
+
+/** Does `entry` grant the em_* tool `tool`, a server-wide grant included? */
+function grantsTool(entry: string, tool: string): boolean {
+  return namesTool(entry, tool) || EM_SERVER_GRANT.test(entry);
+}
 
 /**
- * Does the subagent `agentType` have a `tools:` allowlist in the project's
- * `.claude/agents/<type>.md` frontmatter with no em_* tool in it? Only asked on the deny path.
- * An agent without a file or without a `tools:` key inherits every tool, so it is not lacking.
- * Cached by file mtime. Never throws: any error answers false (keep denying).
+ * Can the subagent `agentType` not call the em_* tool `tool`, by the project's
+ * `.claude/agents/<type>.md` frontmatter? "all": its `tools:` allowlist has no em_* tool at
+ * all; "tool": it has some but not this one, or `disallowedTools` names it. Only asked on the
+ * deny path. An agent without a file or without a `tools:` key inherits every tool. Cached by
+ * file mtime. Never throws: any error answers undefined (keep denying).
  */
-export function agentLacksEmTools(root: string, agentType: string | undefined): boolean {
-  if (!agentType || !/^[A-Za-z0-9][\w.-]*$/.test(agentType)) return false;
+export function agentLacksTool(
+  root: string,
+  agentType: string | undefined,
+  tool: string,
+): "all" | "tool" | undefined {
+  if (!agentType || !/^[A-Za-z0-9][\w.-]*$/.test(agentType)) return undefined;
+  if (!/^em_[a-z_]+$/.test(tool)) return undefined;
   try {
     const file = join(root, ".claude", "agents", `${agentType}.md`);
     const mtimeMs = statSync(file).mtimeMs;
-    const hit = agentToolsCache.get(file);
-    if (hit && hit.mtimeMs === mtimeMs) return hit.lacks;
-    const tools = frontmatterTools(readFileSync(file, "utf8"));
-    const lacks = tools !== undefined && !tools.some((t) => /(^|__)em_[a-z_]+$/.test(t));
-    agentToolsCache.set(file, { mtimeMs, lacks });
-    return lacks;
+    let hit = agentToolsCache.get(file);
+    if (!hit || hit.mtimeMs !== mtimeMs) {
+      hit = { mtimeMs, tools: frontmatterAgentTools(readFileSync(file, "utf8")) };
+      agentToolsCache.set(file, hit);
+    }
+    const a = hit.tools;
+    if (!a) return undefined;
+    if (a.disallowed.some((t) => EM_SERVER_GRANT.test(t))) return "all";
+    if (a.disallowed.some((t) => namesTool(t, tool))) return "tool";
+    if (!a.tools || a.tools.some((t) => grantsTool(t, tool))) return undefined;
+    return a.tools.some((t) => /(^|__)em_[a-z_]+$/.test(t)) ? "tool" : "all";
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-/** The `tools:` entries of a markdown file's YAML frontmatter, or undefined when it has none. */
-function frontmatterTools(text: string): string[] | undefined {
+/** Does the subagent's tools allowlist have no em_* tool at all? (agentLacksTool "all") */
+export function agentLacksEmTools(root: string, agentType: string | undefined): boolean {
+  return agentLacksTool(root, agentType, "em_search") === "all";
+}
+
+/** `tools` and `disallowedTools` of a markdown file's YAML frontmatter; undefined without one. */
+function frontmatterAgentTools(text: string): AgentTools | undefined {
+  if (!/^---\r?\n/.test(text)) return undefined;
+  return {
+    tools: frontmatterTools(text, "tools"),
+    disallowed: frontmatterTools(text, "disallowedTools") ?? [],
+  };
+}
+
+/** The `key:` entries of a markdown file's YAML frontmatter, or undefined when it has none. */
+function frontmatterTools(text: string, key: string): string[] | undefined {
   const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
   if (fm === undefined) return undefined;
   const lines = fm.split(/\r?\n/);
-  const at = lines.findIndex((l) => /^tools\s*:/.test(l));
+  const keyRe = new RegExp(`^${key}\\s*:`);
+  const at = lines.findIndex((l) => keyRe.test(l));
   if (at < 0) return undefined;
-  const rest = (lines[at] ?? "").replace(/^tools\s*:/, "").trim();
+  const rest = (lines[at] ?? "").replace(keyRe, "").trim();
   const items: string[] = [];
   if (rest) items.push(...rest.replace(/^\[|\]$/g, "").split(","));
   else
