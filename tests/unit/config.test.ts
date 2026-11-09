@@ -147,6 +147,31 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     expect(stderr()).toContain("invalid config in eminiar.config.json");
   });
 
+  it("a non-list in an earlier layer is refused, not replaced by a later list", () => {
+    const defaults = loadConfig(root).graph.exclude;
+    personal({
+      routing: { mode: "enforce" },
+      graph: { exclude: "**/x/**" },
+      permissions: { extraDeny: "Bash(rm *)" },
+    });
+    project({ graph: { exclude: ["**/gen/**"] }, permissions: { extraDeny: [] } });
+    const c = loadConfig(root);
+    expect(c.graph.exclude).toEqual([...defaults, "**/gen/**"]);
+    expect(c.permissions.extraDeny).toEqual([]);
+    // The personal file is invalid as a whole, so its routing.mode goes too, with a note.
+    expect(c.routing.mode).toBe("auto");
+    expect(stderr()).toContain(`invalid config in ${join(home, "config.json")}, ignoring it`);
+  });
+
+  it("a section that is not an object is refused, not spread into the merge", () => {
+    personal({ permissions: { extraDeny: ["Bash(curl *)"] } });
+    project({ routing: { mode: "enforce" }, permissions: "deny-all" });
+    const c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(curl *)"]);
+    expect(c.routing.mode).toBe("auto");
+    expect(stderr()).toContain("invalid config in eminiar.config.json, ignoring it");
+  });
+
   it("project weights.features that pass alone but overflow on merge cost only that field", () => {
     personal({
       permissions: { extraDeny: ["Bash(curl *)"] },

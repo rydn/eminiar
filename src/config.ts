@@ -597,7 +597,9 @@ function defaultList(section: string, key: string): unknown[] {
 
 /**
  * deepMerge of the layers in order, except that ADDITIVE_LISTS are combined. When a layer holds
- * something other than a list there, the plain merge result stays so the schema reports it.
+ * something other than a list there, that value is what the merge keeps, even under a later
+ * layer's list, so the schema refuses it and loadConfig drops that layer with a note; a later
+ * list must not quietly replace the defaults. A section that is not an object is left as merged.
  */
 function mergeLayers(layers: Record<string, unknown>[]): Record<string, unknown> {
   let out: Record<string, unknown> = {};
@@ -608,7 +610,12 @@ function mergeLayers(layers: Record<string, unknown>[]): Record<string, unknown>
       const s = l[section];
       if (isPlainObject(s) && Object.hasOwn(s, key)) lists.push(s[key]);
     }
-    if (!lists.length || !lists.every(Array.isArray)) continue;
+    if (!lists.length || !isPlainObject(out[section])) continue;
+    const bad = lists.findIndex((l) => !Array.isArray(l));
+    if (bad >= 0) {
+      out[section] = { ...out[section], [key]: lists[bad] };
+      continue;
+    }
     const negatable = NEGATABLE_LISTS.has(`${section}.${key}`);
     const acc: unknown[] = [...defaultList(section, key)];
     for (const list of lists as unknown[][])
