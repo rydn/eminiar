@@ -16,7 +16,9 @@ use them. This page helps you understand what Claude does and what to ask for.
 Every tool carries MCP behaviour annotations (`readOnlyHint`, `destructiveHint`,
 `idempotentHint`, `openWorldHint`) so clients can decide what to confirm. Search, recall, symbols,
 architecture and the other graph and history readers are read-only. A tool with both read and
-write actions counts as not read-only. `em_purge` and the code runners are marked destructive.
+write actions counts as not read-only. A tool is marked destructive when any of its actions
+deletes, removes, replaces, purges, syncs or forces: `em_purge`, the code runners (`em_execute`,
+`em_batch_execute`, `em_execute_file`), `em_memory`, `em_swarm`, `em_docs` and `em_remember`.
 
 ## Run code
 

@@ -609,6 +609,27 @@ describe("routing for a swarm worker without Bash", () => {
         "deny",
       );
     }
+    // the routing prefix of its spawn names neither tool; a full role's prefix names both
+    const spawned = async (type: string) =>
+      String(
+        (
+          await handlers.PreToolUse!(
+            input(root, {
+              hook_event_name: "PreToolUse",
+              tool_name: "Agent",
+              tool_input: { subagent_type: type, prompt: "go" },
+              tool_use_id: `toolu_ro_${type}`,
+            }),
+          )
+        )?.hookSpecificOutput?.updatedInput?.prompt,
+      );
+    const ro = await spawned("swarm-s-r");
+    expect(ro).toMatch(/^Use the eminiar tools \(em_search, em_symbols, em_history\)/);
+    expect(ro).not.toMatch(/em_fetch_and_index|em_docs|em_execute/);
+    expect(ro).toContain("em_recall");
+    const full = await spawned("swarm-s-w");
+    expect(full).toContain("em_fetch_and_index");
+    expect(full).toContain("em_docs");
     sessionRoot();
   });
 });

@@ -550,10 +550,17 @@ export function suggest(
   }
 }
 
-/** The prompt prefix for a subagent; without `shell` it leaves out the command runners. */
-function subagentPrefix(shell: boolean): string {
+/**
+ * The prompt prefix for a subagent; `shell` false leaves out the command runners, `fetch` and
+ * `docs` false leave out em_fetch_and_index and em_docs (a readonly swarm worker has neither).
+ */
+function subagentPrefix(shell: boolean, fetch = true, docs = true): string {
   const runners = shell ? "em_execute, em_batch_execute, em_execute_file, " : "";
-  return `Use the eminiar tools (${runners}em_fetch_and_index, em_search, em_symbols, em_history) instead of ${shell ? "Bash/" : ""}Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, em_history {action:"file", path} before editing a file, em_symbols / em_search {source:"code"} before grepping for an identifier, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on.\n\n`;
+  const fetcher = fetch ? "em_fetch_and_index, " : "";
+  const lookup = docs
+    ? `, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on`
+    : "";
+  return `Use the eminiar tools (${runners}${fetcher}em_search, em_symbols, em_history) instead of ${shell ? "Bash/" : ""}Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, em_history {action:"file", path} before editing a file, em_symbols / em_search {source:"code"} before grepping for an identifier${lookup}.\n\n`;
 }
 
 /** Project-relative path of a tool's file_path, or undefined when it is outside the project. */
@@ -779,10 +786,11 @@ async function route(
 
   if (mode === "enforce") {
     if (s.prefixPrompt) {
-      // A swarm worker without Bash has no em_execute*: do not point it at them.
+      // A swarm worker lacking em_execute*, em_fetch_and_index or em_docs: do not point it at them.
+      const lacks = (tool: string) => swarmWorker && workerLacksTool(input, spawnType(input), tool);
       const prefix =
-        swarmWorker && workerLacksTool(input, spawnType(input), "em_execute")
-          ? subagentPrefix(false)
+        lacks("em_execute") || lacks("em_fetch_and_index") || lacks("em_docs")
+          ? subagentPrefix(!lacks("em_execute"), !lacks("em_fetch_and_index"), !lacks("em_docs"))
           : s.prefixPrompt;
       const prompt = String(input.tool_input.prompt ?? "");
       if (prompt.startsWith(prefix)) return undefined;
