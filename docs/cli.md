@@ -25,7 +25,14 @@ eminiar search "parseFile" --code              # code only
 eminiar search "auth" --source memory          # one source
 eminiar search "what happened" --timeline      # newest first
 eminiar search "x" --lexical --limit 10 --json
+```
 
+`eminiar search` takes its result count and answer size from `search.defaultLimit` (5) and
+`search.defaultMaxTokens` (2000) in the [configuration](configuration.md#search), the same as
+`em_search`. `--limit` overrides the count. Earlier versions printed up to a fixed 4000 tokens,
+so set `search.defaultMaxTokens` to 4000 for the old answer size.
+
+```sh
 eminiar recall "rate limiting"                 # memories and session history
 eminiar index docs/ --source notes             # index files or a directory
 

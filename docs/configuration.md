@@ -57,6 +57,15 @@ a config file lists, so a project file cannot take back one of your excludes, ev
 matches a built-in entry. The `!` entry itself is not kept. In the other two lists `!` has no
 special meaning.
 
+Earlier versions replaced `graph.exclude` too. If your personal config sets a short list so that
+some built-in folders get parsed, for example `["**/node_modules/**"]` to parse `build/` and
+`vendor/`, eminiar now adds the built-in list back and skips those folders again. Remove each
+built-in entry you want parsed with `!`:
+
+```json
+{ "graph": { "exclude": ["!**/build/**", "!**/vendor/**"] } }
+```
+
 A value the schema refuses (a wrong type, or a number above its limit) makes only the file that
 holds it invalid. eminiar ignores that whole file, prints a note on stderr naming it, and uses
 the other layers. A bad `recall.maxMemories` in your personal config therefore leaves the team's
