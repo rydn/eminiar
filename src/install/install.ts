@@ -84,8 +84,7 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   log.step("data directory");
   const p = ensureDirs();
-  if (!existsSync(p.configFile))
-    writeFileSync(p.configFile, `${JSON.stringify(minimalUserConfig(), null, 2)}\n`);
+  writeFreshUserConfig(p.configFile);
   globalDb();
   log.ok(p.home);
 
@@ -204,6 +203,11 @@ export async function install(opts: InstallOptions): Promise<number> {
  */
 export function minimalUserConfig(): Record<string, unknown> {
   return { $schema: SCHEMA_URL };
+}
+
+/** Create ~/.eminiar/config.json with only the minimal content; an existing file is left as is. */
+export function writeFreshUserConfig(file: string): void {
+  if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(minimalUserConfig(), null, 2)}\n`);
 }
 
 /** Every schema default, minus the adjudicator section. The reference `doctor --fix` prunes against. */

@@ -1,9 +1,13 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ConfigSchema, loadConfig } from "../../src/config.js";
-import { minimalUserConfig, writeTeamFiles } from "../../src/install/install.js";
+import {
+  minimalUserConfig,
+  writeFreshUserConfig,
+  writeTeamFiles,
+} from "../../src/install/install.js";
 
 const saved = process.env.EMINIAR_HOME;
 beforeAll(() => {
@@ -51,5 +55,23 @@ describe("fresh ~/.eminiar/config.json", () => {
     expect(c.graph.include).toEqual(ConfigSchema.parse({}).graph.include);
     expect(c.graph.include).toContain("**/*.py");
     expect(c.graph.exclude).toContain("**/.venv/**");
+  });
+});
+
+describe("writeFreshUserConfig (the install data-directory step)", () => {
+  it("writes only $schema into a new config.json, never the schema defaults", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "em-fresh-")), "config.json");
+    writeFreshUserConfig(file);
+    expect(existsSync(file)).toBe(true);
+    const written = JSON.parse(readFileSync(file, "utf8"));
+    expect(Object.keys(written)).toEqual(["$schema"]);
+    expect(written).toEqual(minimalUserConfig());
+  });
+
+  it("leaves an existing config.json alone", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "em-fresh-")), "config.json");
+    writeFileSync(file, '{"search":{"defaultLimit":3}}');
+    writeFreshUserConfig(file);
+    expect(readFileSync(file, "utf8")).toBe('{"search":{"defaultLimit":3}}');
   });
 });

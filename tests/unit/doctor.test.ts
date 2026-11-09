@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -163,5 +163,42 @@ describe("doctor reports frozen defaults in ~/.eminiar/config.json", () => {
     expect(await warning({ fix: true })).toBe("");
     expect(JSON.parse(readFileSync(cfgFile, "utf8"))).toEqual({ search: { defaultLimit: 7 } });
     expect(await warning()).toBe("");
+  });
+
+  it("--fix prunes a frozen config once, keeps the original as .bak and leaves a bad file alone", async () => {
+    const d = ConfigSchema.parse({});
+    // the pre-fix shape: defaults frozen in, with graph lists lacking a later default entry
+    const frozen = {
+      routing: { mode: d.routing.mode },
+      graph: { include: d.graph.include.filter((g) => g !== "**/*.py"), exclude: d.graph.exclude },
+      search: { defaultLimit: 7 },
+    };
+    const original = `${JSON.stringify(frozen, null, 2)}\n`;
+    writeFileSync(cfgFile, original);
+    const bak = `${cfgFile}.eminiar.bak`;
+
+    const checks = await fullDoctor({ fix: true });
+    const kept = JSON.parse(readFileSync(cfgFile, "utf8"));
+    expect(kept).toEqual({
+      graph: { include: frozen.graph.include },
+      search: { defaultLimit: 7 },
+    });
+    expect(readFileSync(bak, "utf8")).toBe(original);
+    expect(checks.find((c) => c.name === "fix")?.detail).toContain("pruned");
+    expect(checks.find((c) => c.name === "config warnings")).toMatchObject({ ok: true });
+
+    // a second run changes nothing and does not replace the backup with the pruned file
+    const pruned = readFileSync(cfgFile, "utf8");
+    const again = await fullDoctor({ fix: true });
+    expect(readFileSync(cfgFile, "utf8")).toBe(pruned);
+    expect(readFileSync(bak, "utf8")).toBe(original);
+    expect(again.find((c) => c.name === "fix")?.detail ?? "").not.toContain("pruned");
+
+    // a malformed file is not touched
+    writeFileSync(cfgFile, "{ not json");
+    rmSync(bak);
+    await fullDoctor({ fix: true });
+    expect(readFileSync(cfgFile, "utf8")).toBe("{ not json");
+    expect(existsSync(bak)).toBe(false);
   });
 });
