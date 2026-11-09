@@ -2,8 +2,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { loadConfig } from "../../src/config.js";
-import { writeTeamFiles } from "../../src/install/install.js";
+import { ConfigSchema, loadConfig } from "../../src/config.js";
+import { minimalUserConfig, writeTeamFiles } from "../../src/install/install.js";
 
 const saved = process.env.EMINIAR_HOME;
 beforeAll(() => {
@@ -38,5 +38,18 @@ describe("writeTeamFiles", () => {
     expect(cfg.permissions.extraDeny).toEqual(["Bash(kubectl *)"]);
     expect(cfg.graph.exclude).toEqual(["**/node_modules/**", "**/generated/**"]);
     expect(cfg.index.docs).toEqual(["**/*.md", "**/*.mdx"]);
+  });
+});
+
+describe("fresh ~/.eminiar/config.json", () => {
+  it("holds only the schema pointer, so later default changes reach the user", () => {
+    expect(Object.keys(minimalUserConfig())).toEqual(["$schema"]);
+    const home = process.env.EMINIAR_HOME as string;
+    const root = mkdtempSync(join(tmpdir(), "em-root-"));
+    writeFileSync(join(home, "config.json"), JSON.stringify(minimalUserConfig()));
+    const c = loadConfig(root);
+    expect(c.graph.include).toEqual(ConfigSchema.parse({}).graph.include);
+    expect(c.graph.include).toContain("**/*.py");
+    expect(c.graph.exclude).toContain("**/.venv/**");
   });
 });

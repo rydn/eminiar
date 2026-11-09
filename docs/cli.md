@@ -14,7 +14,7 @@ documentation that Claude uses, from your terminal. Run `eminiar help` for the f
 | `eminiar install --cursor` | Also register with Cursor: hooks in `~/.cursor/hooks.json`, the MCP server in `~/.cursor/mcp.json`, skills in `~/.cursor/skills/`. Without the `claude` CLI this installs for Cursor only |
 | `eminiar upgrade` | Update to the latest version and re-register with every client from the last install |
 | `eminiar uninstall [--purge-data]` | Remove from Claude Code and Cursor. Data is kept unless you add `--purge-data` |
-| `eminiar doctor [--json] [--fix]` | Check installation health. `--fix` re-pins Node.js and the root, and clears Claude Code's cached launch failure |
+| `eminiar doctor [--json] [--fix]` | Check installation health. `--fix` re-pins Node.js and the root, clears Claude Code's cached launch failure and removes keys equal to the current default from `~/.eminiar/config.json` (a `.bak` copy is kept). Config warnings (unknown keys, stale `graph` lists, `memories.dir` outside the project, Bash deny rules with non-shell sandbox languages) do not change the exit status |
 | `eminiar replace-context-mode [--yes]` | Remove the context-mode plugin after you are satisfied with eminiar |
 
 ## Search and recall

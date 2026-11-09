@@ -1,10 +1,13 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { ConfigSchema } from "../config.js";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { z } from "zod";
+import { ConfigSchema, parseJsonSafe } from "../config.js";
 import { getContext } from "../context.js";
 import { type Check, runDoctor } from "../doctor.js";
 import { contextModeInstalled, effectiveRoutingMode } from "../hooks/coexist.js";
+import { paths } from "../paths.js";
+import { loadPermissionRules } from "../permissions/settings.js";
 import { availableLanguages } from "../sandbox/languages.js";
 import { liveServers } from "../session/server-alive.js";
 import { getStorage } from "../storage/index.js";
@@ -16,6 +19,7 @@ import {
   pluginInstallPath,
   readInstallRecord,
   settingsPath,
+  writeJsonWithBackup,
 } from "./claude-config.js";
 import { cursorPresent, cursorStatus } from "./cursor.js";
 import { stableRoot, stableVersion } from "./materialize.js";
@@ -114,9 +118,113 @@ export function mcpHandshake(
   });
 }
 
+type Obj = Record<string, unknown>;
+
+/** Every schema default except the adjudicator section (written only when the user enables it). */
+function schemaDefaults(): Obj {
+  const { adjudicator: _a, ...rest } = ConfigSchema.parse({});
+  return rest;
+}
+
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * `raw` without the keys whose value equals the current default, so a later default change
+ * reaches the user again. Empty sections go too. `$schema` and the adjudicator section (not part
+ * of schemaDefaults) are kept as they are.
+ */
+export function pruneDefaults(raw: Obj, defaults: Obj = schemaDefaults()): Obj {
+  const out: Obj = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const d = defaults[k];
+    if (d === undefined) out[k] = v;
+    else if (isObj(v) && isObj(d)) {
+      const inner = pruneDefaults(v, d);
+      if (Object.keys(inner).length) out[k] = inner;
+    } else if (JSON.stringify(v) !== JSON.stringify(d)) out[k] = v;
+  }
+  return out;
+}
+
+/** graph.include / graph.exclude lists that are a strict subset of the current default list. */
+export function staleGraphLists(raw: Obj): string[] {
+  const graph = raw.graph;
+  const defaults = schemaDefaults().graph as Record<string, string[]>;
+  if (!isObj(graph)) return [];
+  const out: string[] = [];
+  for (const key of ["include", "exclude"] as const) {
+    const list = graph[key];
+    const def = defaults[key];
+    if (!def || !Array.isArray(list)) continue;
+    const missing = def.filter((e) => !list.includes(e));
+    if (list.every((e) => def.includes(e as string)) && missing.length)
+      out.push(
+        `graph.${key} lacks current default entries (${missing.join(", ")}); remove the key to inherit the defaults`,
+      );
+  }
+  return out;
+}
+
+/** Dotted paths of keys the schema does not define (typos pass as valid, then do nothing). */
+export function unknownConfigKeys(raw: Obj): string[] {
+  const schema = z.toJSONSchema(ConfigSchema, { io: "input" }) as Obj;
+  const out: string[] = [];
+  const walk = (value: Obj, node: unknown, prefix: string): void => {
+    if (!isObj(node) || !isObj(node.properties) || isObj(node.additionalProperties)) return;
+    for (const [k, v] of Object.entries(value)) {
+      const child = (node.properties as Obj)[k];
+      if (child === undefined) {
+        if (!(prefix === "" && k === "$schema")) out.push(`${prefix}${k}`);
+      } else if (isObj(v) && !(prefix === "" && k === "adjudicator"))
+        walk(v, child, `${prefix}${k}.`);
+    }
+  };
+  walk(raw, schema, "");
+  return out;
+}
+
+/** Problems with one config file's raw content, worded for the doctor line. */
+export function configWarnings(raw: Obj, root: string): string[] {
+  const out = [...staleGraphLists(raw)];
+  const unknown = unknownConfigKeys(raw);
+  if (unknown.length) out.push(`unknown keys, ignored: ${unknown.join(", ")}`);
+  const dir = isObj(raw.memories) ? raw.memories.dir : undefined;
+  if (typeof dir === "string") {
+    const rel = relative(root, resolve(root, dir));
+    if (isAbsolute(dir) || rel.startsWith("..") || isAbsolute(rel))
+      out.push(`memories.dir "${dir}" resolves outside the project`);
+  }
+  return out;
+}
+
+/** A Bash deny rule only binds shell snippets; the other sandbox languages run unchecked. */
+export function sandboxDenyWarning(
+  root: string,
+  config: ReturnType<typeof getContext>["config"],
+): string | undefined {
+  const deny = loadPermissionRules(root, config.permissions.extraDeny).deny;
+  if (!deny.some((r) => r.tool === "Bash")) return undefined;
+  const open = availableLanguages()
+    .filter((l) => l.bin && l.id !== "shell" && !config.sandbox.disabledLanguages.includes(l.id))
+    .map((l) => l.id);
+  if (!open.length) return undefined;
+  return `Bash deny rules exist but only shell snippets obey them; ${open.join(", ")} can run anything (disable with sandbox.disabledLanguages)`;
+}
+
+function readRawConfig(file: string): Obj | undefined {
+  if (!existsSync(file)) return undefined;
+  try {
+    const raw = parseJsonSafe(readFileSync(file, "utf8"));
+    return isObj(raw) ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Everything `runDoctor` checks plus installation, hooks, MCP and config.
- * With `fix`, re-pin node and the stable root and forget Claude Code's cached launch failure.
+ * With `fix`, re-pin node and the stable root, forget Claude Code's cached launch failure and
+ * prune keys equal to the current default from ~/.eminiar/config.json (a .bak copy is kept).
  */
 export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]> {
   const rec = readInstallRecord();
@@ -134,6 +242,21 @@ export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]>
       }
     } catch (err) {
       fixed.push(`pin failed: ${(err as Error).message}`);
+    }
+  }
+
+  if (opts.fix) {
+    const personal = readRawConfig(paths().configFile);
+    if (personal) {
+      const pruned = pruneDefaults(personal);
+      if (JSON.stringify(pruned) !== JSON.stringify(personal)) {
+        try {
+          writeJsonWithBackup(paths().configFile, pruned);
+          fixed.push("config.json pruned of default values");
+        } catch (err) {
+          fixed.push(`config prune failed: ${(err as Error).message}`);
+        }
+      }
     }
   }
 
@@ -303,6 +426,23 @@ export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]>
         checks.push({ name: "eminiar.config.json", ok: false, detail: (err as Error).message });
       }
     }
+    // Warnings: informational, they never fail the run.
+    const warnings: string[] = [];
+    for (const [label, file] of [
+      ["~/.eminiar/config.json", paths().configFile],
+      ["eminiar.config.json", cfgFile],
+    ] as const) {
+      const raw = readRawConfig(file);
+      if (raw) for (const w of configWarnings(raw, ctx.root)) warnings.push(`${label}: ${w}`);
+    }
+    const denyWarn = sandboxDenyWarning(ctx.root, ctx.config);
+    if (denyWarn) warnings.push(denyWarn);
+    if (warnings.length)
+      checks.push({
+        name: "config warnings",
+        ok: true,
+        detail: `WARNING: ${warnings.join(" · ")}`,
+      });
     const mode = effectiveRoutingMode(ctx.config);
     const cm = contextModeInstalled();
     checks.push({
