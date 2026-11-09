@@ -8,8 +8,8 @@
 - Claude Code (terminal, desktop app or IDE extension), Cursor, or both
 - macOS or Linux. The `bin/` shims are POSIX `sh`.
 
-Optional: Python, Ruby, Go, PHP, Perl, R, Elixir, Rust or .NET. The sandbox finds them on your
-`PATH` and enables each language it finds.
+Optional: Python, Ruby, Go, PHP, Perl, R, Elixir, Rust, or `dotnet-script` for C#. The sandbox
+finds them on your `PATH` and enables each language it finds.
 
 ## Install
 
@@ -26,11 +26,14 @@ The installer does these steps in order:
 | **native modules** | Checks `better-sqlite3`, FTS5 and `sqlite-vec` |
 | **data directory** | Creates `~/.eminiar/` |
 | **embedding model** | Downloads `bge-small-en-v1.5` (about 35 MB, one time). Skip with `--no-model` |
-| **register** | Registers the plugin with Claude Code (`--method plugin`). If the `claude` CLI is not available, it writes your settings file instead (`--method settings`) |
+| **register** | Registers the plugin with Claude Code (`--method plugin`). If the `claude` CLI is not available or plugin registration fails, it writes your settings file instead (`--method settings`) |
+| **adjudicator** | Asks whether to turn on the opt-in [adjudicator](adjudicator.md) (default no), unless it is already configured. `--yes` skips the question; `--adjudicator` turns it on |
+| **team defaults** | With `--team` only: writes the [team files](#team-setup) |
 | **doctor** | Runs every health check |
 
 The installer asks before it changes your user-level Claude Code config. Add `--yes` to accept
-without a prompt. Add `--statusline` to also install the [status line](#status-line).
+without a prompt. `--yes` also installs the [status line](#status-line), except with `--team`.
+Add `--statusline` to install it in any case.
 
 The rest of the docs write commands as `eminiar <command>`. Run them as `npx eminiar <command>`,
 or install the CLI globally once with `npm install -g eminiar`.
@@ -70,7 +73,7 @@ npx eminiar doctor
 
 `doctor` checks Node.js, SQLite FTS5, `sqlite-vec`, the embedding model, the sandbox languages,
 the routing mode, coexistence with context-mode and the project root. Add `--fix` to repair the
-pinned paths. Inside Claude Code, `/em-doctor` runs the same checks.
+pinned paths. Inside Claude Code, `/eminiar:em-doctor` runs the same checks.
 
 Restart Claude Code after you install.
 
@@ -79,8 +82,10 @@ Restart Claude Code after you install.
 1. **Onboard the project.** In Claude Code, run:
 
    ```text
-   /em-onboard
+   /eminiar:em-onboard
    ```
+
+   (`/em-onboard` with a `--method settings` install.)
 
    Claude writes five onboarding memories (`overview`, `structure`, `commands`, `conventions`,
    `documentation`) under `.eminiar/memories/onboarding/`. It also builds the
@@ -133,7 +138,9 @@ This also writes the marketplace and `enabledPlugins` entries to the project's
 npx eminiar install            # add --cursor for Cursor
 ```
 
-The installer reads the committed `eminiar.config.json`.
+The installer does not read the committed `eminiar.config.json`. eminiar applies it at run time
+in that project, and the installer's final doctor step reports whether it is valid when you run
+the install from the project folder.
 
 ### What to commit
 
