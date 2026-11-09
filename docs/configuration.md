@@ -57,7 +57,7 @@ default excludes:
 | Key | Default | Description |
 |---|---|---|
 | `mode` | `"auto"` | `auto`, `enforce`, `annotate` or `off`. See [Routing](how-it-works.md#routing) |
-| `deferToContextMode` | `true` | In `auto`, only annotate while the context-mode plugin is installed |
+| `deferToContextMode` | `true` | While the context-mode plugin is installed, in every mode except `off`, eminiar gives no routing suggestion for `Bash`, `Read`, `Grep` and `WebFetch` and keeps only its own hints (symbols, coverage, file memos). `auto` also annotates instead of enforcing |
 
 ### `sandbox`
 

@@ -167,6 +167,11 @@ Set the mode with `routing.mode` in `eminiar.config.json`:
 | `annotate` | Allows the call and adds a hint |
 | `off` | No routing hints |
 
+While the context-mode plugin is installed and `routing.deferToContextMode` is `true` (the default),
+every mode except `off` stops suggesting `em_*` tools for `Bash`, `Read`, `Grep` and `WebFetch`,
+because context-mode already routes them. eminiar still adds the hints only it has: symbol matches,
+coverage warnings and file memos.
+
 **Bash is judged one simple command at a time.** A line is split at `;`, `&&`, `||` and
 newlines (heredoc bodies and quoted text are skipped), and each part is classified on its own, so
 `cd src && npm test` is heavy because of `npm test`, and the denial names that part. Output that
