@@ -5,13 +5,16 @@ import { install } from "./install.js";
 import { log } from "./shell.js";
 
 /**
- * The model cache is empty after `install --no-model`, so an empty one means that choice (or a
- * failed download, which is retried lazily on first hybrid search) and upgrade leaves it alone.
+ * Fallback for install records written before they stored `noModel`: does the model cache hold a
+ * model? Dotfiles (.DS_Store) and the adjudicator's exemplar caches live there too and do not count.
  */
 export function modelInstalled(): boolean {
   try {
     const dir = paths().models;
-    return existsSync(dir) && readdirSync(dir).length > 0;
+    return (
+      existsSync(dir) &&
+      readdirSync(dir).some((n) => !n.startsWith(".") && !n.startsWith("adjudicator-exemplars-"))
+    );
   } catch {
     return false;
   }
@@ -33,7 +36,8 @@ export async function upgrade(): Promise<number> {
     yes: true,
     // "none" means Cursor-only last time; let install() decide again from what is present.
     method: rec.method === "none" ? undefined : rec.method,
-    noModel: !modelInstalled(),
+    // The recorded choice wins; a failed first download (recorded noModel: false) is retried.
+    noModel: rec.noModel ?? !modelInstalled(),
     spec: fromCheckout ? undefined : "eminiar@latest",
     force: fromCheckout,
     node: rec.node,

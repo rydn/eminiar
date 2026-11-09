@@ -166,6 +166,7 @@ export async function install(opts: InstallOptions): Promise<number> {
     stableRoot: stable,
     fromSpec,
     installedAt: new Date().toISOString(),
+    noModel: !!opts.noModel,
     wrote,
   });
 

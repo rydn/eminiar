@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +19,7 @@ afterAll(() => {
 });
 beforeEach(() => {
   installMock.mockClear();
+  rmSync(paths().models, { recursive: true, force: true });
   mkdirSync(paths().models, { recursive: true });
   writeFileSync(
     paths().installFile,
@@ -51,5 +52,26 @@ describe("upgrade", () => {
       method: "settings",
       cursor: false,
     });
+  });
+
+  it("ignores dotfiles and adjudicator exemplar caches when judging the cache", async () => {
+    writeFileSync(join(paths().models, ".DS_Store"), "");
+    writeFileSync(join(paths().models, "adjudicator-exemplars-abc.json"), "{}");
+    expect(modelInstalled()).toBe(false);
+    await upgrade();
+    expect(installMock.mock.calls[0]?.[0]).toMatchObject({ noModel: true });
+  });
+
+  it("uses the recorded noModel choice over the cache contents", async () => {
+    const rec = JSON.parse(readFileSync(paths().installFile, "utf8"));
+    mkdirSync(join(paths().models, "Xenova"), { recursive: true });
+    writeFileSync(paths().installFile, JSON.stringify({ ...rec, noModel: true }));
+    await upgrade();
+    expect(installMock.mock.calls[0]?.[0]).toMatchObject({ noModel: true });
+    // a failed first download is recorded as noModel: false and is retried
+    rmSync(join(paths().models, "Xenova"), { recursive: true });
+    writeFileSync(paths().installFile, JSON.stringify({ ...rec, noModel: false }));
+    await upgrade();
+    expect(installMock.mock.calls[1]?.[0]).toMatchObject({ noModel: false });
   });
 });
