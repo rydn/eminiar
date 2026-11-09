@@ -4,8 +4,9 @@ import { paths } from "../paths.js";
 import { getStorage } from "../storage/index.js";
 import type { StatuslineSnapshotInput } from "../storage/types.js";
 import { formatUsd } from "../usage/pricing.js";
+import { splitSavings } from "../usage/savings.js";
 import { globalDb } from "./global.js";
-import { fmtTokens, summarize } from "./record.js";
+import { fmtTokens, type StatSummary, summarize } from "./record.js";
 
 interface RateLimit {
   used_percentage?: number;
@@ -84,6 +85,22 @@ export function usageSegments(input: StatuslineInput): string[] {
   return out;
 }
 
+/**
+ * `eminiar · ≈12k saved (≈8k measured) · ≈1.2M lifetime · 40% efficient`. Every token figure
+ * is a chars / 4 estimate, hence the ≈; the measured part is execution output really kept out
+ * of context, the rest is counterfactual (what native calls might have returned).
+ */
+export function savingsLine(session: StatSummary, life: StatSummary, measured: number): string {
+  const pct = session.rawTokens
+    ? Math.round(session.efficiency * 100)
+    : life.rawTokens
+      ? Math.round(life.efficiency * 100)
+      : 0;
+  const m = Math.min(measured, session.savedTokens);
+  const split = m > 0 && m < session.savedTokens ? ` (≈${fmtTokens(m)} measured)` : "";
+  return `eminiar · ≈${fmtTokens(session.savedTokens)} saved${split} · ≈${fmtTokens(life.savedTokens)} lifetime · ${pct}% efficient`;
+}
+
 function snapshotOf(
   input: StatuslineInput,
   sessionId: string,
@@ -144,12 +161,8 @@ export function renderStatusline(raw: string): string {
     const db = getStorage(ctx, { vectors: false });
     const session = summarize(db.statsBySession(input.session_id ?? ""));
     const life = summarize(globalDb().lifetime());
-    const pct = session.rawTokens
-      ? Math.round(session.efficiency * 100)
-      : life.rawTokens
-        ? Math.round(life.efficiency * 100)
-        : 0;
-    line = `eminiar · ${fmtTokens(session.savedTokens)} saved · ${fmtTokens(life.savedTokens)} lifetime · ${pct}% efficient`;
+    const measured = splitSavings(db.statsBySession(input.session_id ?? "")).measuredTokens;
+    line = savingsLine(session, life, measured);
     const usage = ctx.config.usage;
     if (usage.enabled && usage.statusline) {
       const segments = usageSegments(input);

@@ -15,9 +15,60 @@ import {
 
 export const FALLBACK_MODEL = "claude-sonnet-5-5";
 
+/**
+ * Tools whose `raw_chars` is output that really was produced and then kept out of context
+ * (sandbox stdout/stderr, fetched pages). Every other tool (search, docs, graph, symbols,
+ * history) records a counterfactual: the bytes a native Read/Grep/git call might have
+ * returned, such as every file a graph answer touches or every whole chunk a search hit.
+ */
+const MEASURED_TOOLS: ReadonlySet<string> = new Set([
+  "em_execute",
+  "em_execute_file",
+  "em_batch_execute",
+  "em_fetch_and_index",
+]);
+
+export type SavingsKind = "measured" | "counterfactual";
+
+/** Whether a tool's savings are measured output or a counterfactual estimate. */
+export function savingsKind(tool: string): SavingsKind {
+  return MEASURED_TOOLS.has(tool) ? "measured" : "counterfactual";
+}
+
+export interface SavingsSplit {
+  /** Estimated tokens of execution output that was produced and kept out of context. */
+  measuredTokens: number;
+  /** Estimated tokens a native call might have returned for knowledge-tool answers. */
+  counterfactualTokens: number;
+}
+
+type SplitRow = Pick<StatRow, "tool" | "raw_chars" | "returned_chars">;
+
+/**
+ * Split saved tokens into measured and counterfactual savings, from the stat rows already
+ * recorded (no new data). Each kind is netted over its own rows and floored at 0, so a tool
+ * that returned more than it read lowers its own kind only. Tokens are chars / 4 either way.
+ */
+export function splitSavings(rows: SplitRow[]): SavingsSplit {
+  const raw = { measured: 0, counterfactual: 0 };
+  const ret = { measured: 0, counterfactual: 0 };
+  for (const r of rows) {
+    const k = savingsKind(r.tool);
+    raw[k] += r.raw_chars;
+    ret[k] += r.returned_chars;
+  }
+  const saved = (k: SavingsKind) =>
+    Math.max(0, estTokensFromChars(raw[k]) - estTokensFromChars(ret[k]));
+  return { measuredTokens: saved("measured"), counterfactualTokens: saved("counterfactual") };
+}
+
 export interface PricedSavings {
-  /** Tokens kept out of context across all stat rows. */
+  /** Tokens kept out of context across all stat rows (an estimate: chars / 4). */
   savedTokens: number;
+  /** Part of savedTokens from execution output that was really produced and kept out. */
+  measuredTokens: number;
+  /** Part of savedTokens from knowledge tools, measured against a native-call counterfactual. */
+  counterfactualTokens: number;
   /** savedTokens priced at the 5-minute cache-write rate (first entry into context). */
   directUsd: number;
   /** savedTokens re-read at the cache-read rate on every later call of the session. */
@@ -62,6 +113,7 @@ export function pricedSavings(
 ): PricedSavings {
   const assumptions = [
     "Saved tokens = ceil(raw_chars / 4) - ceil(returned_chars / 4) per stat row, floored at 0 (same estimate as em_stats).",
+    "Measured savings come from execution tools (em_execute, em_execute_file, em_batch_execute, em_fetch_and_index): output that was produced and kept out of context. Counterfactual savings come from search, docs, graph, symbol and history tools: what a native Read, Grep or git call might have returned, such as every file a graph answer touches, so they can overstate.",
     "Direct savings price saved tokens at the 5-minute cache-write rate: a tool result enters context once and is written to cache on that turn.",
     "Compounding savings price saved tokens at the cache-read rate once per later API call in the same session; stat rows carry no timestamps, so half of the session's calls are taken as the expected number of later calls.",
     "Sessions with no recorded API calls earn no compounding savings.",
@@ -95,6 +147,7 @@ export function pricedSavings(
   );
 
   let savedTokens = 0;
+  let measuredTokens = 0;
   let directUsd = 0;
   let compoundingUsd = 0;
   const laterBySession = new Map<string, number>();
@@ -106,6 +159,7 @@ export function pricedSavings(
     );
     if (saved === 0) continue;
     savedTokens += saved;
+    if (savingsKind(row.tool) === "measured") measuredTokens += saved;
     const { price } = priceFor(sessionModel.get(row.session_id));
     directUsd += (saved * price.cacheWrite5m) / 1_000_000;
     const later = (bySession.get(row.session_id)?.length ?? 0) / 2;
@@ -126,5 +180,14 @@ export function pricedSavings(
   if (fallbackUsed && global)
     assumptions.push(`Some sessions had no priceable model and were priced at ${FALLBACK_MODEL}.`);
 
-  return { savedTokens, directUsd, compoundingUsd, laterCallsPerSession, model, assumptions };
+  return {
+    savedTokens,
+    measuredTokens,
+    counterfactualTokens: savedTokens - measuredTokens,
+    directUsd,
+    compoundingUsd,
+    laterCallsPerSession,
+    model,
+    assumptions,
+  };
 }
