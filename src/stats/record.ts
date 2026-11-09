@@ -60,7 +60,9 @@ export function summarize(rows: StatRow[]): StatSummary {
   const ret = rows.reduce((a, r) => a + r.returned_chars, 0);
   const rawTokens = estTokens(raw);
   const returnedTokens = estTokens(ret);
-  // per row, like splitSavings and pricedSavings: one total everywhere
+  // per row, like splitSavings and pricedSavings: project, session and dashboard totals agree.
+  // Lifetime rows are one per tool (global.db), so lifetime nets per tool and can differ
+  // slightly from the project total.
   const savedTokens = rows.reduce((a, r) => a + rowSavedTokens(r), 0);
   return {
     calls,

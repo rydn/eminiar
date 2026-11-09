@@ -227,3 +227,14 @@ describe("one saved total on every surface", () => {
     expect(usage.savings.savedTokens).toBe(1_800);
   });
 });
+
+describe("lifetime netting", () => {
+  it("project nets per (session, tool) row, lifetime nets per tool (documented difference)", () => {
+    // em_docs: s1 read nothing and returned 4000 chars, s2 read 8000 and returned 400
+    const project = summarize([row("em_docs", 0, 4_000, "s1"), row("em_docs", 8_000, 400, "s2")]);
+    // global.db keeps one lifetime row per tool: the sums of both sessions
+    const lifetime = summarize([row("em_docs", 8_000, 4_400, "lifetime")]);
+    expect(project.savedTokens).toBe(1_900);
+    expect(lifetime.savedTokens).toBe(900);
+  });
+});

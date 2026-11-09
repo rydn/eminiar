@@ -48,7 +48,10 @@ type SplitRow = Pick<StatRow, "tool" | "raw_chars" | "returned_chars">;
  * The one netting rule behind every saved-token figure (em_stats, the statusline, the
  * dashboard, em_usage): ceil(raw / 4) - ceil(returned / 4) per stat row, floored at 0. A row
  * that returned more than it read (em_symbols and em_reindex record raw 0) adds nothing and
- * takes nothing away from the other rows.
+ * takes nothing away from the other rows. Session, project and dashboard totals net per
+ * (session, tool) row; the lifetime figure nets per tool, because global.db keeps one
+ * lifetime row per tool, so it can differ slightly from the project total (about 0.1 percent
+ * on real data).
  */
 export function rowSavedTokens(r: Pick<StatRow, "raw_chars" | "returned_chars">): number {
   return Math.max(0, estTokensFromChars(r.raw_chars) - estTokensFromChars(r.returned_chars));
