@@ -52,10 +52,12 @@ changes nothing). To skip one more folder, list only that folder:
 ```
 
 In `graph.exclude` only, an entry that starts with `!` removes that exact entry from the
-built-in list, for example `"!**/vendor/**"` to parse vendored code. It never removes an entry
-a config file lists, so a project file cannot take back one of your excludes, even one that
-matches a built-in entry. The `!` entry itself is not kept. In the other two lists `!` has no
-special meaning.
+built-in list, for example `"!**/vendor/**"` to parse vendored code. It never removes any other
+entry a config file lists, so a project file cannot take back one of your own excludes. A
+personal entry that only repeats a built-in entry does not count as yours here: earlier
+versions of `eminiar install` copied the whole built-in list into `~/.eminiar/config.json`, so
+a `!` in the project file still removes it. The `!` entry itself is not kept. In the other two
+lists `!` has no special meaning.
 
 Earlier versions replaced `graph.exclude` too. If your personal config sets a short list so that
 some built-in folders get parsed, for example `["**/node_modules/**"]` to parse `build/` and

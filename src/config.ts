@@ -577,8 +577,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * in order, without repeats. They only ever skip or refuse more, so a project file can add a
  * deny rule, a disabled language or an exclude, but cannot take back a personal one.
  * NEGATABLE_LISTS also take `"!<entry>"`, which removes that entry from the built-in defaults
- * only (e.g. `"!**\/vendor/**"` to index vendored code), never one a config file listed; the
- * security lists do not.
+ * only (e.g. `"!**\/vendor/**"` to index vendored code), never another entry a config file
+ * listed; the security lists do not. A personal entry that merely repeats a built-in default
+ * does not count as personal for this: older installs froze the whole default list into the
+ * personal file, so a "!" still removes it.
  */
 export const ADDITIVE_LISTS: readonly (readonly [string, string])[] = [
   ["permissions", "extraDeny"],
@@ -620,19 +622,17 @@ function mergeLayers(layers: Record<string, unknown>[]): Record<string, unknown>
     const negatable = NEGATABLE_LISTS.has(`${section}.${key}`);
     const defaults = defaultList(section, key);
     const acc: unknown[] = [...defaults];
-    // Entries a layer listed itself: a later "!" never takes these back, even when they match
-    // a default, so a project file cannot undo a personal exclude.
-    const listed = new Set<unknown>();
+    // A "!" removes only a built-in default, so a project file cannot undo a personal entry of
+    // its own. A personal entry equal to a default is not protected: every older install wrote
+    // the whole default list into ~/.eminiar/config.json (frozenDefaults), and those copies
+    // cannot be told apart from a deliberate one.
     for (const list of lists as unknown[][])
       for (const e of list) {
         if (negatable && typeof e === "string" && e.startsWith("!")) {
           const target = e.slice(1);
           const i = acc.indexOf(target);
-          if (i >= 0 && defaults.includes(target) && !listed.has(target)) acc.splice(i, 1);
-        } else {
-          listed.add(e);
-          if (!acc.includes(e)) acc.push(e);
-        }
+          if (i >= 0 && defaults.includes(target)) acc.splice(i, 1);
+        } else if (!acc.includes(e)) acc.push(e);
       }
     out[section] = { ...(out[section] as Record<string, unknown>), [key]: acc };
   }

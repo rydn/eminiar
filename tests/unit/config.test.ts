@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, ownJson, PROJECT_RELATIVE_PATH_RE, parseJsonSafe } from "../../src/config.js";
+import { frozenDefaults } from "../../src/install/install.js";
 import { findProjectRoot, projectId } from "../../src/project.js";
 
 describe("config", () => {
@@ -122,14 +123,29 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
   });
 
   it('a project "!entry" cannot take back a personal graph.exclude entry', () => {
-    personal({ graph: { exclude: ["**/private-client/**", "**/vendor/**"] } });
-    project({ graph: { exclude: ["!**/private-client/**", "!**/vendor/**", "!**/build/**"] } });
+    personal({ graph: { exclude: ["**/secret-dir/**"] } });
+    project({ graph: { exclude: ["!**/secret-dir/**", "!**/build/**"] } });
     const ex = loadConfig(root).graph.exclude;
-    expect(ex).toContain("**/private-client/**");
-    // Also a default, but listed in the personal file: it stays.
-    expect(ex).toContain("**/vendor/**");
+    expect(ex).toContain("**/secret-dir/**");
     // A default nobody listed is still the project's to remove.
     expect(ex).not.toContain("**/build/**");
+  });
+
+  it('a project "!entry" removes a default that an older install froze into the personal file', () => {
+    // Every install before this change wrote frozenDefaults() to ~/.eminiar/config.json.
+    personal(frozenDefaults());
+    project({ graph: { exclude: ["!**/vendor/**"] } });
+    const ex = loadConfig(root).graph.exclude;
+    expect(ex).not.toContain("**/vendor/**");
+    expect(ex).toContain("**/node_modules/**");
+  });
+
+  it('a personal entry that repeats a default is removable by a project "!", others are not', () => {
+    personal({ graph: { exclude: ["**/private-client/**", "**/vendor/**"] } });
+    project({ graph: { exclude: ["!**/private-client/**", "!**/vendor/**"] } });
+    const ex = loadConfig(root).graph.exclude;
+    expect(ex).toContain("**/private-client/**");
+    expect(ex).not.toContain("**/vendor/**");
   });
 
   it("a project file adds deny rules and disabled languages but cannot remove personal ones", () => {
