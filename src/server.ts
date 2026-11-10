@@ -5,6 +5,7 @@ import { getContext } from "./context.js";
 import { kickEmbedding } from "./embeddings/queue.js";
 import { drainReindexQueue, reindexCode, reindexGitSignals } from "./graph/reindex.js";
 import { refreshHistorySummary } from "./history/model.js";
+import { remaskCapturedOutput } from "./index/indexer.js";
 import { reconcile } from "./memory/store.js";
 import { markServerAlive } from "./session/server-alive.js";
 import { getStorage } from "./storage/index.js";
@@ -122,6 +123,13 @@ const warm = setTimeout(async () => {
       refreshHistorySummary(ctx, db);
     } catch {
       // not a git repo
+    }
+    try {
+      // in slices: output indexed before secrets were masked, then on later starts what was
+      // stored since (by an older eminiar still running on this database)
+      await remaskCapturedOutput(db);
+    } catch (err) {
+      process.stderr.write(`eminiar: masking stored output skipped: ${(err as Error).message}\n`);
     }
     kickEmbedding(ctx, db, 100);
   } catch (err) {

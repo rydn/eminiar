@@ -42,6 +42,9 @@ export interface IndexResult {
  */
 const CAPTURED = new Set<Source>(["exec", "batch", "url"]);
 
+/** Bump when the masking rules change enough that stored output should be masked again. */
+const CAPTURED_MASK_VERSION = "1";
+
 /** A captured document as stored: title, content, pre-cut chunks and string meta masked. */
 function maskCaptured(input: IndexInput): IndexInput {
   const meta = input.meta
@@ -63,6 +66,84 @@ function maskCaptured(input: IndexInput): IndexInput {
       body: redactSecrets(c.body),
     })),
   };
+}
+
+/** How long one slice of the re-mask may read and mask before it writes and yields to tool calls. */
+const REMASK_SLICE_MS = 20;
+
+/**
+ * The pause after a slice that wrote. Another process waiting on the lock retries on its own
+ * schedule (every 25-50 ms by then), so a lock taken again at once would starve it; this leaves
+ * it a gap as long as the remask's longest hold.
+ */
+const REMASK_GAP_MS = 40;
+
+/** A busy database: retry after 50 ms, doubling to 2 s, and give up after this many in a row. */
+const REMASK_BUSY_TRIES = 40;
+const REMASK_BUSY_FIRST_MS = 50;
+const REMASK_BUSY_MAX_MS = 2000;
+
+/** The lock wait of the remask's own progress write (the default is 2000 ms, which stalls tool calls). */
+const REMASK_LOCK_WAIT_MS = 40;
+
+const isBusy = (err: unknown): boolean =>
+  /^SQLITE_(BUSY|LOCKED)/.test(String((err as { code?: unknown } | null)?.code ?? ""));
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)));
+
+/** `fn`, retried with a growing pause while another process holds the database. */
+async function whenFree<T>(fn: () => T): Promise<T> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return fn();
+    } catch (err) {
+      if (!isBusy(err) || tries >= REMASK_BUSY_TRIES) throw err;
+      await sleep(Math.min(REMASK_BUSY_MAX_MS, REMASK_BUSY_FIRST_MS * 2 ** (tries - 1)));
+    }
+  }
+}
+
+/**
+ * `<CAPTURED_MASK_VERSION>:<id>`: every captured document up to that id is masked under these
+ * rules. Document ids are AUTOINCREMENT, so they are never handed out again below it.
+ */
+const CAPTURED_MASK_KEY = "captured_mask_upto";
+
+/**
+ * Mask captured output stored before it was masked (or under older rules) in place. The server
+ * runs it in its warm-up on every start: the first run goes over the whole database, and later
+ * ones only over the documents stored since, which catches output that an older eminiar still
+ * running on the same database stored unmasked meanwhile. It yields every REMASK_SLICE_MS so a
+ * tool call is never queued behind it, pauses REMASK_GAP_MS after each write so hooks get the
+ * lock, waits out a busy database (a second server starting with this one), and records where it
+ * got to after each slice, so a server stopped halfway resumes there. Hooks never run it. Returns
+ * the number of rows (chunks and document titles) that changed.
+ */
+export async function remaskCapturedOutput(db: StorageAdapter): Promise<number> {
+  const saved = db.metaGet(CAPTURED_MASK_KEY);
+  const [version, id] = (saved ?? "").split(":");
+  let afterId = version === CAPTURED_MASK_VERSION ? Number(id) || 0 : 0;
+  let pointer = saved;
+  let changed = 0;
+  const shortWait = <T>(fn: () => T): T =>
+    db.adjudicator.withLockWait ? db.adjudicator.withLockWait(REMASK_LOCK_WAIT_MS, fn) : fn();
+  for (;;) {
+    const slice = await whenFree(() =>
+      db.remaskDocuments([...CAPTURED], redactSecrets, afterId, REMASK_SLICE_MS),
+    );
+    changed += slice.changed;
+    afterId = slice.lastId;
+    // Written after the slice, not inside its transactions: a stop between the two only redoes
+    // documents that are already masked, which changes nothing.
+    const next = `${CAPTURED_MASK_VERSION}:${afterId}`;
+    if (next !== pointer) {
+      await whenFree(() => shortWait(() => db.metaSet(CAPTURED_MASK_KEY, next)));
+      pointer = next;
+    }
+    if (slice.done) return changed;
+    await sleep(slice.wrote ? REMASK_GAP_MS : 0);
+  }
 }
 
 /** Chunk + store one piece of content. Unchanged uri+content is a no-op (created=false). */

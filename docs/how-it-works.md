@@ -344,11 +344,13 @@ opaque token printed on its own line, a password in prose) is stored as printed.
 
 Stored as written: your prompts, Claude's replies, subagent reports and the command line that
 session events record for each tool call (session history indexes some of these for `em_recall`),
-pages indexed by `em_docs`, and the fetch cache in the global database. Output stored by an older
-version keeps its text: command and page output until `eminiar purge index --yes`, error
-text in session history until `em_purge {scope: "sessions"}`.
-Text that a delete replaces can stay in free database pages until SQLite reuses them;
-`eminiar purge <scope> --yes` runs a VACUUM.
+pages indexed by `em_docs`, and the fetch cache in the global database. Command and page
+output stored by an older version is masked in place, each document as one text, by the server in
+the background after it starts (in short slices, resuming where it stopped); each later start goes
+over what was stored since, which catches output from an older eminiar still running. Error text that session history kept before
+then stays as it was until `em_purge {scope: "sessions"}`. Text that a mask or a delete replaces
+can stay in free database pages until SQLite reuses them; `eminiar purge <scope> --yes` runs a
+VACUUM.
 
 `em_purge {scope: "sessions"}` deletes the captured events with the session history `em_recall`
 searches; command output belongs to the `index` scope.
