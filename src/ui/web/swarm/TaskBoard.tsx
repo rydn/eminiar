@@ -1,8 +1,22 @@
 import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
-import { api, type SwarmTask, type SwarmTaskFull, type SwarmWorkerUi } from "../api.js";
+import {
+  api,
+  type SwarmDecision,
+  type SwarmTask,
+  type SwarmTaskFull,
+  type SwarmWorkerUi,
+} from "../api.js";
 import { cls } from "../util.js";
 import { Head, pure, RoleChip, State, useNow } from "./bits.js";
+import {
+  adviceVerb,
+  DecisionChip,
+  effortLabel,
+  followText,
+  notDispatchedLabel,
+  ranModel,
+} from "./decision.js";
 import { GLYPH, rel, shortAgent } from "./style.js";
 
 /** Columns, and whether a column lists the most recently changed tasks first. */
@@ -55,8 +69,10 @@ function Card({
   workers,
   byId,
   now,
+  decision,
 }: {
   t: SwarmTask;
+  decision: SwarmDecision | undefined;
   roles: string[];
   workers: Map<string, SwarmWorkerUi>;
   byId: Map<number, SwarmTask>;
@@ -88,6 +104,7 @@ function Card({
           <span class="who" title={t.agent_id ?? undefined}>
             {holder(t, workers)}
           </span>
+          <DecisionChip d={decision} />
           {t.files.length ? (
             <span class="files" title={t.files.join("\n")}>
               {t.files.length} file{t.files.length === 1 ? "" : "s"}
@@ -143,6 +160,17 @@ function Card({
               ))}
             </div>
           ) : null}
+          {decision?.advice || decision?.ran ? (
+            <div class="lbl">
+              {decision.ran
+                ? `ran ${ranModel(decision) ?? "n/a"} · ${effortLabel(decision)}`
+                : notDispatchedLabel(decision)}
+              {decision.advice
+                ? ` · ${adviceVerb(decision)} ${decision.advice.model ?? "no model"} · ${decision.advice.effort ?? "n/a"}`
+                : " · no suggestion"}
+              {` · ${followText(decision)}`}
+            </div>
+          ) : null}
           <div class="lbl">
             created by {t.created_by ?? "n/a"} · {new Date(t.created_at).toLocaleString()}
           </div>
@@ -159,7 +187,9 @@ function Column({
   workers,
   byId,
   now,
+  decisions,
 }: {
+  decisions: Record<number, SwarmDecision> | undefined;
   label: string;
   tasks: SwarmTask[];
   roles: string[];
@@ -176,7 +206,15 @@ function Column({
         <span class="n">{tasks.length}</span>
       </div>
       {tasks.slice(0, cap).map((t) => (
-        <Card key={t.id} t={t} roles={roles} workers={workers} byId={byId} now={now} />
+        <Card
+          key={t.id}
+          t={t}
+          roles={roles}
+          workers={workers}
+          byId={byId}
+          now={now}
+          decision={decisions?.[t.id]}
+        />
       ))}
       {rest > 0 ? (
         <button
@@ -198,7 +236,9 @@ function TaskBoardView({
   roles,
   live,
   skew,
+  decisions,
 }: {
+  decisions: Record<number, SwarmDecision> | undefined;
   tasks: SwarmTask[];
   workers: SwarmWorkerUi[];
   roles: string[];
@@ -227,6 +267,7 @@ function TaskBoardView({
                 workers={wmap}
                 byId={byId}
                 now={now}
+                decisions={decisions}
               />
             );
           })}

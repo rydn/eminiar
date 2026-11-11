@@ -64,7 +64,7 @@ default excludes:
 | Key | Default | Description |
 |---|---|---|
 | `timeoutMs` | `60000` | Time limit for one run |
-| `maxOutputBytes` | `2097152` (2 MB) | Output cap per run |
+| `maxOutputBytes` | `2097152` (2 MB) | Output cap per stream in one run: stdout stops at this many bytes, stderr keeps its last this many characters |
 | `indexThreshold` | `5120` (5 KB) | Output larger than this is indexed, and only matching sections return |
 | `envAllow` | `[]` | Extra environment variable names to pass to the sandbox |
 | `disabledLanguages` | `[]` | Languages to turn off, for example `["php"]` |
@@ -121,6 +121,11 @@ default excludes:
 |---|---|---|
 | `dir` | `".eminiar/memories"` | Where memory files live, relative to the project root |
 
+`memories.dir` must be a path inside the project, by the same rule as `docs.manifest` below: an
+absolute path, a drive letter, a `..` segment or a control character is refused, and a config
+file that sets one is ignored for that key only, with a stderr note. Sessions repair missing or stale
+headers of the memory files there, so a cloned repo must not aim it at your other files.
+
 ### `recall`
 
 | Key | Default | Description |
@@ -162,7 +167,9 @@ note says so; the next layer's or the default value applies, and the rest of bot
   regular file; reads still follow a symlink that stays inside the project);
 - it is not a manifest this version can rewrite without losing data: `version` other than `1`,
   top-level keys other than `version` and `sources`, a `sources` that is not an array, or an
-  entry that is not valid (bad name, duplicate, unknown kind);
+  entry that is not valid (bad name, duplicate, unknown kind, a `path` outside the project; a
+  stderr note names a source dropped for its path, and `em_docs remove` of that name still
+  works because the write loses nothing else);
 - it could not be read (too large, not a regular file, not JSON, a merge conflict).
 
 The refusal names the file and the reason; fix or move the file, then retry. Hooks and other
@@ -263,7 +270,7 @@ only:
 | `EMINIAR_EMBEDDINGS=0` | Turns off embeddings |
 | `EMINIAR_HOME` | Moves the data directory (default `~/.eminiar`). A `config.json` there that lies inside or above the project (or any git work tree around it, a submodule's superproject included), or a relative `EMINIAR_HOME`, cannot set the adjudicator's provider, consent, endpoints, `keyEnv`, privacy, budget, timeouts, apply mode, `apply` or `tiers`, since a repo's `.claude/settings.json` could set this variable. The same applies when `HOME` is moved into the project |
 | `CURSOR_CONFIG_DIR` | Where `install --cursor` writes Cursor's `hooks.json`, `mcp.json` and `skills/` (default `~/.cursor`) |
-| `EMINIAR_PROJECT_ROOT` | Sets the project root. Otherwise `CLAUDE_PROJECT_DIR`, then the current directory |
+| `EMINIAR_PROJECT_ROOT` | Sets the project root of the MCP server and the CLI. Otherwise `CLAUDE_PROJECT_DIR`, then the current directory. Under Claude Code and Cursor the hooks always use `CLAUDE_PROJECT_DIR`, so setting this for a session puts the hooks and the server in different projects. `SessionStart` exports it to Bash commands through `CLAUDE_ENV_FILE`, so `eminiar` run from Bash uses the session's project; a `claude` started from Bash inherits it too, and its server then uses the outer session's project |
 | `EMINIAR_DEBUG` | Prints stack traces from the CLI |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own variable for its config directory (default `~/.claude`). eminiar follows it for settings, permission rules, agents, plugins, transcripts and `.claude.json`, which then lives inside that directory instead of at `~/.claude.json` |
 | `CLAUDE_CODE_PLUGIN_CACHE_DIR` | Claude Code's own variable for its plugins root (default `plugins/` in the config directory). eminiar follows it for `installed_plugins.json`, the plugin cache and plugin agents |

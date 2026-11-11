@@ -787,8 +787,22 @@ export interface SwarmSegment {
   io: Record<SwarmIo, number>;
   open?: boolean;
 }
+export type {
+  DecisionFollow as SwarmDecisionFollow,
+  SwarmDecision,
+  SwarmDecisionAdvice,
+  SwarmDecisionRan,
+} from "../../adjudicator/swarm-decisions.js";
 export interface SwarmRunDetail {
   run: RunRow;
+  /** The adjudicator's decision per task id (newer servers). */
+  decisions?:
+    | Record<number, import("../../adjudicator/swarm-decisions.js").SwarmDecision>
+    | undefined;
+  /** Opaque hash of the decisions map; send it back as `decisionsHash` to skip an unchanged map. */
+  decisionsHash?: string | undefined;
+  /** `decisions` was left out because `decisionsHash` still matches the client's. */
+  decisionsUnchanged?: boolean | undefined;
   /** Every task, or with `tasksPartial` only those updated since `tasksSince`. */
   tasks: SwarmTask[];
   /** How many tasks the run has (newer servers). */
@@ -849,6 +863,7 @@ export interface SwarmFinishResult {
 }
 export interface SwarmTaskFull {
   task: SwarmTask;
+  decision?: import("../../adjudicator/swarm-decisions.js").SwarmDecision;
 }
 export interface SwarmSyncResult {
   actions: Array<{ agentType: string; path: string; action: string; reason?: string }>;

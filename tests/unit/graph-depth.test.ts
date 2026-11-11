@@ -1,12 +1,12 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ConfigSchema } from "../../src/config.js";
 import type { ProjectContext } from "../../src/context.js";
 import { architecture, formatArchitecture } from "../../src/graph/architecture.js";
-import { detectChanges } from "../../src/graph/changes.js";
+import { detectChanges, isDiffRef } from "../../src/graph/changes.js";
 import { readClusters, readCycles } from "../../src/graph/metrics.js";
 import { deadCode, hotspots, impact, pattern, routes } from "../../src/graph/query.js";
 import { indexFreshness, reindexCode, reindexGitSignals } from "../../src/graph/reindex.js";
@@ -281,6 +281,25 @@ describe("index pipeline", () => {
     expect(detectChanges(db, root, { ref: "HEAD~1" }).symbols.map((s) => s.name)).toContain(
       "helper",
     );
+  });
+
+  it("never hands git an option as the diff ref", () => {
+    const good = ["HEAD~1", "main...HEAD", "v1.2.0", "a1b2c3d", "origin/x", "main@{2 weeks ago}"];
+    for (const ref of good) expect(isDiffRef(ref), ref).toBe(true);
+    for (const ref of ["", "-p", "--output=x", "--no-index", "a\nb", "a\u0000b"])
+      expect(isDiffRef(ref), JSON.stringify(ref)).toBe(false);
+    // `git diff --output=<file>` truncates <file> and writes the diff there, even outside the repo
+    const outside = join(mkdtempSync(join(tmpdir(), "em-victim-")), "victim.txt");
+    const inside = join(root, "victim.txt");
+    for (const f of [outside, inside]) writeFileSync(f, "keep\n");
+    try {
+      for (const ref of [`--output=${outside}`, "--output=victim.txt"])
+        expect(() => detectChanges(db, root, { ref }), ref).toThrow(/not a ref/);
+      for (const f of [outside, inside]) expect(readFileSync(f, "utf8")).toBe("keep\n");
+    } finally {
+      rmSync(inside, { force: true });
+      rmSync(dirname(outside), { recursive: true, force: true });
+    }
   });
 
   it("promotes demoted edges once the target symbol appears", async () => {

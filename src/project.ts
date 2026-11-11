@@ -25,9 +25,9 @@ export function findProjectRoot(start: string): string {
 }
 
 /**
- * The MCP server does not receive CLAUDE_PROJECT_DIR, so the root is resolved from
- * (1) an explicit hint (tool arg), (2) EMINIAR_PROJECT_ROOT / CLAUDE_PROJECT_DIR env,
- * (3) walking up from cwd.
+ * The root for the MCP server, the CLI and the tools: (1) an explicit hint (tool arg),
+ * (2) EMINIAR_PROJECT_ROOT / CLAUDE_PROJECT_DIR env (Claude Code sets the latter for the MCP
+ * server too), (3) walking up from cwd.
  */
 export function resolveProjectRoot(hint?: string): string {
   const candidate =
@@ -38,6 +38,20 @@ export function resolveProjectRoot(hint?: string): string {
   } catch {
     return root;
   }
+}
+
+/**
+ * This session's project root: CLAUDE_PROJECT_DIR (Claude Code sets it per hook command for
+ * THIS session, and it stays put when Claude cd's), then EMINIAR_PROJECT_ROOT (inherited by
+ * nested `claude` processes started from Bash, so it must not win), then `cwd` (a hook
+ * payload's, which follows the cd; the only signal a CLI or test call gives), then the process
+ * cwd. Unlike resolveProjectRoot, which the MCP server uses, the hook order puts the
+ * per-session variable first.
+ */
+export function sessionRoot(cwd?: string): string {
+  return resolveProjectRoot(
+    process.env.CLAUDE_PROJECT_DIR || process.env.EMINIAR_PROJECT_ROOT || cwd || process.cwd(),
+  );
 }
 
 /** Stable per-project identifier used for the data directory name. */

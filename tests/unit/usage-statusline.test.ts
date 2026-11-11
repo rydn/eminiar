@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -171,6 +171,23 @@ describe("renderStatusline", () => {
     expect(line).not.toContain("$");
     expect(db.statuslineSnapshots({ sessionId: "sl-off" })).toHaveLength(0);
     writeConfig({ budgets: { sessionUsd: 0.5 } });
+  });
+
+  it("records under the session's project_dir after Claude cd's into a nested repo", () => {
+    const sub = join(root, "sub");
+    mkdirSync(join(sub, ".git"), { recursive: true });
+    dropRenderCache();
+    renderStatusline(
+      JSON.stringify(
+        statusline({
+          session_id: "sl-cd",
+          cwd: sub,
+          workspace: { current_dir: sub, project_dir: root },
+        }),
+      ),
+    );
+    expect(db.statuslineSnapshots({ sessionId: "sl-cd" })).toHaveLength(1);
+    expect(existsSync(getContext(sub).dbPath)).toBe(false);
   });
 
   it("renders the base line when the input carries no usage figures", () => {

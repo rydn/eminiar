@@ -16,7 +16,7 @@ interface RateLimit {
 export interface StatuslineInput {
   session_id?: string;
   cwd?: string;
-  workspace?: { current_dir?: string };
+  workspace?: { current_dir?: string; project_dir?: string };
   model?: { id?: string; display_name?: string };
   cost?: {
     total_cost_usd?: number;
@@ -140,7 +140,11 @@ export function renderStatusline(raw: string): string {
   }
   let line: string;
   try {
-    const ctx = getContext(input.cwd ?? input.workspace?.current_dir);
+    // project_dir is where the session started, the root the MCP server records stats in;
+    // cwd and current_dir follow Claude's `cd`.
+    const ctx = getContext(
+      input.workspace?.project_dir ?? input.cwd ?? input.workspace?.current_dir,
+    );
     const db = getStorage(ctx, { vectors: false });
     const session = summarize(db.statsBySession(input.session_id ?? ""));
     const life = summarize(globalDb().lifetime());

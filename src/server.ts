@@ -5,6 +5,7 @@ import { getContext } from "./context.js";
 import { kickEmbedding } from "./embeddings/queue.js";
 import { drainReindexQueue, reindexCode, reindexGitSignals } from "./graph/reindex.js";
 import { refreshHistorySummary } from "./history/model.js";
+import { remaskCapturedOutput } from "./index/indexer.js";
 import { reconcile } from "./memory/store.js";
 import { markServerAlive } from "./session/server-alive.js";
 import { getStorage } from "./storage/index.js";
@@ -52,8 +53,8 @@ for (const tool of listed) {
     tool.name,
     {
       description: tool.description,
-      // Every tool accepts an optional project_root because the MCP server is not told
-      // CLAUDE_PROJECT_DIR; without it the root is resolved from cwd.
+      // Every tool accepts an optional project_root, for a caller whose project is not the
+      // server's own (the em_swarm stamp hook names the session's); without it, the server's.
       inputSchema: { ...tool.schema, project_root: z.string().optional() },
     },
     async (args: Record<string, unknown>) => {
@@ -122,6 +123,13 @@ const warm = setTimeout(async () => {
       refreshHistorySummary(ctx, db);
     } catch {
       // not a git repo
+    }
+    try {
+      // in slices: output indexed before secrets were masked, then on later starts what was
+      // stored since (by an older eminiar still running on this database)
+      await remaskCapturedOutput(db);
+    } catch (err) {
+      process.stderr.write(`eminiar: masking stored output skipped: ${(err as Error).message}\n`);
     }
     kickEmbedding(ctx, db, 100);
   } catch (err) {

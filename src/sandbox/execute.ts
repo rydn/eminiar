@@ -66,13 +66,15 @@ export async function execute(ctx: ProjectContext, input: ExecuteInput): Promise
 }
 
 export function describeRun(r: RunResult): string {
-  const kb = (r.stdout.length / 1024).toFixed(1);
+  const kb = (s: string) => (s.length / 1024).toFixed(1);
   const parts = [
     `exit ${r.exitCode ?? (r.signal ? `signal ${r.signal}` : "?")}`,
-    `${kb} KB stdout`,
-    `${(r.durationMs / 1000).toFixed(1)}s`,
+    `${kb(r.stdout)} KB stdout`,
   ];
+  if (r.stderr.trim()) parts.push(`${kb(r.stderr)} KB stderr`);
+  parts.push(`${(r.durationMs / 1000).toFixed(1)}s`);
   if (r.timedOut) parts.push("TIMED OUT");
   if (r.truncated) parts.push("TRUNCATED at output cap");
+  if (r.stderrDropped) parts.push(`stderr TRUNCATED (${r.stderrDropped} earlier chars dropped)`);
   return parts.join(" · ");
 }

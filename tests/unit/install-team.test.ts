@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ConfigSchema, loadConfig } from "../../src/config.js";
 import { writeInstallRecord } from "../../src/install/claude-config.js";
@@ -26,6 +27,7 @@ afterAll(() => {
   else process.env.CLAUDE_CONFIG_DIR = saved.claude;
 });
 
+const repoHooks = fileURLToPath(new URL("../../hooks/hooks.json", import.meta.url));
 const json = (f: string) => JSON.parse(readFileSync(f, "utf8"));
 
 describe("writeTeamFiles: additions only", () => {
@@ -146,6 +148,8 @@ describe("uninstall", () => {
   it("removes the hooks it registered, keeps foreign ones, and drops the install record", async () => {
     const stable = mkdtempSync(join(tmpdir(), "em-stable-"));
     mkdirSync(join(stable, "bin"));
+    mkdirSync(join(stable, "hooks"));
+    writeFileSync(join(stable, "hooks", "hooks.json"), readFileSync(repoHooks, "utf8"));
     mkdirSync(join(stable, "skills", "em-demo"), { recursive: true });
     writeFileSync(join(stable, "skills", "em-demo", "SKILL.md"), "demo");
     writeFileSync(

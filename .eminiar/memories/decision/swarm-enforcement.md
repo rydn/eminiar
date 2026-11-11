@@ -5,7 +5,7 @@ status: accepted
 tags: []
 related: []
 created: 2026-10-28T09:24:21.353Z
-updated: 2026-10-28T10:15:45.007Z
+updated: 2026-11-08T17:34:36.613Z
 ---
 
 Swarm enforcement (run 20261028-f66150, branch feature/agent-swarms / PR #32, v0.12.0, 2026-10-28; docs/swarms.md "Enforcement"). Opt-in through two top-level keys in .eminiar/swarm.yaml: `enforce: true` (default false) and `allowed_agents: [...]` (exact agent types, no swarm- entries, ignored unless enforce is on). While enforcing, PreToolUse(Agent|Task) (swarmPreAgent):
@@ -17,7 +17,7 @@ Swarm enforcement (run 20261028-f66150, branch feature/agent-swarms / PR #32, v0
 WHICH FILE GOVERNS: enforcement and the SessionStart text come ONLY from the session root (sessionRoot(): CLAUDE_PROJECT_DIR, then EMINIAR_PROJECT_ROOT, then cwd) plus its coordinationRoot. A repo Claude cd's into never turns enforcement on or off; an earlier "any file enforces" rule let a cloned repo lock out a non-opted-in session. Tracking (swarmScope) is broader: session root first, then the hook cwd's root.
 
 FAIL-CLOSED is in-process and only on positive evidence of enforce: true:
-- An invalid file with an enforce line denies everything (enforceIntent: a line regex that agrees with the parser on true/True/TRUE, quoted keys, BOM, CRLF and comments; table in tests/unit/swarm-enforce-forms.ts).
+- An invalid file with an enforce line denies everything (enforceIntent: a line regex that agrees with the parser on true/True/TRUE, quoted keys, BOM, CRLF and comments; table in tests/unit/swarm-enforce-forms.ts). A key this version does not know does not make the file invalid (swarm/unknown-keys-forward-compatible), so a newer teammate's key no longer locks older installs out; a typo of a known key and a bad value still do.
 - A check error denies; a busy DB gets a retry deny.
 - A handler crash is caught by the dispatch.ts failClosed fallback.
 - No node or no install: the bin/em-hook swarm_gate shim denies.

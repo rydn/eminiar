@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -29,10 +29,13 @@ const HOOKS = "../../src/adjudicator/hooks.js";
 const ADJUDICATOR_DIR = join(__dirname, "../../src/adjudicator");
 /**
  * The rest of src/adjudicator, probed too. types.ts is left out: src/config.ts imports its
- * constants (MODES, PROVIDER_IDS, TIERS) in every hook process. hooks.ts has the stand-in.
+ * constants (MODES, PROVIDER_IDS, TIERS) in every hook process. So is redact.ts: the index masks
+ * captured output with its redactSecrets() in every hook process (pure text rules, no adjudicator
+ * state or call-out). hooks.ts has the stand-in.
  */
+const NOT_PROBED = new Set(["types.ts", "redact.ts", "hooks.ts"]);
 const OTHER_MODULES = readdirSync(ADJUDICATOR_DIR, { recursive: true, encoding: "utf8" })
-  .filter((f) => f.endsWith(".ts") && f !== "types.ts" && f !== "hooks.ts")
+  .filter((f) => f.endsWith(".ts") && !NOT_PROBED.has(f))
   .sort();
 
 /** What the probes recorded since the last boot(). */
@@ -463,7 +466,14 @@ describe("adjudicator off: hooks.ts is never imported", () => {
     expect(probe.evaluated).toEqual(["Notification"]);
   });
 
-  it("imports no other adjudicator module either: only types.ts, which src/config.ts needs", async () => {
+  it("keeps redact.ts, which hooks load while it is off, free of other modules", () => {
+    const src = readFileSync(join(ADJUDICATOR_DIR, "redact.ts"), "utf8");
+    const specifiers = [...src.matchAll(/^import[^"]*"([^"]+)";$/gm)].map((m) => m[1]);
+    expect(specifiers.length).toBeGreaterThan(0);
+    expect(specifiers.filter((s) => !s?.startsWith("node:"))).toEqual([]);
+  });
+
+  it("imports no other adjudicator module either: only types.ts and redact.ts, which config and the index need", async () => {
     const w = await boot();
     expect(OTHER_MODULES).toEqual(expect.arrayContaining(["engine.ts", "providers/http.ts"]));
     await runSession(w);
