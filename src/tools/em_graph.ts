@@ -299,7 +299,8 @@ export const emGraphImpact = defineTool({
 
 export const emGraphAdd = defineTool({
   name: "em_graph_add",
-  annotations: LOCAL_WRITE,
+  // The upsert replaces an existing node's kind, name and location, as em_remember replaces a memory.
+  annotations: { ...LOCAL_WRITE, destructiveHint: true },
   description:
     "Add curated knowledge to the graph: concept nodes (components, services, decisions) and relations between them or to files/symbols. Node ids: file:<path>, sym:<path>#<Name>, pkg:<name>, person:<name>, concept:<slug>. Bare names become concepts.",
   schema: {

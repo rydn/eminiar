@@ -105,6 +105,14 @@ describe("destructiveHint follows the input schema", () => {
     }
   });
 
+  it("em_graph_add replaces existing nodes, so it is destructive", () => {
+    expect(byName("em_graph_add").annotations.destructiveHint).toBe(true);
+  });
+
+  it("em_adjudicate score stores a new decision each call, so it is not idempotent", () => {
+    expect(byName("em_adjudicate").annotations.idempotentHint).toBe(false);
+  });
+
   it("the command runners are not read-only, destructive and open-world", () => {
     for (const n of ["em_execute", "em_execute_file", "em_batch_execute"])
       expect(byName(n).annotations, n).toMatchObject({
