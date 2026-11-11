@@ -68,12 +68,19 @@ Agent swarms (opt-in: .eminiar/swarm.yaml)
                                tool); exits when the run finishes. --json on the others
 
 Playbooks (stored recurring tasks; eminiar never runs or schedules them)
-  playbook list [--tag t] | show <name> | rm <name>
+  playbook list [--tag t] [--limit N] | show <name> | rm <name>
   playbook add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]]
                                [--schedule S] [--tag t] [--private] [--replace]
-  playbook edit <name> [--title T] [--prompt P] [--param ...] [--schedule S] [--tag t]
+  playbook edit <name> [--title T] [--prompt P | --file F] [--param n[=default]]
+                               [--schedule S] [--tag t]
   playbook run <name> [--set k=v] [--note N]   Print the filled prompt and record a run
-  playbook runs [name] [--limit N]             Past runs. --json on all
+  playbook report <name> --status done|failed|skipped [--run ID] [--note N]   Close a run
+  playbook runs [name] [--limit N]             Past runs
+  playbook export <name> [--skill [--target DIR | --user] [--model-invocable] [--allow-private]]
+                               [--schedule] [--set k=v]   Markdown, a Claude Code skill, or
+                               a scheduled-task prompt
+  playbook scan [--dry-run]    Opt-in: suggest playbooks from recurring tasks. --json on all
+                               ("eminiar playbook help" for the full usage)
 `;
 
 type Command = (args: string[]) => Promise<number>;

@@ -378,7 +378,7 @@ can stay in free database pages until SQLite reuses them; `eminiar purge <scope>
 VACUUM.
 
 `em_purge {scope: "sessions"}` deletes the captured events with the session history `em_recall`
-searches; command output belongs to the `index` scope.
+searches, and the playbook runs and suggestions; command output belongs to the `index` scope.
 
 eminiar uses the network only to download the embedding model, to fetch pages and documentation
 that you ask it to index, to read package metadata from the npm, PyPI and Go registries, to

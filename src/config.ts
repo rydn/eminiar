@@ -425,15 +425,23 @@ const BaseConfigSchema = z.object({
         .string()
         .regex(PROJECT_RELATIVE_PATH_RE, "must be a path inside the project (no leading / or ..)")
         .default(".eminiar/playbooks-private"),
-      /** List and read playbooks (MCP tool, dashboard, CLI). */
+      /**
+       * Playbooks at all (MCP tool, CLI, dashboard). Off refuses every playbook call, read or
+       * write, and em_playbook is not listed.
+       */
       viewing: z.boolean().default(true),
-      /** Create, edit and delete playbooks, and accept or dismiss suggestions. */
+      /**
+       * Every playbook write: add, edit and delete playbooks, record and report runs, save
+       * suggestions (a scan that is not a dry run), accept or dismiss them. Off makes playbooks
+       * read-only; `run` still returns the prompt but records nothing.
+       */
       adding: z.boolean().default(true),
       extraction: z
         .object({
           /**
-           * Suggest playbooks from recurring tasks seen in session history. Off by default:
-           * nothing is read for it and nothing is suggested until this is on.
+           * Suggest playbooks from recurring tasks seen in session history (`scan`); listing,
+           * accepting and dismissing suggestions need it too. Off by default: nothing is read for
+           * it and nothing is suggested until this is on.
            */
           enabled: z.boolean().default(false),
         })

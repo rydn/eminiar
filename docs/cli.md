@@ -199,19 +199,21 @@ eminiar playbook rm <name>
 eminiar playbook run <name> [--set k=v] [--note N]   # print the filled prompt and record a run
 eminiar playbook report <name> --status done|failed|skipped [--run ID] [--note N]   # close a run (default: the newest started CLI run)
 eminiar playbook runs [name] [--limit N]       # recorded runs
-eminiar playbook export <name> [--skill [--target DIR] [--model-invocable]] [--schedule] [--set k=v]
+eminiar playbook export <name> [--skill [--target DIR | --user] [--model-invocable] [--allow-private]] [--schedule] [--set k=v]
 eminiar playbook scan [--dry-run]              # opt-in: suggest playbooks from recurring tasks
 ```
 
 `--json` works for every subcommand. `run` only prints the prompt (and warns about parameters
 left unfilled): eminiar never runs a playbook; you paste the prompt into Claude. `export` prints
 the markdown file; `--skill` writes `<target>/<name>/SKILL.md` (default `.claude/skills`) with
-`disable-model-invocation` unless you pass `--model-invocable`; `--schedule` prints text for a
+`disable-model-invocation` unless you pass `--model-invocable`. `--user` writes to
+`~/.claude/skills` instead. A private playbook is refused in a project folder git does not
+ignore, unless you pass `--allow-private`. `--schedule` prints text for a
 scheduled task. `scan` only saves suggestions, which you accept or dismiss in the dashboard or
 with `em_playbook`.
 
 The config switches exit 1 with a message naming the key: `playbooks.viewing` off, every
-subcommand but `help`; `playbooks.adding` off, `add`, `edit`, `rm` and `scan` without
+subcommand but `help`; `playbooks.adding` off, `add`, `edit`, `rm`, `report` and `scan` without
 `--dry-run` (`run` still prints the prompt, records nothing and says so on stderr);
 `playbooks.extraction.enabled` off, `scan`. See [Tools](tools.md#playbooks).
 
