@@ -262,7 +262,7 @@ function clean(f: PlaybookFields, strict: boolean, fallbackTitle: string): Clean
     bad(`schedule hint is over ${MAX_SCHEDULE} characters`);
   const tags: string[] = [];
   for (const raw of f.tags ?? []) {
-    const t = oneLine(raw).toLowerCase().slice(0, MAX_TAG);
+    const t = mask(oneLine(raw)).toLowerCase().slice(0, MAX_TAG);
     if (t && !tags.includes(t)) tags.push(t);
   }
   if (strict && tags.length > MAX_TAGS) bad(`at most ${MAX_TAGS} tags`);
@@ -684,9 +684,8 @@ export function closeRun(
       .find((r) => r.status === "started");
     if (!run) throw new Error(`playbook ${input.playbook} has no started run to report on`);
   } else {
-    run = db.playbooks
-      .runs({ playbook: input.playbook, limit: 1000 })
-      .find((r) => r.id === input.runId);
+    run = db.playbooks.getRun(input.runId);
+    if (run?.playbook !== input.playbook) run = undefined;
     if (!run) throw new Error(`no run ${input.runId} for playbook ${input.playbook}`);
     if (run.status !== "started")
       throw new Error(`run ${run.id} is already ${run.status}; a closed run is not changed`);

@@ -95,6 +95,8 @@ export function parsePlaybookFile(text: string): {
   body: string;
   hadFrontmatter: boolean;
 } {
+  // A UTF-8 byte order mark (some editors add one) would hide the opening ---.
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
   if (!/^---\r?\n/.test(text)) return { meta: {}, body: text, hadFrontmatter: false };
   const open = text.indexOf("\n") + 1;
   const close = /\n---[ \t]*(?:\r?\n|$)/.exec(text.slice(open - 1));
@@ -102,7 +104,8 @@ export function parsePlaybookFile(text: string): {
   const header = text.slice(open, open - 1 + close.index);
   const body = text.slice(open - 1 + close.index + close[0].length);
   const meta: PlaybookMeta = {};
-  for (const line of header.split(/\r?\n/)) {
+  // The close marker starts at its "\n", so a CRLF header's last line still ends in "\r".
+  for (const line of header.replace(/\r$/, "").split(/\r?\n/)) {
     const m = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
     // `__proto__: [a]` would set meta's prototype (a playbook file can come with the repo).
     if (!m || UNSAFE_KEYS.has(m[1]!)) continue;

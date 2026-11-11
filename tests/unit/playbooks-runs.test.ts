@@ -95,6 +95,7 @@ describe("closing a run", () => {
       playbooks: {
         get: (n: string) => db.playbooks.get(n),
         runs: () => stale,
+        getRun: (id: number) => stale.find((r) => r.id === id),
         runSetStatus: (...a: Parameters<typeof db.playbooks.runSetStatus>) =>
           db.playbooks.runSetStatus(...a),
       },
