@@ -12,6 +12,7 @@ export const VIEWS = [
   "coverage",
   "sessions",
   "swarm",
+  "playbooks",
   "adjudicator",
   "system",
 ] as const;
