@@ -99,7 +99,7 @@ tables below.
 | `timeoutMs` | `60000` | Time limit for one run |
 | `maxOutputBytes` | `2097152` (2 MB) | Output cap per stream in one run: stdout stops at this many bytes, stderr keeps its last this many characters |
 | `indexThreshold` | `5120` (5 KB) | Output larger than this is indexed, and only matching sections return |
-| `envAllow` | `[]` | Extra environment variable names to pass to the sandbox. `*` matches any characters (`"MY_*"`). A name the sandbox always withholds (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`, `*_API_KEY`) passes only when listed exactly, never through a glob, and only from your own `~/.eminiar/config.json`: an `eminiar.config.json` in the project, or a personal config the repo places inside the project (by pointing `EMINIAR_HOME` there), has that entry ignored, with a note on stderr |
+| `envAllow` | `[]` | Extra environment variable names to pass to the sandbox. `*` matches any characters (`"MY_*"`). A name the sandbox always withholds (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`, `*_API_KEY`) passes only when listed exactly, never through a glob. Only your personal config (`~/.eminiar/config.json`, or `$EMINIAR_HOME/config.json` when that is outside the project) can set it. In an `eminiar.config.json` in the project, or in a personal config the repo places inside the project, the whole key is ignored with a note on stderr, so a cloned repo cannot choose which of your variables its scripts see |
 | `disabledLanguages` | `[]` | Languages to turn off, for example `["php"]`. Adds to the earlier layers |
 
 ### `search`
