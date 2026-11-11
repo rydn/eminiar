@@ -45,6 +45,7 @@ import type {
   VocabTerm,
 } from "../types.js";
 import { SqliteAdjudicatorStore } from "./adjudicator.js";
+import { SqlitePlaybookStore } from "./playbooks.js";
 import { migrations, vecTableSql } from "./schema.js";
 import { SqliteSwarmStore } from "./swarm.js";
 
@@ -278,6 +279,7 @@ export class SqliteAdapter implements StorageAdapter {
   readonly vectors: boolean;
   readonly swarm: SqliteSwarmStore;
   readonly adjudicator: SqliteAdjudicatorStore;
+  readonly playbooks: SqlitePlaybookStore;
   private readonly stmts = new Map<string, Database.Statement<unknown[], unknown>>();
   /** remaskDocuments' read-ahead, kept between its slices. */
   private remaskQueue: RemaskQueue | undefined;
@@ -309,6 +311,7 @@ export class SqliteAdapter implements StorageAdapter {
     // Statements are prepared lazily, so the tables only need to exist by the first call.
     this.swarm = new SqliteSwarmStore(this.db);
     this.adjudicator = new SqliteAdjudicatorStore(this.db);
+    this.playbooks = new SqlitePlaybookStore(this.db);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
@@ -2034,6 +2037,8 @@ export class SqliteAdapter implements StorageAdapter {
         );
         // Swarm runs are session activity; deleting runs cascades to the rest of the ledger.
         this.db.exec("DELETE FROM swarm_runs;");
+        // Playbook runs and suggestions come from sessions too; the playbook files stay.
+        this.playbooks.purgeActivity();
         // The memorable events were also indexed (source "session"), and that copy is what
         // em_recall and the prompt hook recall. The index scope clears it with everything else.
         if (scope === "sessions") this.purgeDocumentsBySource("session");
@@ -2051,6 +2056,7 @@ export class SqliteAdapter implements StorageAdapter {
       if (scope === "adjudicator" || scope === "all") this.adjudicator.purge();
       if (scope === "memories" || scope === "all") {
         this.db.exec("DELETE FROM memories;");
+        this.playbooks.purgeMirror();
         // The index and graph scopes clear their own tables; a memories-only purge must
         // still drop the mirrored documents and memory nodes. The files stay on disk.
         if (scope === "memories") {
