@@ -177,7 +177,13 @@ export async function playbooksRoute(
     }
     if (path === "/api/playbooks/delete") {
       const name = strOrUndef(b.name) ?? "";
-      return ok({ removed: store.remove(ctx, db, name) });
+      const r = store.removeReport(ctx, db, name);
+      // deleting a private copy uncovers the committed file of that name: the response says so
+      return ok(
+        r.nowActive
+          ? { removed: r.removed, nowActive: r.nowActive, note: store.nowActiveNote(r.nowActive) }
+          : { removed: r.removed },
+      );
     }
     if (path === "/api/playbooks/run") {
       // "Run" copies the prompt for use: it records the use (trigger ui), nothing is executed.

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   readdirSync,
@@ -12,8 +13,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
-import { isSecretName, redactSecrets } from "../adjudicator/redact.js";
+import { basename, dirname, join } from "node:path";
+import { isSecretName, redactSecretsClean } from "../adjudicator/redact.js";
 import { hashText } from "../chunker/types.js";
 import type { ProjectContext } from "../context.js";
 import { within } from "../docs/manifest.js";
@@ -258,12 +259,20 @@ const KNOWN_KEYS = new Set([
   "updated",
 ]);
 
-/** Header keys eminiar does not know, safe to write back: values masked, secret-named keys gone. */
-function carryOver(extra: PlaybookMeta): PlaybookMeta {
+/**
+ * Header keys eminiar does not know, safe to write back: values masked, secret-named keys gone,
+ * and a key whose `key: value` line masking changes (`login: alice:pw`) gone too. `none` (a
+ * private playbook moving to the committed folder) carries nothing: no mask can vouch for a
+ * free-text value a person wrote where only they would see it.
+ */
+function carryOver(extra: PlaybookMeta, none = false): PlaybookMeta {
   const out: PlaybookMeta = {};
+  if (none) return out;
   for (const [k, v] of Object.entries(extra)) {
     if (KNOWN_KEYS.has(k) || isSecretName(k) || mask(k) !== k) continue;
-    out[k] = Array.isArray(v) ? v.map((x) => mask(oneLine(x))) : mask(oneLine(v));
+    const items = (Array.isArray(v) ? v : [v]).map((x) => oneLine(x));
+    if (items.some((x) => mask(`${k}: ${x}`) !== `${k}: ${mask(x)}`)) continue;
+    out[k] = Array.isArray(v) ? items.map(mask) : mask(items[0] ?? "");
   }
   return out;
 }
@@ -286,6 +295,58 @@ function writeAtomic(abs: string, text: string, priv: boolean): void {
     }
     throw e;
   }
+}
+
+/** The name was taken when the write came to create its file. */
+class NameTakenError extends Error {}
+
+/**
+ * Create `abs` with `text` only when nothing is there, never replacing a file: the complete tmp
+ * file is hard-linked to the final name (atomic, fails on an existing name), or, where the disk
+ * has no hard links, the final name is opened with `wx`. Returns the new file's identity so a
+ * later cleanup can tell it apart from a file someone else put there.
+ */
+function writeExclusive(abs: string, text: string, priv: boolean): { dev: number; ino: number } {
+  mkdirSync(dirname(abs), { recursive: true, ...(priv ? { mode: 0o700 } : {}) });
+  const mode = priv ? 0o600 : 0o644;
+  const taken = (e: unknown): never => {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST")
+      throw new NameTakenError(`${basename(abs)} was created by another writer meanwhile`);
+    throw e;
+  };
+  const tmp = `${abs}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, text, { flag: "wx", mode });
+    try {
+      linkSync(tmp, abs);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "ENOTSUP" && code !== "ENOSYS" && code !== "EXDEV") taken(e);
+      try {
+        writeFileSync(abs, text, { flag: "wx", mode });
+      } catch (e2) {
+        taken(e2);
+      }
+      const st = lstatSync(abs);
+      return { dev: st.dev, ino: st.ino };
+    }
+    const st = lstatSync(tmp);
+    return { dev: st.dev, ino: st.ino };
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/** Unlink `abs` only while it is still the file `id` names; true when it was removed. */
+function unlinkIfOurs(abs: string, id: { dev: number; ino: number }): boolean {
+  const st = lstatSync(abs, { throwIfNoEntry: false });
+  if (st?.dev !== id.dev || st.ino !== id.ino) return false;
+  unlinkSync(abs);
+  return true;
 }
 
 // --- field rules -----------------------------------------------------------------------
@@ -323,7 +384,8 @@ interface Clean {
   tags: string[];
 }
 
-const mask = (s: string): string => redactSecrets(s);
+// `clean`: a fullwidth or zero-width character must not hide a secret in a file that may be committed
+const mask = (s: string): string => redactSecretsClean(s);
 
 /**
  * Validate and mask the fields. `strict` (writes) throws on bad input; lenient (importing a
@@ -756,6 +818,21 @@ export function write(
   db: StorageAdapter,
   input: WriteInput,
 ): { name: string; path: string; created: boolean; row: PlaybookRow } {
+  return writePlaybook(ctx, db, input, false);
+}
+
+/**
+ * `exclusive` (accepting a suggestion) creates a new file and never replaces one, even one that
+ * appears after the existence check: a name taken meanwhile throws NameTakenError. If mirroring
+ * the new file then fails, the file is removed again, but only while it is still the one this
+ * call created.
+ */
+function writePlaybook(
+  ctx: ProjectContext,
+  db: StorageAdapter,
+  input: WriteInput,
+  exclusive: boolean,
+): { name: string; path: string; created: boolean; row: PlaybookRow } {
   assertAdding(ctx);
   assertFolders(ctx);
   // The prompt limit applies when the prompt changes: a hand-written file over it stays editable.
@@ -775,8 +852,12 @@ export function write(
       `playbook "${name}" clashes with ${variant}: names are compared without case, and a case-insensitive disk holds one file for both; rename or remove that file first`,
     );
   const exists = where !== undefined || !!db.playbooks.get(name);
-  if (exists && !input.replace)
-    throw new Error(`playbook "${name}" already exists; pass replace: true to overwrite it`);
+  if (exists && (!input.replace || exclusive))
+    throw new NameTakenError(
+      exclusive
+        ? `playbook "${name}" already exists`
+        : `playbook "${name}" already exists; pass replace: true to overwrite it`,
+    );
   const abs = absOf(ctx, name, priv);
   assertInside(ctx, abs);
   if (where !== undefined && where !== priv) assertInside(ctx, absOf(ctx, name, where));
@@ -803,7 +884,7 @@ export function write(
   // move cannot commit a secret that rode along; a key named like a secret (api_token) or one
   // whose name masking changes is dropped, as no mask can vouch for a free-text value there.
   const meta: PlaybookMeta = {
-    ...carryOver(extra),
+    ...carryOver(extra, where === true && !priv),
     name,
     title: c.title,
     created,
@@ -815,7 +896,18 @@ export function write(
   else delete meta.params;
   if (c.schedule) meta.schedule = c.schedule;
   else delete meta.schedule;
-  writeAtomic(abs, serializePlaybookFile(meta, `\n${c.prompt}\n`), priv);
+  const text = serializePlaybookFile(meta, `\n${c.prompt}\n`);
+  if (exclusive) {
+    const mine = writeExclusive(abs, text, priv);
+    try {
+      const r = syncFile(ctx, db, name, priv, { force: true })!;
+      return { name, path: relOf(ctx, name, priv), created: true, row: r.row };
+    } catch (e) {
+      if (unlinkIfOurs(abs, mine)) db.playbooks.delete(name);
+      throw e;
+    }
+  }
+  writeAtomic(abs, text, priv);
   // moved between folders: the old copy goes, so a name lives in one place only
   if (where !== undefined && where !== priv) unlinkSync(absOf(ctx, name, where));
   const r = syncFile(ctx, db, name, priv, { force: true })!;
@@ -836,6 +928,29 @@ export function remove(ctx: ProjectContext, db: StorageAdapter, name: string): b
   }
   db.playbooks.delete(name);
   return existed;
+}
+
+/**
+ * `remove`, plus what the removal uncovered. A private playbook hides a committed file of the
+ * same name; deleting the private one deletes that copy, not the name, and the committed file
+ * becomes the active playbook. `nowActive` is its path then (mirrored at once), and every surface
+ * must say so: the person never reviewed that prompt while it was hidden.
+ */
+export function removeReport(
+  ctx: ProjectContext,
+  db: StorageAdapter,
+  name: string,
+): { removed: boolean; nowActive?: string } {
+  const hidden = shadowedBy(ctx, name);
+  const removed = remove(ctx, db, name);
+  if (!removed || hidden === undefined || locate(ctx, name) !== false) return { removed };
+  syncFile(ctx, db, name, false, { force: true });
+  return { removed, nowActive: hidden };
+}
+
+/** One sentence for `removeReport`'s `nowActive`, the same on every surface. */
+export function nowActiveNote(path: string): string {
+  return `the committed playbook ${path} it hid is now active under that name; delete or edit it too if you did not mean to use it`;
 }
 
 // --- using a playbook ------------------------------------------------------------------
@@ -997,22 +1112,27 @@ export function suggestions(
   return db.playbooks.suggestions(opts as Parameters<typeof db.playbooks.suggestions>[0]);
 }
 
-/** Turn a pending suggestion into a playbook (source "suggested"); `overrides` edit it first. */
+/**
+ * Turn a pending suggestion into a playbook (source "suggested"); `overrides` edit it first.
+ *
+ * The suggestion is claimed first (pending -> accepted, one guarded UPDATE), so of two accepts
+ * of one suggestion only one goes on to write. The file is then created without replacing
+ * anything; if that fails the claim is released (back to pending, only while it is still this
+ * call's). A process killed between the claim and the write leaves an accepted suggestion
+ * without its file: accepting it again re-creates the playbook under the accepted name
+ * (`recreated: true`) instead of refusing.
+ */
 export function acceptSuggestion(
   ctx: ProjectContext,
   db: StorageAdapter,
   id: number,
   overrides: Partial<WriteInput> = {},
-): { name: string; path: string } {
+): { name: string; path: string; recreated?: true } {
   assertExtraction(ctx);
   assertAdding(ctx);
   const s = db.playbooks.suggestionGet(id);
   if (!s) throw new Error(`no suggestion with id ${id}`);
-  if (s.status !== "pending") throw new Error(`suggestion ${id} is already ${s.status}`);
-  const w = write(ctx, db, {
-    // a taken name gets a numbered one: accepting must not overwrite a playbook
-    name:
-      overrides.name ?? (isValidName(s.name) && !nameTaken(ctx, db, s.name) ? s.name : undefined),
+  const fields: WriteInput = {
     title: overrides.title ?? s.title,
     prompt: overrides.prompt ?? s.prompt,
     params: overrides.params ?? rowParams(s),
@@ -1020,14 +1140,65 @@ export function acceptSuggestion(
     tags: overrides.tags ?? rowTags(s),
     private: overrides.private,
     source: "suggested",
-  });
-  // The update only applies to a pending row. Losing the race (another process accepted it
-  // after our check) means that process owns the playbook: take ours back out.
-  if (!db.playbooks.suggestionSetStatus(id, "accepted", w.name)) {
-    remove(ctx, db, w.name);
-    throw new Error(`suggestion ${id} is already accepted or dismissed`);
+  };
+  // every field is checked before the claim, so a bad edit never leaves a claimed suggestion
+  const c = clean(fields, true, "");
+  const wanted = overrides.name?.trim();
+  if (wanted !== undefined) assertValidName(wanted);
+
+  if (s.status === "accepted" && s.playbook && isValidName(s.playbook)) {
+    const name = s.playbook;
+    if (locate(ctx, name) === undefined && caseVariant(ctx, name) === undefined) {
+      if (wanted !== undefined && wanted !== name)
+        throw new Error(
+          `suggestion ${id} was accepted as ${name}, whose file is missing; accept it again without a name to re-create it`,
+        );
+      // a mirror row whose file is gone is stale (reconcile would drop it too)
+      if (db.playbooks.get(name)) db.playbooks.delete(name);
+      try {
+        const w = writePlaybook(ctx, db, { ...fields, name }, true);
+        return { name: w.name, path: w.path, recreated: true };
+      } catch (e) {
+        if (e instanceof NameTakenError && holdsSuggestion(ctx, name, c.prompt))
+          return { name, path: relOf(ctx, name, locate(ctx, name) === true), recreated: true };
+        throw e;
+      }
+    }
   }
-  return { name: w.name, path: w.path };
+  if (s.status !== "pending") throw new Error(`suggestion ${id} is already ${s.status}`);
+
+  // a taken name gets a numbered one: accepting never overwrites a playbook
+  let name =
+    wanted ??
+    (isValidName(s.name) && !nameTaken(ctx, db, s.name) ? s.name : freeName(ctx, db, c.title));
+  for (let attempt = 0; ; attempt++) {
+    if (!db.playbooks.suggestionSetStatus(id, "accepted", name))
+      throw new Error(`suggestion ${id} is already accepted or dismissed`);
+    try {
+      const w = writePlaybook(ctx, db, { ...fields, name }, true);
+      return { name: w.name, path: w.path };
+    } catch (e) {
+      const taken = e instanceof NameTakenError;
+      // another accept of this suggestion (recovering what looked like a crashed claim) wrote it
+      if (taken && holdsSuggestion(ctx, name, c.prompt))
+        return { name, path: relOf(ctx, name, locate(ctx, name) === true) };
+      db.playbooks.suggestionRelease(id, name);
+      if (!taken || wanted !== undefined || attempt >= 3) throw e;
+      name = freeName(ctx, db, c.title);
+    }
+  }
+}
+
+/** Whether the playbook file `name` is this suggestion's: written by accept, with this prompt. */
+function holdsSuggestion(ctx: ProjectContext, name: string, prompt: string): boolean {
+  const where = locate(ctx, name);
+  if (where === undefined) return false;
+  try {
+    const f = parsePlaybookFile(readFileSync(absOf(ctx, name, where), "utf8"));
+    return f.meta.source === "suggested" && f.body.replace(/\r\n/g, "\n").trim() === prompt;
+  } catch {
+    return false;
+  }
 }
 
 export function dismissSuggestion(ctx: ProjectContext, db: StorageAdapter, id: number): boolean {

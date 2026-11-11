@@ -216,6 +216,15 @@ export class SqlitePlaybookStore implements PlaybookStore {
     );
   }
 
+  suggestionRelease(id: number, playbook: string): boolean {
+    return (
+      // only the claim this caller made (accepted under its name) goes back to pending
+      this.prep(
+        "UPDATE playbook_suggestions SET status = 'pending', playbook = NULL WHERE id = ? AND status = 'accepted' AND playbook = ?",
+      ).run(id, playbook).changes > 0
+    );
+  }
+
   purgeMirror(): void {
     this.db.exec("DELETE FROM playbooks;");
   }

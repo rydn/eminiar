@@ -10,14 +10,16 @@ import {
   closeRun,
   fillPrompt,
   list,
+  nowActiveNote,
   PlaybookGateError,
   read,
   reconcile,
   recordRun,
-  remove,
+  removeReport,
   rowParams,
   rowTags,
   runs,
+  shadowedBy,
   write,
 } from "./store.js";
 
@@ -154,6 +156,11 @@ export async function playbookCommand(
   const strs = (v: unknown): string[] =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
   const emit = (v: unknown) => io.out(JSON.stringify(v, null, 2));
+  /** The committed file a private playbook hides (as em_playbook reports it), if any. */
+  const hidesOf = (p: { name: string; private: boolean | number }): { hides?: string } => {
+    const hides = p.private ? shadowedBy(ctx, p.name) : undefined;
+    return hides ? { hides } : {};
+  };
   let limit: number | undefined;
   if (str(values.limit) !== undefined) {
     limit = Number(values.limit);
@@ -184,6 +191,7 @@ export async function playbookCommand(
               source: r.source,
               private: !!r.private,
               path: r.path,
+              ...hidesOf(r),
             })),
           );
           return 0;
@@ -198,7 +206,10 @@ export async function playbookCommand(
           const bits = [r.schedule, rowTags(r).join(","), r.private ? "private" : ""].filter(
             Boolean,
           );
-          io.out(`${r.name}  ${r.title}${bits.length ? `  [${bits.join(" | ")}]` : ""}`);
+          const hides = hidesOf(r).hides;
+          io.out(
+            `${r.name}  ${r.title}${bits.length ? `  [${bits.join(" | ")}]` : ""}${hides ? `  [hides committed ${hides}]` : ""}`,
+          );
         }
         return 0;
       }
@@ -211,9 +222,10 @@ export async function playbookCommand(
           io.err(`no playbook named "${name}"`);
           return 1;
         }
+        const hides = hidesOf(f).hides;
         if (json) {
           const { row: _row, ...rest } = f;
-          emit(rest);
+          emit({ ...rest, ...hidesOf(f) });
           return 0;
         }
         io.out(
@@ -221,6 +233,9 @@ export async function playbookCommand(
             [
               `${f.name}: ${f.title}`,
               `path: ${f.path}${f.private ? " (private)" : ""}  source: ${f.source}`,
+              hides
+                ? `hides committed ${hides} (that file has the same name and is ignored while this private one exists)`
+                : "",
               f.schedule ? `schedule: ${f.schedule} (a note; eminiar does not run it)` : "",
               f.tags.length ? `tags: ${f.tags.join(", ")}` : "",
               f.params.length
@@ -274,8 +289,14 @@ export async function playbookCommand(
 
       case "rm": {
         if (!needName()) return 2;
-        const gone = remove(ctx, db, name as string);
-        if (json) emit({ name, removed: gone });
+        const r = removeReport(ctx, db, name as string);
+        const gone = r.removed;
+        if (json)
+          emit(
+            r.nowActive ? { name, removed: gone, nowActive: r.nowActive } : { name, removed: gone },
+          );
+        else if (gone && r.nowActive)
+          io.out(`removed the private playbook ${name}; ${nowActiveNote(r.nowActive)}`);
         else if (gone) io.out(`removed ${name}`);
         else io.err(`no playbook named "${name}"`);
         return gone ? 0 : 1;
@@ -306,9 +327,15 @@ export async function playbookCommand(
           if (!(e instanceof PlaybookGateError && e.key === "playbooks.adding")) throw e;
           io.err(`run not recorded: ${e.message}`);
         }
-        if (json) emit({ name: f.name, run, prompt: filled, unfilled: missing });
+        const hides = hidesOf(f).hides;
+        if (json) emit({ name: f.name, run, prompt: filled, unfilled: missing, ...hidesOf(f) });
         else {
           io.out(filled);
+          // on stderr, so the prompt on stdout can still be piped as it is
+          if (hides)
+            io.err(
+              `note: the committed file ${hides} has the same name and is ignored (hidden by this private playbook); check it before trusting either.`,
+            );
           if (missing.length)
             io.err(
               `unfilled parameters: ${[...new Set(missing)].join(", ")} (pass --set name=value)`,
