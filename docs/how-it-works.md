@@ -270,7 +270,7 @@ root.
   A file a rule denies is skipped by the indexers and also removed from the index when an earlier
   run had indexed it; files that no longer exist leave the index on the next sync too.
 - **Environment:** the process gets a stripped environment. Credentials for `gh`, `aws`,
-  `gcloud`, `kubectl` and `docker` pass through. Add more names with `sandbox.envAllow`.
+  `gcloud`, `kubectl` and `docker` pass through. Add more names with `sandbox.envAllow` in `~/.eminiar/config.json` (a project file cannot set it).
 - **Speed:** these are the hot paths. They are designed to add about 1 ms over a raw process
   spawn. `npm run bench` measures them (see [Development](development.md#benchmarks)).
 

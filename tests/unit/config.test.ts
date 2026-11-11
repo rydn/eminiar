@@ -85,28 +85,31 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     expect(stderr()).not.toContain("using defaults");
   });
 
-  it("a project file cannot list a variable the sandbox always withholds", () => {
+  it("a project file cannot set sandbox.envAllow: the whole key is ignored", () => {
     project({
-      sandbox: {
-        envAllow: ["MY_TEAM_VAR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "FOO_*"],
-      },
+      sandbox: { envAllow: ["MY_TEAM_VAR", "ANTHROPIC_API_KEY", "FOO_*"], timeoutMs: 5000 },
     });
     const c = loadConfig(root);
-    // Only the withheld names go; ordinary names and globs stay.
-    expect(c.sandbox.envAllow).toEqual(["MY_TEAM_VAR", "FOO_*"]);
-    expect(stderr()).toContain(
-      'ignoring sandbox.envAllow ["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN"]',
-    );
-    expect(stderr()).toContain("eminiar.config.json");
+    expect(c.sandbox.envAllow).toEqual([]);
+    // the rest of the section is kept
+    expect(c.sandbox.timeoutMs).toBe(5000);
+    expect(stderr()).toContain("ignoring sandbox.envAllow in eminiar.config.json");
+    expect(stderr()).not.toContain("ANTHROPIC_API_KEY");
   });
 
-  it("the personal file may still list a withheld variable by its exact name", () => {
-    personal({ sandbox: { envAllow: ["ANTHROPIC_API_KEY"] } });
-    expect(loadConfig(root).sandbox.envAllow).toEqual(["ANTHROPIC_API_KEY"]);
+  it("a project envAllow does not replace the personal one", () => {
+    personal({ sandbox: { envAllow: ["MY_PERSONAL_VAR"] } });
+    project({ sandbox: { envAllow: ["EVIL_*"] } });
+    expect(loadConfig(root).sandbox.envAllow).toEqual(["MY_PERSONAL_VAR"]);
+  });
+
+  it("the personal file may list any name, a withheld one by its exact name too", () => {
+    personal({ sandbox: { envAllow: ["MY_VAR", "ANTHROPIC_API_KEY"] } });
+    expect(loadConfig(root).sandbox.envAllow).toEqual(["MY_VAR", "ANTHROPIC_API_KEY"]);
     expect(stderr()).not.toContain("ignoring sandbox.envAllow");
   });
 
-  it("a personal config the repo plants (EMINIAR_HOME inside the project) gets the same cut", () => {
+  it("a personal config the repo plants (EMINIAR_HOME inside the project) is cut the same way", () => {
     const planted = join(root, ".h");
     mkdirSync(planted);
     process.env.EMINIAR_HOME = planted;
@@ -114,9 +117,8 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
       join(planted, "config.json"),
       JSON.stringify({ sandbox: { envAllow: ["MY_TEAM_VAR", "OPENAI_API_KEY"] } }),
     );
-    expect(loadConfig(root).sandbox.envAllow).toEqual(["MY_TEAM_VAR"]);
-    expect(stderr()).toContain('ignoring sandbox.envAllow ["OPENAI_API_KEY"]');
-    expect(stderr()).toContain(join(planted, "config.json"));
+    expect(loadConfig(root).sandbox.envAllow).toEqual([]);
+    expect(stderr()).toContain(`ignoring sandbox.envAllow in ${join(planted, "config.json")}`);
   });
 
   it("names a bad entry of an additive list by its place in its own file", () => {
