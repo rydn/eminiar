@@ -3,7 +3,7 @@ name: em-swarm
 description: Coordinate an eminiar agent swarm from the main session — start a run of a swarm defined in .eminiar/swarm.yaml, plan small tasks, fan out worker subagents (swarm-<swarm>-<role>) in parallel, watch the task board, review the results and finish the run with a memory. Use when the user asks to run a swarm, use the X swarm, fan out workers, or parallelise a review across roles.
 user-invocable: true
 argument-hint: <swarm> <goal>
-allowed-tools: mcp__plugin_eminiar_eminiar__em_swarm, mcp__plugin_eminiar_eminiar__em_recall, mcp__plugin_eminiar_eminiar__em_history, mcp__plugin_eminiar_eminiar__em_graph_impact, mcp__plugin_eminiar_eminiar__em_architecture, mcp__plugin_eminiar_eminiar__em_symbols, mcp__plugin_eminiar_eminiar__em_remember, Agent
+allowed-tools: mcp__plugin_eminiar_eminiar__em_swarm, mcp__plugin_eminiar_eminiar__em_recall, mcp__plugin_eminiar_eminiar__em_history, mcp__plugin_eminiar_eminiar__em_graph_impact, mcp__plugin_eminiar_eminiar__em_architecture, mcp__plugin_eminiar_eminiar__em_symbols, mcp__plugin_eminiar_eminiar__em_remember, Agent, Monitor
 ---
 
 Arguments: $ARGUMENTS (first word: the swarm; the rest: the goal)
@@ -22,7 +22,7 @@ work where each step needs the previous step's exact output. Do the work directl
 
 Call `em_swarm {action:"list"}`. If it says swarms are opt-in or disabled, stop and tell the user
 how to opt in: `eminiar swarm init` (starter `.eminiar/swarm.yaml` plus generated agents), the
-"Create starter swarm.yaml" button on the dashboard's Swarms tab (`eminiar ui`), or writing the
+"Create from the starter" button on the dashboard's Swarms tab (`eminiar ui`), or writing the
 file by hand (https://github.com/rydn/eminiar/blob/main/docs/swarms.md). Do not improvise a swarm with ad-hoc subagents. If the file has
 validation errors, show them and stop. If it says the call was not stamped by eminiar's hook,
 stop and tell the user to run `eminiar upgrade` (or `eminiar install`) and check `/hooks`:

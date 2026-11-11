@@ -105,6 +105,7 @@ swarms:
         prompt: hi
 `);
     expect(c.swarms[0]!.roles[0]!).toMatchObject({ description: "shared", model: "opus" });
+    expect(c.ignoredKeys).toEqual([]);
     expect(
       invalid(
         "swarmz: {}\nswarms:\n  s: { description: d, agents: { a: { description: x } } }\n",

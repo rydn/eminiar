@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
+import { restrictDbFiles } from "../../paths.js";
 import type { SessionPatch, StorageAdapter } from "../adapter.js";
 import { topTermsOf } from "../terms.js";
 import type {
@@ -121,12 +122,167 @@ function usageWhere(
   return { where: clauses.join(" AND "), params };
 }
 
+/** A meta JSON string with its string values (one level) passed through `mask`. */
+function maskJsonStrings(json: string, mask: (text: string) => string): string {
+  try {
+    const o = JSON.parse(json) as unknown;
+    if (!o || typeof o !== "object" || Array.isArray(o)) return json;
+    const out = Object.fromEntries(
+      Object.entries(o).map(([k, v]) => [k, typeof v === "string" ? mask(v) : v]),
+    );
+    const masked = JSON.stringify(out);
+    return masked === JSON.stringify(o) ? json : masked;
+  } catch {
+    return json;
+  }
+}
+
+/**
+ * Set in the transaction that first rewrites chunks: the old text's tokens are still in the FTS
+ * index segments (a plain FTS5 delete only records a tombstone) until the segments are merged.
+ * Once no document is left the remask merges them in bounded steps and the mark goes; a run
+ * stopped before that leaves it for the next. (FTS5 secure-delete, which purge uses, is not an
+ * option here: it does its work at COMMIT, 54-192 ms for one chunk on a 1.4 GB index, so a
+ * transaction could not be kept short.)
+ */
+const REMASK_FTS_PENDING = "remask_fts_optimize";
+
+/** How far past a masked line the remask looks for the next unchanged line. */
+const RESYNC_LINES = 4096;
+
+/**
+ * The remask's write lock: one transaction writes until this has passed (at least one row), and
+ * waits this long at most for the lock. Both stay well under a hook's 250 ms lock wait.
+ */
+const REMASK_HOLD_MS = 30;
+const REMASK_LOCK_WAIT_MS = 40;
+
+/** Masked text read ahead of the writes; reading stops past it (one document may exceed it). */
+const REMASK_READ_AHEAD_CHARS = 1_000_000;
+
+/** Pages one FTS5 'merge' step may write (a few ms on a large index); a transaction runs steps until REMASK_HOLD_MS. */
+const REMASK_MERGE_PAGES = 16;
+
+/** FTS5 keeps its segment structure in this %_data row; a merge step that left it as it was had nothing to do. */
+const FTS_STRUCTURE_ROWID = 10;
+
+interface StoredChunk {
+  id: number;
+  title: string;
+  body: string;
+  start_line: number | null;
+  end_line: number | null;
+}
+
+/** One chunk's rewrite, against the text it was masked from (null: the chunk goes). */
+interface RemaskEdit {
+  id: number;
+  title: string;
+  body: string;
+  newTitle: string;
+  newBody: string | null;
+}
+
+/** A document read and masked, waiting for its rewrites to be written. */
+interface RemaskDoc {
+  id: number;
+  title: string;
+  meta: string | null;
+  newTitle: string;
+  newMeta: string | null;
+  /** In write order: the last chunk first (see remaskDocuments). */
+  edits: RemaskEdit[];
+}
+
+interface RemaskQueue {
+  sources: string;
+  /** Every document up to this id is written. */
+  from: number;
+  /** The last document read. */
+  read: number;
+  end: boolean;
+  docs: RemaskDoc[];
+  chars: number;
+}
+
+/**
+ * Each chunk's body (in `chunks` order) cut from the document they make up, masked as one text.
+ * The document is rebuilt from the chunks in order, a code chunk's lines repeated from the chunk
+ * before (the overlap) taken once. The masked text is laid back over the chunks by line: an
+ * unchanged line stays on its line, and a line that a mask rewrote (and the lines it swallowed,
+ * up to the next unchanged line) goes to the chunk its first line was in. A chunk whose lines
+ * were all swallowed gets "". Every returned body is cut from the masked text, so a mismatch in
+ * the line matching can only move masked text to a neighbouring chunk.
+ */
+function maskAcrossChunks(chunks: StoredChunk[], mask: (text: string) => string): string[] {
+  const lines: string[] = [];
+  const ranges: Array<[number, number]> = []; // each chunk's first and last line in `lines`
+  let prev: StoredChunk | undefined;
+  for (const c of chunks) {
+    const body = c.body.split("\n");
+    const [prevLo, prevHi] = ranges[ranges.length - 1] ?? [0, -1];
+    let shared = 0;
+    if (prev?.end_line && c.start_line && c.start_line <= prev.end_line) {
+      const k = Math.min(prev.end_line - c.start_line + 1, body.length, prevHi - prevLo + 1);
+      if (body.slice(0, k).every((l, i) => l === lines[prevHi - k + 1 + i])) shared = k;
+    }
+    const lo = lines.length - shared;
+    for (let i = shared; i < body.length; i++) lines.push(body[i] as string);
+    ranges.push([lo, lines.length - 1]);
+    prev = c;
+  }
+  const text = lines.join("\n");
+  const masked = mask(text);
+  if (masked === text) return chunks.map((c) => c.body);
+  // owner[j]: the line of `lines` that masked line j starts on (non-decreasing in j)
+  const out = masked.split("\n");
+  const owner = new Int32Array(out.length);
+  let i = 0;
+  for (let j = 0; j < out.length; j++) {
+    if (i >= lines.length) {
+      owner[j] = lines.length - 1;
+      continue;
+    }
+    owner[j] = i;
+    if (out[j] === lines[i]) {
+      i++;
+      continue;
+    }
+    // A rewritten line ends on the line before the one the next masked line matches; the lines
+    // left must still cover the masked lines left.
+    let end = j + 1 < out.length ? i : lines.length - 1;
+    const limit = Math.min(lines.length - 1 - (out.length - j - 1), i + RESYNC_LINES);
+    for (let b = i; b <= limit && j + 1 < out.length; b++) {
+      if (lines[b + 1] === out[j + 1]) {
+        end = b;
+        break;
+      }
+    }
+    i = end + 1;
+  }
+  const bodies: string[] = [];
+  let j = 0;
+  for (const [lo, hi] of ranges) {
+    // ranges only overlap by the shared lines, so step back to the first masked line in this one
+    while (j > 0 && (owner[j - 1] as number) >= lo) j--;
+    while (j < out.length && (owner[j] as number) < lo) j++;
+    const start = j;
+    while (j < out.length && (owner[j] as number) <= hi) j++;
+    bodies.push(out.slice(start, j).join("\n"));
+  }
+  return bodies;
+}
+
 export class SqliteAdapter implements StorageAdapter {
   readonly db: Database.Database;
   readonly vectors: boolean;
   readonly swarm: SqliteSwarmStore;
   readonly adjudicator: SqliteAdjudicatorStore;
   private readonly stmts = new Map<string, Database.Statement<unknown[], unknown>>();
+  /** remaskDocuments' read-ahead, kept between its slices. */
+  private remaskQueue: RemaskQueue | undefined;
+  /** Set when the remask wrote; its last slice then checkpoints the -wal. */
+  private remaskWrote = false;
 
   /**
    * Prepared-statement cache. better-sqlite3 compiles the SQL on every prepare(), so
@@ -149,6 +305,7 @@ export class SqliteAdapter implements StorageAdapter {
     opts: SqliteOptions = {},
   ) {
     this.db = new Database(path, { timeout: opts.busyTimeoutMs ?? 2000 });
+    restrictDbFiles(path);
     // Statements are prepared lazily, so the tables only need to exist by the first call.
     this.swarm = new SqliteSwarmStore(this.db);
     this.adjudicator = new SqliteAdjudicatorStore(this.db);
@@ -279,6 +436,238 @@ export class SqliteAdapter implements StorageAdapter {
       for (const { id } of ids) this.deleteDocument(id);
     });
     return ids.length;
+  }
+
+  /**
+   * Two phases a slice: read and mask documents ahead (no lock: masking a large document can take
+   * a while), then write what was masked in one IMMEDIATE transaction that commits once
+   * REMASK_HOLD_MS has passed, so neither this nor another process waits on it for long. A
+   * deferred transaction would read first and fail with SQLITE_BUSY_SNAPSHOT once another process
+   * committed; a busy lock throws SQLITE_BUSY out of here after REMASK_LOCK_WAIT_MS, with the
+   * read-ahead kept for the next call. A large document takes several transactions: its chunks
+   * are written last first, so a stop part-way leaves the raw start of a secret (a key's BEGIN
+   * line) for the next run to mask, never its raw tail alone. Each write is checked against the
+   * text it was masked from, so a row that changed meanwhile (another server masking it too, a
+   * document replaced) is left alone. Once no document is left, the FTS segments are merged in
+   * bounded steps (REMASK_FTS_PENDING), which takes the old text's tokens out of the index, and
+   * PRAGMA secure_delete is on for all of it, so the space the old text leaves in the file is
+   * zeroed rather than left on free pages.
+   */
+  remaskDocuments(
+    sources: string[],
+    mask: (text: string) => string,
+    afterId: number,
+    budgetMs: number,
+  ): { changed: number; lastId: number; done: boolean; wrote: boolean } {
+    const until = performance.now() + budgetMs;
+    const key = sources.join("\0");
+    let q = this.remaskQueue;
+    if (!q || q.from !== afterId || q.sources !== key) {
+      q = {
+        sources: key,
+        from: afterId,
+        read: afterId,
+        end: false,
+        docs: [],
+        chars: 0,
+      };
+      this.remaskQueue = q;
+      // a log that grew while readers held it back is cut back to this after a checkpoint
+      this.db.pragma("journal_size_limit = 67108864");
+    }
+    // `+source` keeps the plan on the id order: through the source index, SQLite sorted every
+    // matching document after the id again on each call.
+    const next = this.prep(
+      `SELECT id, title, meta FROM documents WHERE id > ? AND +source IN (${sources.map(() => "?").join(", ")}) ORDER BY id LIMIT 1`,
+    );
+    while (!q.end && q.chars < REMASK_READ_AHEAD_CHARS) {
+      const d = next.get(q.read, ...sources) as
+        | { id: number; title: string; meta: string | null }
+        | undefined;
+      if (!d) {
+        q.end = true;
+        break;
+      }
+      q.read = d.id;
+      const doc = this.remaskRead(d, mask);
+      if (doc.edits.length || doc.newTitle !== doc.title || doc.newMeta !== doc.meta) {
+        q.docs.push(doc);
+        for (const e of doc.edits) q.chars += e.body.length + (e.newBody?.length ?? 0);
+      } else if (q.docs.length) q.docs.push(doc);
+      else q.from = d.id;
+      if (performance.now() >= until) break;
+    }
+    let changed = 0;
+    let wrote = false;
+    if (q.docs.length) {
+      changed = this.remaskWrite(q);
+      wrote = true;
+    }
+    if (!q.end || q.docs.length) return { changed, lastId: q.from, done: false, wrote };
+    // the merge takes the lock again, so it waits for the next call (after the caller's pause)
+    if (this.metaGet(REMASK_FTS_PENDING) !== undefined && (wrote || this.remaskMergeStep()))
+      return { changed, lastId: q.from, done: false, wrote: true };
+    if (this.remaskWrote) {
+      this.remaskWrote = false;
+      // The -wal holds the pages as they were written; fold it into the file and cut it to zero.
+      // Best-effort and fail open: no lock wait, and a reader or writer leaves it as it is. The
+      // passive pass copies without the write lock, so the truncate holds it only briefly.
+      try {
+        this.adjudicator.withLockWait(0, () => {
+          this.db.pragma("wal_checkpoint(PASSIVE)");
+          this.db.pragma("wal_checkpoint(TRUNCATE)");
+        });
+      } catch {
+        // fail open
+      }
+    }
+    this.remaskQueue = undefined;
+    return { changed, lastId: q.from, done: true, wrote };
+  }
+
+  /** One document masked as remaskDocuments writes it: its chunks' rewrites, last chunk first. */
+  private remaskRead(
+    d: { id: number; title: string; meta: string | null },
+    mask: (text: string) => string,
+  ): RemaskDoc {
+    const rows = this.prep(
+      "SELECT id, title, body, start_line, end_line FROM chunks WHERE document_id = ? ORDER BY ord, id",
+    ).all(d.id) as StoredChunk[];
+    // The chunks were cut from unmasked text, so a secret can span two of them (a private key's
+    // base64 lines under a BEGIN line in the chunk before): mask the document as one text.
+    const bodies = maskAcrossChunks(rows, mask);
+    const edits: RemaskEdit[] = [];
+    for (let k = rows.length - 1; k >= 0; k--) {
+      const c = rows[k] as StoredChunk;
+      const title = mask(c.title);
+      const body = mask(bodies[k] as string);
+      if (title === c.title && body === c.body) continue;
+      // a chunk left with nothing was all inside a secret masked in an earlier chunk
+      edits.push({
+        id: c.id,
+        title: c.title,
+        body: c.body,
+        newTitle: title,
+        newBody: body.trim() === "" ? null : body,
+      });
+    }
+    return {
+      id: d.id,
+      title: d.title,
+      meta: d.meta,
+      newTitle: mask(d.title),
+      newMeta: d.meta === null ? null : maskJsonStrings(d.meta, mask),
+      edits,
+    };
+  }
+
+  /**
+   * Write the queue's rewrites in order in one IMMEDIATE transaction, until REMASK_HOLD_MS has
+   * passed (at least one row), with the merge mark; the queue moves on only once it commits.
+   * Returns the rows that changed.
+   */
+  private remaskWrite(q: RemaskQueue): number {
+    const done: Array<{ edits: number; row: boolean }> = [];
+    const write = this.db.transaction(() => {
+      const started = performance.now();
+      let changed = 0;
+      let rows = 0;
+      const spent = () => rows > 0 && performance.now() - started >= REMASK_HOLD_MS;
+      done.length = 0;
+      if (q.docs.some((doc) => doc.edits.length)) this.metaSet(REMASK_FTS_PENDING, "1");
+      outer: for (const doc of q.docs) {
+        const at = { edits: 0, row: false };
+        done.push(at);
+        for (const e of doc.edits) {
+          if (spent()) break outer;
+          // chunks_au / chunks_ad keep both FTS tables in step; embedded = 0 queues a new vector
+          const n =
+            e.newBody === null
+              ? this.prep("DELETE FROM chunks WHERE id = ? AND title = ? AND body = ?").run(
+                  e.id,
+                  e.title,
+                  e.body,
+                ).changes
+              : this.prep(
+                  "UPDATE chunks SET title = ?, body = ?, embedded = 0 WHERE id = ? AND title = ? AND body = ?",
+                ).run(e.newTitle, e.newBody, e.id, e.title, e.body).changes;
+          // the vector was embedded from the raw text
+          if (n && this.vectors)
+            this.prep("DELETE FROM chunk_vec WHERE chunk_id = ?").run(BigInt(e.id));
+          changed += n;
+          rows++;
+          at.edits++;
+        }
+        if (doc.newTitle !== doc.title || doc.newMeta !== doc.meta) {
+          if (spent()) break;
+          changed += this.prep(
+            "UPDATE documents SET title = ?, meta = ? WHERE id = ? AND title = ? AND meta IS ?",
+          ).run(doc.newTitle, doc.newMeta, doc.id, doc.title, doc.meta).changes;
+          rows++;
+        }
+        at.row = true;
+      }
+      return changed;
+    });
+    const changed = this.withSecureDelete(() =>
+      this.adjudicator.withLockWait(REMASK_LOCK_WAIT_MS, () => write.immediate()),
+    );
+    this.remaskWrote = true;
+    done.forEach((at, i) => {
+      const doc = q.docs[i] as RemaskDoc;
+      for (const e of doc.edits.splice(0, at.edits))
+        q.chars -= e.body.length + (e.newBody?.length ?? 0);
+      if (at.row) q.from = doc.id;
+    });
+    q.docs.splice(0, done.filter((at) => at.row).length);
+    return changed;
+  }
+
+  /**
+   * Merge the chunk FTS segments in REMASK_MERGE_PAGES steps for up to REMASK_HOLD_MS, in one
+   * IMMEDIATE transaction; the old tokens of plainly rewritten chunks leave the index as their
+   * segments merge (to one segment, as 'optimize' would). A step that left both segment
+   * structures as they were had nothing left to merge: the mark goes and this returns false.
+   */
+  private remaskMergeStep(): boolean {
+    const fts = ["chunks_fts_porter", "chunks_fts_trigram"];
+    const step = this.db.transaction(() => {
+      const started = performance.now();
+      const left = new Set(fts);
+      while (left.size && performance.now() - started < REMASK_HOLD_MS) {
+        for (const t of [...left]) {
+          const structure = this.prep(
+            `SELECT block FROM ${t}_data WHERE id = ${FTS_STRUCTURE_ROWID}`,
+          );
+          const before = (structure.get() as { block: Buffer } | undefined)?.block;
+          this.db.exec(`INSERT INTO ${t}(${t}, rank) VALUES ('merge', -${REMASK_MERGE_PAGES})`);
+          const after = (structure.get() as { block: Buffer } | undefined)?.block;
+          if (
+            before === undefined ? after === undefined : after !== undefined && before.equals(after)
+          )
+            left.delete(t);
+        }
+      }
+      if (!left.size) this.metaDelete(REMASK_FTS_PENDING);
+      return left.size > 0;
+    });
+    const worked = this.withSecureDelete(() =>
+      this.adjudicator.withLockWait(REMASK_LOCK_WAIT_MS, () => step.immediate()),
+    );
+    this.remaskWrote = true;
+    return worked;
+  }
+
+  /** Run `fn` with PRAGMA secure_delete on: what it deletes or rewrites is zeroed in the file. */
+  private withSecureDelete<T>(fn: () => T): T {
+    const prev = Number(this.db.pragma("secure_delete", { simple: true }));
+    if (prev === 1) return fn();
+    this.db.pragma("secure_delete = 1");
+    try {
+      return fn();
+    } finally {
+      this.db.pragma(`secure_delete = ${prev}`);
+    }
   }
 
   countDocuments(source?: string): number {
@@ -1645,6 +2034,9 @@ export class SqliteAdapter implements StorageAdapter {
         );
         // Swarm runs are session activity; deleting runs cascades to the rest of the ledger.
         this.db.exec("DELETE FROM swarm_runs;");
+        // The memorable events were also indexed (source "session"), and that copy is what
+        // em_recall and the prompt hook recall. The index scope clears it with everything else.
+        if (scope === "sessions") this.purgeDocumentsBySource("session");
       }
       if (scope === "graph" || scope === "all") {
         this.db.exec(
@@ -1662,7 +2054,7 @@ export class SqliteAdapter implements StorageAdapter {
         // The index and graph scopes clear their own tables; a memories-only purge must
         // still drop the mirrored documents and memory nodes. The files stay on disk.
         if (scope === "memories") {
-          this.deleteDocumentsBySource("memory");
+          this.purgeDocumentsBySource("memory");
           this.db.exec(
             "DELETE FROM graph_edges WHERE src LIKE 'memory:%' OR dst LIKE 'memory:%'; DELETE FROM graph_nodes WHERE id LIKE 'memory:%';",
           );
@@ -1678,6 +2070,33 @@ export class SqliteAdapter implements StorageAdapter {
     } catch {
       // fail open
     }
+  }
+
+  /**
+   * Delete every document of one source for a purge, in set statements (deleteDocument() per
+   * document scans chunk_vec once each: minutes on a large index), with FTS5 secure-delete on
+   * while the chunks go. A plain FTS5 delete only records a tombstone and leaves the row's tokens
+   * in the index segments it shares with other rows, where they survive the VACUUM; secure-delete
+   * removes them from those segments, at a cost in proportion to the rows deleted rather than an
+   * 'optimize' rewrite of the whole index. Runs inside purge()'s transaction.
+   */
+  private purgeDocumentsBySource(source: string): void {
+    const chunkIds =
+      "SELECT c.id FROM chunks c JOIN documents d ON d.id = c.document_id WHERE d.source = ?";
+    if (this.vectors)
+      this.db.prepare(`DELETE FROM chunk_vec WHERE chunk_id IN (${chunkIds})`).run(source);
+    const fts = ["chunks_fts_porter", "chunks_fts_trigram"];
+    for (const t of fts) this.db.exec(`INSERT INTO ${t}(${t}, rank) VALUES ('secure-delete', 1)`);
+    try {
+      this.db
+        .prepare(
+          "DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE source = ?)",
+        )
+        .run(source);
+    } finally {
+      for (const t of fts) this.db.exec(`INSERT INTO ${t}(${t}, rank) VALUES ('secure-delete', 0)`);
+    }
+    this.db.prepare("DELETE FROM documents WHERE source = ?").run(source);
   }
 
   transaction<T>(fn: () => T): T {

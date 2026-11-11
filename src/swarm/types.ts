@@ -91,7 +91,7 @@ export interface SwarmSpec {
   name: string;
   description: string;
   topology: Topology;
-  /** Concurrent workers in one run. */
+  /** Concurrent workers across all active runs of this swarm. */
   maxAgents: number;
   /** Pipeline order of roles; roles not listed are not stage-gated. */
   stages: string[];
@@ -115,6 +115,11 @@ export interface SwarmConfig {
   swarms: SwarmSpec[];
   /** sha1 of the resolved swarms, for "is everything generated from this version?". */
   hash: string;
+  /**
+   * Keys this version does not know, ignored (a typo of a known key is an error instead). A
+   * newer eminiar may have written them, so sync leaves the agent files alone while any exist.
+   */
+  ignoredKeys: ConfigIssue[];
 }
 
 export interface ConfigIssue {

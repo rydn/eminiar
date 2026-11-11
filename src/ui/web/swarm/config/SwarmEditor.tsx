@@ -232,7 +232,7 @@ export function SwarmEditor({
           <div class="swc-cap-text">
             <Field
               label="Max agents"
-              hint="workers running at once in one run (1-16)"
+              hint="workers running at once across all runs of the swarm (1-16)"
               error={err("max_agents")}
             >
               {lk("max_agents") ? (

@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   symlinkSync,
   writeFileSync,
@@ -20,6 +21,7 @@ import { resolveProjectRoot } from "../../src/project.js";
 import { markServerAlive } from "../../src/session/server-alive.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
+import { syncAgents } from "../../src/swarm/agents.js";
 import { activeSwarmConfig, resetSwarmConfigCache } from "../../src/swarm/config.js";
 import { coordinationRoot, failedText, notWorkerText } from "../../src/swarm/hooks.js";
 import { verifyCaller } from "../../src/swarm/identity.js";
@@ -784,6 +786,38 @@ describe("swarm hooks when the shell cwd drifts into a nested repository", () =>
       resetContextCache();
     }
   });
+
+  it("still tracks the nested repository's swarm when the session root has none", async () => {
+    // The other hooks key their database on the session root; tracking keeps the cwd fallback.
+    const ws = project("ws-plain");
+    const sub = join(ws, "backend");
+    mkdirSync(join(sub, ".git"), { recursive: true });
+    mkdirSync(join(sub, ".eminiar"), { recursive: true });
+    writeFileSync(join(sub, ".eminiar", "swarm.yaml"), BASIC);
+    sessionRoot(ws);
+    try {
+      resetContextCache();
+      resetSwarmConfigCache();
+      const db = dbOf(sub);
+      const run = startRun(db, activeSwarmConfig(sub)!, {
+        swarm: "feat",
+        goal: "nested",
+        sessionId: "s1",
+      });
+      await handlers.PreToolUse!(
+        input(sub, {
+          hook_event_name: "PreToolUse",
+          tool_name: "Agent",
+          tool_input: { subagent_type: "swarm-feat-coder", prompt: "go" },
+          tool_use_id: "toolu_nested1",
+        }),
+      );
+      expect(db.swarm.spawnsPending(run.id, 0)).toBe(1);
+    } finally {
+      sessionRoot();
+      resetContextCache();
+    }
+  });
 });
 
 describe("swarm enforcement in PreToolUse(Agent)", () => {
@@ -1315,6 +1349,34 @@ describe("swarm enforcement matrix", () => {
     }
   });
 
+  it("enforces a file from a newer eminiar as written: its unknown keys are ignored, not a lockout", async () => {
+    const future = ENF.replace("count: 2", "count: 2\n        retry_policy: plan");
+    const ws = project("mx11", `${future}worker_ttl: 3h\n`);
+    enter(ws);
+    const r = await agent(ws, "Explore");
+    expect(decisionOf(r)).toBe("deny");
+    expect(reasonOf(r)).toContain('"Explore" is not a swarm worker');
+    expect(reasonOf(r)).not.toContain("invalid");
+    expect(reasonOf(await agent(ws, "swarm-feat-coder"))).toContain("has no active run");
+    startRun(dbOf(ws), activeSwarmConfig(ws)!, { swarm: "feat", goal: "g", sessionId: "s1" });
+    expect(decisionOf(await agent(ws, "swarm-feat-coder"))).toBe("allow");
+  });
+
+  it("still denies everything when a known key has a typo or a bad value", async () => {
+    for (const [name, yaml] of [
+      ["typo", ENF.replace("count: 2", "cuont: 2")],
+      ["value", ENF.replace("count: 2", "count: 0")],
+    ] as const) {
+      const ws = project(`mx12-${name}`, yaml);
+      enter(ws);
+      for (const t of ["Explore", "swarm-feat-coder"]) {
+        const r = await agent(ws, t);
+        expect(decisionOf(r), `${name}/${t}`).toBe("deny");
+        expect(reasonOf(r)).toContain("sets enforce: true but is invalid");
+      }
+    }
+  });
+
   it("does not enforce when the project does not ask for it: Explore passes and no spawn row is written", async () => {
     for (const [name, yaml] of [
       ["plain-off", BASIC],
@@ -1379,6 +1441,34 @@ describe("swarm enforcement matrix", () => {
     const brokenOff = await start(project("ss5", "swarms: [oops\n"));
     expect(brokenOff).toContain("is invalid, so swarms are off.");
     expect(brokenOff).not.toContain("every subagent is denied");
+
+    // a newer teammate's file: still enforced, its agent files are not rewritten
+    const ws = project("ss6", BASIC);
+    syncAgents(ws, activeSwarmConfig(ws)!);
+    const coder = join(ws, ".claude", "agents", "swarm-feat-coder.md");
+    writeFileSync(
+      join(ws, ".eminiar", "swarm.yaml"),
+      `${ENF.replace("description: writes code", "description: writes code, newer\n        retry_policy: plan")}worker_ttl: 3h\n`,
+    );
+    const before = readFileSync(coder, "utf8");
+    const future = await start(ws);
+    expect(future).toContain("Swarm enforcement is on:");
+    expect(future).toMatch(
+      /\.eminiar\/swarm\.yaml: 2 unknown key\(s\) ignored \(first: swarms\.feat\.agents\.coder \(line \d+\): unknown key "retry_policy" ignored: not a setting in this eminiar version\); generated agent files of the roles those keys belong to are not rewritten unless .*`eminiar swarm validate` lists the keys\./,
+    );
+    expect(future).not.toContain("were left alone (hand-written");
+    expect(future).not.toContain("regenerated");
+    expect(readFileSync(coder, "utf8")).toBe(before);
+
+    // disabled: cleanup is a delete, which only restricts, so it is never held
+    writeFileSync(
+      join(ws, ".eminiar", "swarm.yaml"),
+      `${BASIC.replace("count: 2", "count: 2\n        retry_policy: plan")}enabled: false\n`,
+    );
+    expect(await start(ws)).toContain(
+      "swarms are disabled in .eminiar/swarm.yaml; removed 2 generated agent file(s)",
+    );
+    expect(existsSync(coder)).toBe(false);
   });
 });
 

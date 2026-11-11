@@ -1,11 +1,12 @@
-import { realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { extname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import type { ProjectContext } from "../context.js";
-import { getContext } from "../context.js";
+import { sessionContext } from "../context.js";
 import { type DocSource, readManifestAt } from "../docs/manifest.js";
 import { git } from "../history/log.js";
-import { checkReadPath, loadPermissionRules } from "../permissions/settings.js";
+import { loadPermissionRules } from "../permissions/settings.js";
+import { confinePath } from "../sandbox/file.js";
 import { renderProjectBrief } from "../session/brief.js";
 import {
   commitContext,
@@ -56,7 +57,11 @@ export function literalOf(pattern: string): string | undefined {
 export function symbolHints(db: StorageAdapter, pattern: string): string | undefined {
   const lit = literalOf(pattern);
   if (!lit) return undefined;
-  const nodes = db.graphFindNodes({ query: lit, kinds: SYMBOL_KINDS, limit: 5 });
+  const nodes = db.graphFindNodes({
+    query: lit,
+    kinds: SYMBOL_KINDS,
+    limit: 5,
+  });
   if (!nodes.length) return undefined;
   const list = nodes
     .map((n) => `${n.kind} ${n.name} (${n.path}:${n.start_line ?? "?"})`)
@@ -71,8 +76,9 @@ export function coverageHint(db: StorageAdapter, rel: string): string | undefine
   return `eminiar graph: ${rel} is ${row.status}${row.reason ? ` (${row.reason})` : ""}; graph answers about it may be incomplete.`;
 }
 
+/** A history read: [1] the options before the subcommand (`-C dir`), [2] it, [3] its arguments. */
 const GIT_HISTORY =
-  /(?:^|[;&|]\s*)git\s+(?:(?:-C|--git-dir|--work-tree)[= ]\S+\s+|--no-pager\s+)*(log|blame|shortlog|show|whatchanged|reflog)\b([^;&|]*)/;
+  /(?:^|[;&|]\s*)git\s+((?:(?:-C|--git-dir|--work-tree)[= ]\S+\s+|--no-pager\s+)*)(log|blame|shortlog|show|whatchanged|reflog)\b([^;&|]*)/;
 /** One commit, printed short: `git log -1 --format=%H` is a lookup, not a history read. */
 const ONE_COMMIT = /(^|\s)(-1|-n\s*1|-n1|--max-count[= ]1)(?=\s|$)/;
 
@@ -84,8 +90,8 @@ const ONE_COMMIT = /(^|\s)(-1|-n\s*1|-n1|--max-count[= ]1)(?=\s|$)/;
 export function historyCall(cmd: string): string | undefined {
   const m = GIT_HISTORY.exec(cmd);
   if (!m) return undefined;
-  const sub = m[1]!;
-  const rest = (m[2] ?? "").trim();
+  const sub = m[2]!;
+  const rest = (m[3] ?? "").trim();
   const args = rest.split(/\s+/).filter(Boolean);
   const q = (s: string) => JSON.stringify(s.replace(/^['"]|['"]$/g, ""));
   const positional = (a: string) => !a.startsWith("-");
@@ -124,6 +130,89 @@ export function historyCall(cmd: string): string | undefined {
   if (author) return `{action:"timeline", author:${q(author[1]!)}}`;
   if (sub === "shortlog") return `{action:"timeline"}`;
   return `{action:"overview"}`;
+}
+
+/**
+ * The directory the first history read in these segments runs in: the shell's, moved by each
+ * `cd` before it and by `git -C`. Undefined when the shell decides (`cd $X`, `cd -`) or git is
+ * pointed at a repository directly (`--git-dir`, `--work-tree`).
+ */
+function historyDir(segments: string[], cwd: string): string | undefined {
+  let dir: string | undefined = cwd;
+  // Each step resolves a longer path: past MAX_STEPS of them, only the shell knows where it is.
+  let steps = 0;
+  const step = (arg: string) => {
+    dir = ++steps > MAX_STEPS ? undefined : dir && changeDir(dir, arg);
+  };
+  for (const segment of segments) {
+    const m = GIT_HISTORY.exec(segment);
+    if (m) {
+      const opts = m[1] ?? "";
+      if (/--(git-dir|work-tree)\b/.test(opts)) return undefined;
+      for (const c of opts.matchAll(/-C[= ](\S+)/g)) {
+        step(c[1]!);
+        if (!dir) return undefined;
+      }
+      return dir;
+    }
+    const cd = CD.exec(segment);
+    if (cd) step(cd[1]!);
+    if (!dir) return undefined;
+  }
+  return dir;
+}
+
+/** A directory change: `cd dir`, `pushd dir`, `(cd dir`. */
+const CD = /^\(?\s*(?:cd|pushd)\b(.*)$/;
+/** Most `cd` / `git -C` steps followed, and `$(…)` levels unwrapped, before giving up. */
+const MAX_STEPS = 16;
+/** The longest raw command looked at, and the longest line (heredoc bodies cut) classified. */
+const MAX_RAW = 64 * 1024;
+const MAX_CLASSIFIED = 8 * 1024;
+/** The most file operands a cat / grep stage is sized by, and commands a routed line holds. */
+const MAX_OPERANDS = 64;
+const MAX_SEGMENTS = 64;
+
+/** Where `cd <arg>` from `dir` lands, or undefined when only the shell knows. */
+function changeDir(dir: string, arg: string): string | undefined {
+  const a = arg.trim().replace(/^(['"])(.*)\1$/, "$2") || "~";
+  if (/^-|^~[^/]|[\s$`*?[\]{}()\\]/.test(a)) return undefined;
+  return a === "~" || a.startsWith("~/") ? join(homedir(), a.slice(1)) : resolve(dir, a);
+}
+
+/**
+ * Is `dir` in the root's own repository: under the root, with the nearest `.git` (a folder, or
+ * a worktree's file) at or above the root rather than in a nested repository on the way?
+ */
+function inRootRepo(root: string, dir: string): boolean {
+  try {
+    const top = realpathSync(root);
+    let inside = false;
+    for (let d = realpathSync(dir); ; d = dirname(d)) {
+      if (d === top) inside = true;
+      if (existsSync(join(d, ".git"))) return inside;
+      if (dirname(d) === d) return false; // no repository at all
+    }
+  } catch {
+    return false; // a directory that does not exist: git fails there too
+  }
+}
+
+/** The repository (its `.git` folder's parent) a directory belongs to, or undefined for none. */
+function repoOf(dir: string): string | undefined {
+  try {
+    for (let d = realpathSync(dir); ; d = dirname(d)) {
+      if (existsSync(join(d, ".git"))) return d;
+      if (dirname(d) === d) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** Would a git command run from the root (where em_execute runs) read the repository `dir` is in? */
+function sameRepo(root: string, dir: string): boolean {
+  return repoOf(root) === repoOf(dir);
 }
 
 export interface Suggestion {
@@ -177,6 +266,10 @@ export function docsSourceFor(url: string, root: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Commands that usually print a lot. kubectl, docker, curl, wget, make and `npm run` reach this only
+ * in their read-only forms: `staysNative` keeps the others native first.
+ */
 const HEAVY_BASH =
   /^\s*(git\s+(log|diff|show|blame)|npm\s+(test|run|ls|list|outdated|audit|why)|pnpm\s+(test|run|ls|list|outdated|why)|yarn\s+(test|run|list|why)|npx\s+(vitest|jest|tsc|eslint|biome)|cat\s|head\s|tail\s|find\s|grep\s|rg\s|ls\s+-[a-zA-Z]*R|tree\b|curl\s|wget\s|docker\s|kubectl\s|du\s|df\s|ps\s|lsof\s|brew\s+(list|outdated)|pip\s+(list|freeze)|cargo\s+(test|build)|go\s+(test|build)|make\b|pytest\b|mvn\b|gradle\b)/;
 const TINY_BASH =
@@ -200,25 +293,75 @@ const BIG_TEXT_EXT = new Set([
  */
 const VISUAL_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf"]);
 
-/** A command with its heredoc bodies cut out: they are data, not commands to classify. */
+/**
+ * A command with its heredoc bodies cut out: they are data, not commands to classify. The rest of
+ * the `<<EOF` line stays (`cat <<EOF | kubectl apply -f -`).
+ */
 export function withoutHeredocs(cmd: string): string {
-  return cmd.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2\s*(?=\n|$)/g, "<<$2");
+  if (!cmd.includes("<<")) return cmd;
+  // One pass: each `<<WORD` header looks for its terminator line once per word (a word whose
+  // terminator is missing from one position is missing from every later one too), so a line of
+  // thousands of unterminated `<<A` costs what reading it does.
+  const head = /<<-?\s*(['"]?)(\w+)\1/y;
+  const seen = new Map<string, { from: number; at: number; end: number }>();
+  const terminator = (word: string, from: number): number => {
+    const c = seen.get(word);
+    if (c && from >= c.from && (c.at === -1 || from <= c.at)) return c.end;
+    // The last line break before the word: `\n\s*WORD` with `\s*` across lines would rescan a
+    // run of blank lines from each of its line breaks.
+    const re = new RegExp(String.raw`\n[^\S\n]*${word}\s*(?=\n|$)`, "g");
+    re.lastIndex = from;
+    const m = re.exec(cmd);
+    const rec = m ? { from, at: m.index, end: m.index + m[0].length } : { from, at: -1, end: -1 };
+    seen.set(word, rec);
+    return rec.end;
+  };
+  let out = "";
+  let copied = 0;
+  for (let k = cmd.indexOf("<<"); k !== -1; k = cmd.indexOf("<<", Math.max(k + 1, copied))) {
+    head.lastIndex = k;
+    const m = head.exec(cmd);
+    if (!m) continue;
+    const word = m[2]!;
+    const eol = cmd.indexOf("\n", head.lastIndex);
+    if (eol === -1) break; // no body, here or after
+    const end = terminator(word, eol + 1);
+    if (end === -1) continue;
+    out += `${cmd.slice(copied, k)}<<${word}${cmd.slice(head.lastIndex, eol)}`;
+    copied = end;
+  }
+  return out + cmd.slice(copied);
 }
 
-/** Split `s` at every unquoted position where `sep` returns the separator's length. */
+/**
+ * Split `s` at every unquoted position where `sep` returns the separator's length. A backslash
+ * outside single quotes escapes the next character (`"x\\"` ends at its second `"`); single quotes
+ * have no escapes, `$'…'` does.
+ */
 function splitUnquoted(s: string, sep: (s: string, i: number) => number): string[] {
   const out: string[] = [];
   let cur = "";
   let quote: string | undefined;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i]!;
+    if (quote === "'") {
+      cur += ch;
+      if (ch === "'") quote = undefined;
+      continue;
+    }
+    if (ch === "\\") {
+      cur += ch + (s[i + 1] ?? "");
+      i++;
+      continue;
+    }
     if (quote) {
       cur += ch;
-      if (ch === quote && s[i - 1] !== "\\") quote = undefined;
+      if (ch === quote[quote.length - 1]) quote = undefined;
       continue;
     }
     if (ch === "'" || ch === '"') {
-      quote = ch;
+      // `$'…'` is quoted like "…" for escapes, closed by '
+      quote = ch === "'" && s[i - 1] === "$" ? "$'" : ch;
       cur += ch;
       continue;
     }
@@ -235,14 +378,55 @@ function splitUnquoted(s: string, sep: (s: string, i: number) => number): string
   return out.map((p) => p.trim()).filter(Boolean);
 }
 
-/** The simple commands a shell line runs in sequence: split at `;`, `&&`, `||` and newlines. */
+/** The simple commands a shell line runs in sequence: split at `;`, `&`, `&&`, `||` and newlines. */
 export function commandSegments(cmd: string): string[] {
   return splitUnquoted(cmd, (s, i) => {
     const ch = s[i];
     if (ch === ";" || ch === "\n") return 1;
     if ((ch === "&" || ch === "|") && s[i + 1] === ch) return 2;
+    // A lone `&` backgrounds the command before it; not `2>&1`, `&>f`, `<&3`, `|&`.
+    if (ch === "&" && !/[&<>|]/.test(s[i - 1] ?? "") && !/[&>]/.test(s[i + 1] ?? "")) return 1;
     return 0;
   });
+}
+
+/**
+ * The words of a simple command as the program receives them: quotes removed, backslash escapes
+ * resolved (`r''m`, `"rm"`, `\rm` are all `rm`; `$'DELETE'` is `DELETE`). Expansions stay as written.
+ */
+function shellWords(s: string): string[] {
+  const words: string[] = [];
+  let cur = "";
+  let inWord = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === " " || ch === "\t" || ch === "\n") {
+      if (inWord) words.push(cur);
+      cur = "";
+      inWord = false;
+      continue;
+    }
+    inWord = true;
+    if (ch === "\\") {
+      cur += s[++i] ?? "";
+    } else if (ch === "'" && s[i - 1] !== "$") {
+      const end = s.indexOf("'", i + 1);
+      const stop = end === -1 ? s.length : end;
+      cur += s.slice(i + 1, stop);
+      i = stop;
+    } else if (ch === '"' || (ch === "$" && s[i + 1] === "'")) {
+      const close = ch === '"' ? '"' : "'";
+      if (ch === "$") i++;
+      for (i++; i < s.length && s[i] !== close; i++) {
+        if (s[i] === "\\" && i + 1 < s.length) i++;
+        cur += s[i];
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (inWord) words.push(cur);
+  return words;
 }
 
 /** The stages of one pipeline: `a | b | c` → [a, b, c]. */
@@ -267,17 +451,583 @@ function bounds(stage: string): boolean {
 }
 
 /**
- * Commands whose point is a side effect: commits, installs, file writes. Their output is
- * secondary and the native Bash tool is where Claude Code's permission prompts live, so a
+ * Commands whose point is a side effect: commits, installs, file writes, deploys, running a
+ * project's own scripts or recipes (`make`, `npm run <x>`: judged in CHANGES below). Their output
+ * is secondary and the native Bash tool is where Claude Code's permission prompts live, so a
  * command containing one is never redirected to the sandbox.
  */
-const MUTATING =
-  /^\s*(?:(?:sudo|env|[A-Z_][A-Z0-9_]*=\S*)\s+)*(git\s+(add|commit|checkout|switch|push|pull|fetch|merge|rebase|stash|reset|restore|cherry-pick|revert|tag|init|clone|worktree|mv|rm|am|apply|submodule)|npm\s+(install|i|ci|uninstall|un|link|publish|version|update|up|dedupe)|pnpm\s+(install|i|add|remove|rm|update|up|link)|yarn\s+(add|remove|install|upgrade)|pip3?\s+(install|uninstall)|cargo\s+(add|install)|brew\s+(install|uninstall|upgrade)|gh\s+(pr|issue|release|repo)\s+(create|edit|merge|close|comment|delete|ready)|rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|sed\s+(?:-\S+\s+)*-i|tee)\b/;
-/** A redirection into a file (not /dev/null, not a file descriptor) writes something. */
-const WRITES_FILE = /(?:^|\s|\d)>{1,2}\s*(?!&)(?!\/dev\/null)\S/;
+const GIT_MUTATING =
+  /^(git\s+(?:(?:-[Cc]\s*[^-\s]\S*|--(?:git-dir|work-tree)[= ]\S+|--no-pager)\s+)*(add|commit|checkout|switch|push|pull|fetch|merge|rebase|stash|reset|restore|cherry-pick|revert|tag|init|clone|worktree|mv|rm|am|apply|submodule|clean|branch\s(?:.*\s)?(-[a-zA-Z]*[dDmM][a-zA-Z]*|--delete|--move)|config(?:\s+--(?:global|local|system|worktree))*\s+(?:set|unset|--(?:unset|unset-all|add|replace-all|rename-section|remove-section|edit)|-e|\w[\w.-]*\s+\S+)))(?![\w-])/;
+const OTHER_MUTATING =
+  /^(npm\s+(install|i|ci|uninstall|un|link|publish|version|update|up|dedupe|audit\s+fix)|pnpm\s+(install|i|add|remove|rm|update|up|link|audit\s.*--fix)|yarn\s+(add|remove|install|upgrade)|pip3?\s+(install|uninstall)|cargo\s+(add|install)|brew\s+(install|uninstall|upgrade)|gh\s+(pr|issue|release|repo)\s+(create|edit|merge|close|comment|delete|ready)|terraform\s+(?:-\S+\s+)*(apply|destroy|import|taint|untaint|state\s+(rm|mv|push))|helm\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*(install|upgrade|uninstall|rollback|delete)|mvnw?(?:\s.*)?\s(deploy|install|release:\S*)|gradlew?(?:\s.*)?[\s:](publish|upload)\w*|rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|sed\s+(?:-\S+\s+)*-i|tee|eval|sh|bash|zsh|find\s.*\s-(delete|exec|execdir|ok|okdir))(?![\w-])/;
+const MUTATING_WORDS = new Set([
+  "npm",
+  "pnpm",
+  "yarn",
+  "pip",
+  "pip3",
+  "cargo",
+  "brew",
+  "gh",
+  "terraform",
+  "helm",
+  "mvn",
+  "mvnw",
+  "gradle",
+  "gradlew",
+  "rm",
+  "mv",
+  "cp",
+  "mkdir",
+  "rmdir",
+  "touch",
+  "chmod",
+  "chown",
+  "ln",
+  "sed",
+  "tee",
+  "eval",
+  "sh",
+  "bash",
+  "zsh",
+  "find",
+]);
+const MUTATING = {
+  test(cmd: string): boolean {
+    const word = /^[A-Za-z0-9]*/.exec(cmd)![0];
+    if (word === "git") return GIT_MUTATING.test(cmd);
+    return MUTATING_WORDS.has(word) && OTHER_MUTATING.test(cmd);
+  },
+};
+/**
+ * Commands that run the one after them, with the options they take (`sudo -u root`, `timeout 30`).
+ * Each option is either one that takes a value or one that does not, never both: an ambiguous
+ * split backtracks exponentially on a line of many flags.
+ */
+const longOpts = (valued: string) =>
+  String.raw`--(?:${valued})\s+[^-\s]\S*|--(?!(?:${valued})(?:\s|$))\S*`;
+const RUNNERS = [
+  String.raw`sudo(?:\s+(?:-[ugCDhpRrtTU]\s*[^-\s]\S*|-(?![ugCDhpRrtTU-])\S+|${longOpts("user|group|chdir|host|prompt|close-from|role|type|other-user|chroot|command-timeout")}))*`,
+  String.raw`env(?:\s+(?:-[uC]\s*[^-\s]\S*|-(?![uC-])\S+|${longOpts("unset|chdir|split-string")}))*`,
+  String.raw`(?:xargs|parallel)(?:\s+(?:-[nILPsdEaj]\s*[^-\s]\S*|-(?![nILPsdEaj-])\S+|${longOpts("max-args|max-procs|max-lines|max-chars|delimiter|arg-file|eof|jobs")}))*`,
+  String.raw`timeout(?:\s+(?:-[sk]\s*[^-\s]\S*|-(?![sk-])\S+|${longOpts("signal|kill-after")}))*\s+\d\S*`,
+  String.raw`nice(?:\s+-n\s*\S+|\s+-\d+|\s+--adjustment(?:=|\s+)\S+)?`,
+  String.raw`stdbuf(?:\s+-[ioe]\s*\S+)*`,
+  String.raw`(?:time|command)(?:\s+-p)?`,
+  "nohup",
+  String.raw`[A-Z_][A-Z0-9_]*=\S*`,
+];
+/** Shell grammar before a command: `{ rm x; }`, `( … )`, `! cmd`, `then cmd`, `do cmd` …. */
+const SHELL_WORDS = /^(?:\s*(?:[({!]|(?:then|do|else|exec|if|elif|while|until)\s))*\s*/;
+/** What runs the command after it, which is the one to judge: `sudo`, `FOO=1`, `xargs -0` …. */
+const RUNNER = new RegExp(String.raw`^\s*(?:(?:${RUNNERS.join("|")})\s+)*`);
+const RUNNER_HEAD = /^\s*(?:sudo|env|xargs|parallel|timeout|nice|stdbuf|time|command|nohup|[A-Z_])/;
+const stripRunners = (s: string) =>
+  RUNNER_HEAD.test(s) ? s.replace(RUNNER, "") : s.replace(/^\s+/, "");
+/**
+ * A redirection into a file (`> f`, `>> f`, `&> f`, `cmd>f`; not /dev/null, not `2>&1`) writes
+ * something. `=>` and `->` are not redirections.
+ */
+const WRITES_FILE = /(?:^|[\s\d&])>{1,2}\s*(?!&)(?!\/dev\/null)\S/;
+/** The same for a `>` glued to the word before it (`cmd>f`), once quoted text is taken out. */
+const GLUED_WRITE = /(?<![-=>])>{1,2}\s*(?!&)(?!\/dev\/null)\S/;
+/** A program read from a pipe (`curl … | python3`): whatever it does, it does like `| sh`. */
+const RUNS_STDIN = /^(python3?|node|perl|ruby|deno|bun)(\s+-\S*)*$/;
+/** Commands that never finish (follow, `--watch`): em_execute would only time out on them. */
+const FOLLOWS =
+  /^((kubectl|docker)(\s.*)?\s(-f|-w|--follow)(?=[\s=]|$)|tail(\s.*)?\s(-[a-zA-Z]*[fF]|--follow)|.*\s--watch(All)?(?=[\s=]|$))/;
 
-function mutates(segment: string): boolean {
-  return MUTATING.test(segment) || WRITES_FILE.test(segment);
+/**
+ * curl sending or saving something: a method other than GET / HEAD, a body, an upload, an output
+ * file, a header dump (`-D`), a cookie jar (`-c`), a trace or a config file. In a flag cluster,
+ * everything after `X` is its value (`-sXGET`).
+ */
+const CURL_SENDS =
+  /\s(?:-(?:(?!X)[a-zA-Z])*[dFTOoKDc]|(?:-[a-zA-Z]*X|--request)(?![\s=]*['"]?(?:GET|HEAD)\b)|--(?:data|json|form|upload-file|output|remote-name|config|dump-header|cookie-jar|trace|stderr|create-dirs|libcurl|etag-save|hsts|alt-svc))/;
+/** wget printing instead of saving: `-O -`, `-qO-`, `--output-document=-`, or `--spider`. */
+const WGET_PRINTS = /\s(?:-[a-zA-Z]*O\s*-|--output-document[= ]-|--spider)(?=\s|$)/;
+/** wget sending, or writing a log (`-o` / `-a`) or running a wgetrc command (`-e`). */
+const WGET_SENDS =
+  /\s(?:--(post-data|post-file|body-data|body-file|method|output-file|append-output|execute|config)\b|-[a-zA-Z]*[oae])/;
+const KUBECTL_READS =
+  /^(get|describe|logs|top|explain|api-resources|api-versions|events|version|cluster-info|config\s+(view|get-contexts|current-context)|rollout\s+(status|history)|auth\s+can-i)\b/;
+const DOCKER_READS =
+  /^(ps|logs|images|inspect|history|version|info|stats\s.*--no-stream|(container|image|network|volume)\s+(ls|inspect)|compose\s+(ps|logs|config|images|ls)|system\s+df)\b/;
+/**
+ * Scripts and make targets that only test or check (`test:unit`, `lint`, `typecheck`), not ones
+ * that fix, write, install, deploy or clean (`test-install`, `check:release`).
+ */
+const CHECK_SCRIPT =
+  /^(t|test|lint|type-?check|check)(?=$|[:.-])(?![\w:.-]*(fix|write|update|install|deploy|publish|push|release|clean))/;
+/** Arguments that turn a check into a write: `-- --fix`, `--write`, `-u` (update snapshots). */
+const FIX_ARGS =
+  /(?:^|\s)(--fix|--write|--apply(-unsafe)?|-u|--update(-?[sS]napshots?)?)(?=[\s=]|$)/;
+/** npx tools that only check or test, unless told to fix or write (`jest`, `jest@29`; not `jest-x`). */
+const NPX_CHECKS = /^(vitest|jest|tsc|eslint|biome|prettier)(?:@[\w.^~-]*)?$/;
+/** pnpm / yarn words that are their own read-only commands, not scripts (`pnpm ls`, `yarn why`). */
+const PM_READS = /^(ls|list|outdated|why|info|view|audit|licenses|bin|root|help)$/;
+/**
+ * Options that take the next word, before a subcommand, per tool: `-n prod` for kubectl,
+ * `--prefix a` for npm. `-s` and `-w` are flags for most tools, so each tool has its own set.
+ */
+const VALUE_OPTS: Record<string, ReadonlySet<string>> = {
+  kubectl: new Set([
+    "-n",
+    "--namespace",
+    "--context",
+    "--cluster",
+    "--kubeconfig",
+    "--user",
+    "-s",
+    "--server",
+    "--token",
+    "--as",
+    "--as-group",
+    "--as-uid",
+    "--cache-dir",
+    "--certificate-authority",
+    "--client-certificate",
+    "--client-key",
+    "--password",
+    "--username",
+    "--profile",
+    "--profile-output",
+    "--request-timeout",
+    "--tls-server-name",
+    "--log-dir",
+    "--log-file",
+    "--log-file-max-size",
+    "--vmodule",
+    "-v",
+    "--v",
+  ]),
+  docker: new Set([
+    "-H",
+    "--host",
+    "-c",
+    "--context",
+    "--config",
+    "-l",
+    "--log-level",
+    "--tlscacert",
+    "--tlscert",
+    "--tlskey",
+  ]),
+  npm: new Set(["--prefix", "-w", "--workspace", "--userconfig", "--registry", "--cache"]),
+  pnpm: new Set(["-C", "--dir", "--filter", "-F", "--workspace-dir"]),
+  yarn: new Set(["--cwd", "--cache-folder", "--registry"]),
+};
+/**
+ * Options before kubectl's / docker's subcommand known to take no value. One in neither set may
+ * take the next word or not, so both readings are judged (`kubectl --x get delete pod p`).
+ */
+const FLAG_OPTS: Record<string, ReadonlySet<string>> = {
+  kubectl: new Set([
+    "--insecure-skip-tls-verify",
+    "--match-server-version",
+    "--warnings-as-errors",
+    "--disable-compression",
+    "--alsologtostderr",
+    "--logtostderr",
+    "--add-dir-header",
+    "--skip-headers",
+    "--skip-log-headers",
+    "--one-output",
+    "-h",
+    "--help",
+  ]),
+  docker: new Set(["-D", "--debug", "--tls", "--tlsverify", "-v", "--version", "--help"]),
+};
+/** More readings than a real command line has: the options are not ones we can follow. */
+const MAX_READINGS = 4;
+
+/** The words after the options before them: ` -n prod get pods` → [get, pods]. */
+function afterOptions(tool: string, args: string): string[] {
+  const words = args.trim().split(/\s+/);
+  const valued = VALUE_OPTS[tool];
+  let i = 0;
+  while (words[i]?.startsWith("-")) i += valued?.has(words[i]!) ? 2 : 1;
+  return words.slice(i);
+}
+
+/**
+ * The subcommands a kubectl / docker call may run (` --context prod get pods` → [get pods]). An
+ * option in neither VALUE_OPTS nor FLAG_OPTS is read both ways; undefined when that gives more
+ * readings than a real command line has.
+ */
+function subcommands(tool: string, args: string): string[] | undefined {
+  const words = args.trim().split(/\s+/);
+  const valued = VALUE_OPTS[tool];
+  const flags = FLAG_OPTS[tool];
+  const starts = new Set<number>();
+  const seen = new Set<number>();
+  const todo = [0];
+  while (todo.length) {
+    const i = todo.pop()!;
+    if (seen.has(i)) continue;
+    seen.add(i);
+    const w = words[i];
+    if (w === undefined || !w.startsWith("-")) {
+      starts.add(i);
+      if (starts.size > MAX_READINGS) return undefined;
+    } else if (valued?.has(w)) todo.push(i + 2);
+    else if (flags?.has(w) || w.includes("=") || /^-[^-]./.test(w)) todo.push(i + 1);
+    else todo.push(i + 1, i + 2);
+  }
+  // The read-only forms are named by their first words (`rollout status`), `docker stats` also
+  // by `--no-stream` wherever it is; a few words keep this linear in the number of readings.
+  const tail = /\s--no-stream\b/.test(args) ? " --no-stream" : "";
+  return [...starts].map((i) => words.slice(i, i + 3).join(" ") + tail);
+}
+
+/** Does a kubectl / docker call (any reading of its options) do more than read? */
+function verbChanges(tool: string, reads: RegExp, args: string): boolean {
+  const subs = subcommands(tool, args);
+  return !subs || subs.some((s) => !reads.test(s));
+}
+
+/**
+ * `npm run <script>`, `yarn <script>`, `pnpm --filter x <script>`: anything but a test or check
+ * script run as a check. npm's own commands (`npm ls`) are not scripts; MUTATING names those that
+ * change something.
+ */
+function runsScript(tool: string, args: string): boolean {
+  const words = afterOptions(tool, args);
+  let script = words.shift();
+  if (script === "run" || script === "run-script") script = words.shift();
+  else if (script === undefined || PM_READS.test(script) || (tool === "npm" && script !== "test"))
+    return false;
+  if (script === undefined) return false; // `npm run` lists the scripts
+  return !CHECK_SCRIPT.test(script) || FIX_ARGS.test(words.join(" "));
+}
+
+/**
+ * `make`: recipes run anything; only test / check / lint targets, not told to fix, read. `-j` and
+ * `-l` take a number only when one follows (`make -j install` installs).
+ */
+function makeChanges(args: string): boolean {
+  const words = shellWords(args);
+  const targets: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (/^(-E|--eval)/.test(w)) return true; // make code given on the line
+    if (w.startsWith("-")) {
+      if (
+        /^(-[CfIoW]|--(directory|file|makefile|include-dir|old-file|assume-old|what-if|new-file|assume-new))$/.test(
+          w,
+        ) ||
+        (/^(-[jl]|--jobs|--load-average|--max-load)$/.test(w) &&
+          /^\d+(\.\d+)?$/.test(words[i + 1] ?? ""))
+      )
+        i++;
+      continue;
+    }
+    if (!w.includes("=")) targets.push(w);
+  }
+  return !targets.length || !targets.every((t) => CHECK_SCRIPT.test(t)) || FIX_ARGS.test(args);
+}
+
+/** gh api options that take the next word when it is not glued (`-H 'Accept: x'`). */
+const GH_API_VALUED =
+  /^(-[FfHXpqt]|--(method|field|raw-field|input|header|jq|template|preview|hostname|cache))$/;
+
+/** `gh api`: a method other than GET, fields (which make it a POST), or a GraphQL mutation. */
+function ghApiSends(args: string): boolean {
+  // Words as gh receives them: `-X $'DELETE'`, `query='mut''ation{…}'`, `-ftitle=x` hide nothing.
+  const words = shellWords(args);
+  if (words[0] !== "api") return false;
+  let method: string | undefined;
+  let fields = false;
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]!;
+    const long = /^--(method|field|raw-field|input)(?:=|$)/.exec(w)?.[1];
+    if (long) {
+      if (long === "method")
+        method = w.includes("=") ? w.slice(w.indexOf("=") + 1) : (words[i + 1] ?? "");
+      else fields = true;
+    } else if (/^-[a-zA-Z]/.test(w)) {
+      // a flag cluster: `-i` takes no value, the first letter that does takes the rest or the next word
+      const c = w.slice(1).replace(/^i+/, "")[0];
+      const value = w.slice(w.indexOf(c ?? "") + 1) || (words[i + 1] ?? "");
+      if (c === "X") method = value;
+      else if (c === "f" || c === "F") fields = true;
+    }
+    if (GH_API_VALUED.test(w)) i++;
+  }
+  if (method !== undefined) return method.toUpperCase() !== "GET";
+  if (words.includes("graphql")) return /\bmutation\b/.test(words.join(" "));
+  return fields;
+}
+
+/**
+ * `npx`: only the check tools, as checks. Not a package that merely starts with one's name
+ * (`jest-x`), not one run from another package (`-p`), not one told to fix or write a file
+ * (`eslint -o f`, `--outputFile`, `prettier -w`), and `tsc` only when it emits nothing.
+ */
+function npxChanges(args: string, cwd: string): boolean {
+  const words = shellWords(args);
+  let i = 0;
+  for (; words[i]?.startsWith("-"); i++)
+    if (/^(-p|--package|-c|--call)(=|$)/.test(words[i]!)) return true;
+  const [name = "", ...rest] = words.slice(i);
+  const tool = NPX_CHECKS.exec(name)?.[1];
+  if (!tool || FIX_ARGS.test(args)) return true;
+  const has = (re: RegExp) => rest.some((w) => re.test(w));
+  if (has(/^--(output-?file|outputFile|out-?dir|outFile|generateTrace)(=|$)/i)) return true;
+  if (tool === "eslint" && has(/^-o/)) return true;
+  if (tool === "prettier" && has(/^-[a-zA-Z]*w$/)) return true;
+  return tool === "tsc" && !tscEmitsNothing(rest, cwd);
+}
+
+/** Does this `tsc` call only check: `--noEmit`, or a tsconfig that says so (not `-b`, not files)? */
+function tscEmitsNothing(words: string[], cwd: string): boolean {
+  if (words.some((w) => /^(-b|--build|--generateTrace)(=|$)/i.test(w))) return false;
+  const noEmit = words.findIndex((w) => /^--noEmit(=true)?$/i.test(w));
+  if (noEmit !== -1) return words[noEmit + 1] !== "false";
+  let project = "tsconfig.json";
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (/^(-p|--project)$/i.test(w)) project = words[++i] ?? "";
+    else if (!w.startsWith("-")) return false; // files, or an option's value we cannot place
+  }
+  try {
+    let file = resolve(cwd, project);
+    if (statSync(file).isDirectory()) file = join(file, "tsconfig.json");
+    const st = statSync(file);
+    if (st.size > 256 * 1024) return false;
+    return /"noEmit"\s*:\s*true\b/.test(readFileSync(file, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Tools with read-only forms worth routing (`kubectl logs`, `curl -s url`, `npm test`): does
+ * this call (the arguments after the tool's name, run in `cwd`) change something instead?
+ */
+const CHANGES = new Map<string, (args: string, cwd: string) => boolean>([
+  ["curl", (a) => CURL_SENDS.test(a)],
+  ["wget", (a) => !WGET_PRINTS.test(a) || WGET_SENDS.test(a)],
+  ["kubectl", (a) => verbChanges("kubectl", KUBECTL_READS, a)],
+  ["docker", (a) => verbChanges("docker", DOCKER_READS, a)],
+  ["gh", ghApiSends],
+  ["make", makeChanges],
+  ["npx", npxChanges],
+  ["npm", (a) => runsScript("npm", a)],
+  ["pnpm", (a) => runsScript("pnpm", a)],
+  ["yarn", (a) => runsScript("yarn", a)],
+]);
+
+/** How many words of `words` are operands rather than options (or the values `valued` options take). */
+function operands(words: string[], valued: RegExp): number {
+  let n = 0;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === "--") return n + words.length - i - 1;
+    if (w.startsWith("-") && w.length > 1) {
+      if (valued.test(w)) i++;
+    } else n++;
+  }
+  return n;
+}
+
+/** gawk / awk running a command or writing a file from its program, or loading code from a file. */
+function awkRuns(words: string[]): boolean {
+  let program: string | undefined;
+  for (let i = 0; i < words.length && program === undefined; i++) {
+    const w = words[i]!;
+    if (w === "--") program = words[i + 1];
+    else if (/^(-[fiEl]|--(file|include|load|exec))/.test(w)) return true;
+    else if (/^(-e|--source)$/.test(w)) program = words[i + 1];
+    else if (/^(-[FvW]|--(field-separator|assign))$/.test(w)) i++;
+    else if (!w.startsWith("-")) program = w;
+  }
+  return (
+    program !== undefined &&
+    /\bsystem\s*\(|\|\s*&?\s*getline|\bprintf?\b[^;{}\n]*[>|]|@(load|include)\b/.test(program)
+  );
+}
+
+/** sed writing a file (`-i`, `--in-place`, a `w` command or flag) or running one (`e`). */
+function sedWrites(words: string[]): boolean {
+  const scripts: string[] = [];
+  let first: string | undefined;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === "--") {
+      first ??= words[i + 1];
+      break;
+    }
+    if (w.startsWith("--")) {
+      const [name, value] = w.split(/=(.*)/s);
+      if (name === "--in-place" || name === "--file") return true;
+      if (name === "--expression") scripts.push(value ?? words[++i] ?? "");
+      else if (name === "--line-length" && value === undefined) i++;
+    } else if (/^-./.test(w)) {
+      // a cluster: `-i` (any suffix: `-ie` keeps a backup `…e`), `-f` (script from a file) end it
+      for (let k = 1; k < w.length; k++) {
+        const c = w[k]!;
+        if (c === "i" || c === "f") return true;
+        if (c === "e" || c === "l") {
+          const value = w.slice(k + 1) || words[++i] || "";
+          if (c === "e") scripts.push(value);
+          break;
+        }
+      }
+    } else if (first === undefined) first = w;
+  }
+  if (!scripts.length && first !== undefined) scripts.push(first);
+  return scripts.some(sedScriptWrites);
+}
+
+/** Does a sed script write a file (`w`, `W`, `s///w`) or run a command (`e`, `s///e`)? */
+function sedScriptWrites(script: string): boolean {
+  if (script.length > 2048) return true; // not a script anyone reads a file with
+  let flagged = false;
+  // `s` and `y` bodies are data: only an `s` command's flags can write or run something
+  const t = script
+    .replace(
+      /(^|[^a-zA-Z\\])([sy])([^\\\n\sa-zA-Z0-9])((?:\\[\s\S]|(?!\3)[^\\])*)\3((?:\\[\s\S]|(?!\3)[^\\])*)\3([a-zA-Z0-9]*)/g,
+      (_m, pre: string, cmd: string, _d, _a, _b, flags: string) => {
+        if (cmd === "s" && /[we]/.test(flags)) flagged = true;
+        return `${pre};`;
+      },
+    )
+    // `/regex/` addresses are data too
+    .replace(/\/(?:\\[\s\S]|[^/\\\n])*\//g, ";");
+  return flagged || /(?:^|[^a-zA-Z_.-])(?:[wW]|e(?![a-zA-Z]))/.test(t);
+}
+
+/**
+ * Readers that write a file or run a program when given a certain flag, by tool: the words after
+ * the tool's name, quotes removed (`rg '--pre' rm` is `rg --pre rm`).
+ */
+const FLAG_WRITES = new Map<string, (words: string[]) => boolean>([
+  // `--pre cmd` runs cmd on every file searched
+  ["rg", (w) => w.some((x) => /^--pre(-glob)?(=|$)/.test(x))],
+  ["git", gitRunsOrWrites],
+  ["find", (w) => w.some((x) => /^-(delete|exec|execdir|ok|okdir|fprint0?|fprintf|fls)$/.test(x))],
+  ["tree", (w) => w.some((x) => /^(-[a-zA-Z]*o|--output)/.test(x))],
+  ["sed", sedWrites],
+  ["gsed", sedWrites],
+  ["awk", awkRuns],
+  ["gawk", awkRuns],
+  ["mawk", awkRuns],
+  ["nawk", awkRuns],
+  ["sort", (w) => w.some((x) => /^(-[a-zA-Z]*o|--output(=|$))/.test(x))],
+  // `uniq IN OUT` and `xxd IN OUT` write OUT
+  ["uniq", (w) => operands(w, /^(-[fsw]|--(skip-fields|skip-chars|check-chars))$/) > 1],
+  ["xxd", (w) => operands(w, /^-(c|g|l|o|s|n|cols|groupsize|len|offset|seek|name)$/) > 1],
+  ["yq", (w) => w.some((x) => /^(-[a-zA-Z]*i[a-zA-Z]*|--inplace)(=|$)/.test(x))],
+]);
+
+/**
+ * `git`: options that run a program or set config (`-c diff.external=…`, `--exec-path=`), an
+ * external diff or tool, an output file (`--output`), or `git grep -O` (opens a pager command).
+ */
+function gitRunsOrWrites(words: string[]): boolean {
+  let i = 0;
+  for (; i < words.length && words[i]!.startsWith("-"); i++) {
+    const w = words[i]!;
+    if (/^(-c|--config-env|--exec-path=)/.test(w)) return true;
+    if (/^(-C|--git-dir|--work-tree|--namespace|--super-prefix)$/.test(w)) i++;
+  }
+  const sub = words[i];
+  const rest = words.slice(i + 1);
+  if (sub === "difftool" || sub === "mergetool") return true;
+  if (rest.some((w) => /^--(output|ext-diff)(=|$)/.test(w))) return true;
+  return sub === "grep" && rest.some((w) => /^(-[a-zA-Z]*O|--open-files-in-pager)/.test(w));
+}
+
+/** Environment that makes git run a program or read other config: `GIT_EXTERNAL_DIFF=rm git diff`. */
+const GIT_ENV =
+  /(?:^|\s)GIT_(?:EXTERNAL_DIFF|PAGER|EDITOR|SEQUENCE_EDITOR|SSH|SSH_COMMAND|ASKPASS|PROXY_COMMAND|EXEC_PATH|CONFIG\w*|TRACE\w*|DIFF_OPTS|TEMPLATE_DIR)=/;
+
+/** `$((…))` without a nested `(` or backtick: arithmetic, no command in it. */
+const ARITHMETIC = /\$\(\(([^()`]*)\)\)/g;
+
+/**
+ * The commands inside `$(…)`, backticks and process substitutions `<(…)` / `>(…)`, innermost
+ * first; undefined when they nest deeper than MAX_STEPS or hold parentheses that cannot be paired
+ * (`$( (touch x) )`), whose commands are then unknown.
+ */
+function substitutions(segment: string): string[] | undefined {
+  const found: string[] = [];
+  const inner = /[$<>]\(([^()]*)\)|`([^`]*)`/g;
+  let s = segment.replace(ARITHMETIC, "_");
+  for (let level = 0; ; level++) {
+    const next = s.replace(inner, (_, a: string | undefined, b: string | undefined) => {
+      found.push(a ?? b ?? "");
+      return "_";
+    });
+    if (next === s) break;
+    if (level >= MAX_STEPS) return undefined;
+    s = next;
+  }
+  return /[$<>]\(/.test(s) ? undefined : found;
+}
+
+/**
+ * Must this segment run natively? It changes something (in any pipe stage), or it never
+ * finishes. Each stage is judged by the command a runner prefix
+ * starts, by its name without a path or quotes (`sudo /usr/bin/kubectl delete …` is
+ * `kubectl delete …`, `r''m` is `rm`).
+ */
+function staysNative(segment: string, cwd: string): boolean {
+  // A `>` inside quotes counts when it stands apart (`awk '{print > "out"}'`, `ssh h "echo x > f"`);
+  // glued to a word it is data there (`rg 'Promise<string>'`, `jq 'select(.n>3)'`) and a
+  // redirection outside quotes (`npm test>out.log`).
+  if (WRITES_FILE.test(segment)) return true;
+  if (GLUED_WRITE.test(segment.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''"))) return true;
+  return pipeStages(segment).some((stage, i) => {
+    const plain = stage.replace(SHELL_WORDS, "");
+    if (plain.includes("GIT_") && GIT_ENV.test(plain)) return true;
+    const cmd = stripRunners(plain).replace(/^\S*\//, "");
+    const [, quoted = "", args = ""] = /^(\S+)([\s\S]*)$/.exec(cmd) ?? [];
+    const tool = quoted.replace(/['"\\]/g, "");
+    const named = tool + args;
+    // `npm --prefix api install`, `npm -g install`: judge the subcommand, not the options.
+    const bare = /^(npm|pnpm|yarn)$/.test(tool)
+      ? `${tool} ${afterOptions(tool, args).join(" ")}`
+      : named;
+    return (
+      MUTATING.test(named) ||
+      MUTATING.test(bare) ||
+      ((/^(?:kubectl|docker|tail)(?![^\s])/.test(named) || named.includes("--watch")) &&
+        FOLLOWS.test(named)) ||
+      (i > 0 && RUNS_STDIN.test(named)) ||
+      CHANGES.get(tool)?.(args, cwd) === true ||
+      FLAG_WRITES.get(tool)?.(shellWords(args)) === true
+    );
+  });
+}
+
+/** Commands that only read (or navigate), by name; the other tools are judged by `readsOnly`. */
+const READ_ONLY =
+  /^(?:(?:cd|pushd|popd|pwd|true|false|:|test|\[|sleep|echo|printf|ls|tree|cat|head|tail|wc|grep|egrep|fgrep|rg|sort|uniq|cut|tr|nl|column|awk|sed|jq|yq|diff|cmp|du|df|stat|file|which|type|date|basename|dirname|realpath|readlink|ps|lsof|strings|xxd|od|find)|git\s+(?:(?:-[Cc]\s*[^-\s]\S*|--no-pager)\s+)*(?:diff|log|show|status|ls-files|ls-tree|grep|blame|branch(?=\s*$|\s+(?:-[avr]+|--(?:list|show-current|merged|no-merged|contains))(?:\s|$))|rev-list|rev-parse|for-each-ref|cat-file|describe|shortlog|reflog|merge-base|name-rev|config\s+(?:--(?:global|local|system|worktree)\s+)*(?:--get\S*|--list|-l)))(?![\w-])/;
+/** Read-only forms of the tools judged by CHANGES (which only rules out the known writes). */
+const TOOL_READS: Record<string, (args: string) => boolean> = {
+  gh: (a) =>
+    /^\s+(?:api|(?:pr|issue|run|search|repo|release)\s+(?:list|view|diff|checks|status))\b/.test(a),
+  npm: (a) =>
+    /^(?:test|t|run|run-script|ls|ll|list|outdated|view|show|info|why|explain|audit|root|bin|prefix|help)$/.test(
+      afterOptions("npm", a)[0] ?? "",
+    ),
+  pnpm: (a) => afterOptions("pnpm", a).length > 0,
+  yarn: (a) => afterOptions("yarn", a).length > 0, // bare `yarn` installs
+};
+
+/** Is this simple command (every pipe stage of it) known to only read? Unknown means no. */
+function readsOnly(segment: string, cwd: string): boolean {
+  return pipeStages(segment).every((stage) => {
+    const cmd = stripRunners(stage.replace(SHELL_WORDS, "")).replace(/^\S*\//, "");
+    const [, tool = "", args = ""] = /^(\S+)([\s\S]*)$/.exec(cmd) ?? [];
+    // Flags that make a reader write: `git diff --output=f`, `sort -o f`.
+    if (/(?:^|\s)--output(?=[\s=]|$)/.test(args) || (tool === "sort" && /\s-\w*o\b/.test(args)))
+      return false;
+    if (CHANGES.has(tool)) return TOOL_READS[tool]?.(args) ?? !CHANGES.get(tool)!(args, cwd);
+    return READ_ONLY.test(cmd);
+  });
 }
 
 /** Output size Read tolerates natively; a `cat` of that much is the same read through Bash. */
@@ -335,7 +1085,8 @@ function fileOperands(stage: string, cwd: string): string[] | undefined {
     }
     files.push(t);
   }
-  if (!files.length) return undefined;
+  // More files than anyone names by hand: not worth a stat each.
+  if (!files.length || files.length > MAX_OPERANDS) return undefined;
   const out: string[] = [];
   for (let f of files) {
     if (/[*?[\]{}$`\\]/.test(f)) return undefined;
@@ -401,10 +1152,24 @@ function firstStageBound(first: string, cwd: string): true | Heavy | undefined {
     const bytes = stageBytes(first, cwd);
     if (bytes === undefined) return undefined;
     if (bytes <= READ_LIMIT) return true; // what Read would show anyway
-    return { rule: "big-read", text: `reads about ${Math.round(bytes / 1024)} KB` };
+    return {
+      rule: "big-read",
+      text: `reads about ${Math.round(bytes / 1024)} KB`,
+    };
   }
   return undefined;
 }
+
+/**
+ * Read-only commands whose output can be long: a filter after them still reads all of it. Not
+ * `env`: em_execute runs with an allowlisted environment, so it would answer about a different one.
+ */
+const READ_SOURCE =
+  /^\s*(ls|cat|sed|awk|cut|sort|uniq|tr|nl|echo|printf|ps|lsof|jq|yq|diff|strings|xxd|od|git\s+(diff|ls-files|ls-tree|grep|status|show|log|blame|branch|rev-list|for-each-ref|cat-file)|gh\s+(api|pr\s+(list|view|diff|checks)|issue\s+(list|view)|run\s+(list|view)|search))\b/;
+/** Stages that only filter what they are given; the pipe rule needs one that does not bound it. */
+const FILTERS =
+  /^\s*(grep|egrep|fgrep|rg|sort|uniq|jq|head|tail|wc|cut|tr|column|less|awk|sed|python3?\s+-m\s+json\.tool)\b/;
+const UNBOUNDED_FILTERS = /^\s*(grep|rg|sort|uniq|jq|less)\b/;
 
 /** Why one simple command would print a lot, or undefined when its output is bounded. */
 function heavySegment(segment: string, cwd: string): Heavy | undefined {
@@ -414,12 +1179,20 @@ function heavySegment(segment: string, cwd: string): Heavy | undefined {
   if (!first) return undefined;
   // `… | head -40` caps whatever came before it.
   if (stages.length > 1 && bounds(stages[stages.length - 1]!)) return undefined;
+  // A later stage that does something with the output (`| patch -p1`, `| psql db`) may change
+  // something: only a pipe through known filters is routed.
+  const rest = stages.slice(1);
+  if (!rest.every((s) => FILTERS.test(s))) return undefined;
   const bound = firstStageBound(first, cwd);
   if (bound === true) return undefined;
   if (bound) return bound;
   if (HEAVY_BASH.test(first)) return { rule: "heavy", text: "usually prints a lot" };
-  if (stages.slice(1).some((s) => /^\s*(grep|rg|sort|uniq|jq|less)\b/.test(s)))
-    return { rule: "pipe", text: "streams an unbounded output through a filter" };
+  // Only a source known to just read: an unknown one (`ssh`, `psql`, `aws`) may change something.
+  if (READ_SOURCE.test(first) && rest.some((s) => UNBOUNDED_FILTERS.test(s)))
+    return {
+      rule: "pipe",
+      text: "streams an unbounded output through a filter",
+    };
   return undefined;
 }
 
@@ -435,31 +1208,63 @@ function headOf(segment: string, n = 60): string {
  * (and is not capped by `| head`, and is not a cat of what Read would show anyway) goes to
  * em_execute.
  */
-function bashSuggestion(raw: string, cwd: string): Suggestion | undefined {
+function bashSuggestion(raw: string, root: string, cwd: string): Suggestion | undefined {
+  if (raw.length > MAX_RAW) return undefined;
   const cmd = withoutHeredocs(raw);
   if (!cmd.trim()) return undefined;
+  // Nobody types a read this long; judging it would cost the hook more than routing saves.
+  if (cmd.length > MAX_CLASSIFIED) return undefined;
   const segments = commandSegments(cmd);
-  if (segments.some(mutates)) return undefined;
+  if (segments.length > MAX_SEGMENTS) return undefined; // a script, not a read: each may stat files
+  // `$(…)` and backticks run too: their commands are judged like the line's own, and ones we
+  // cannot unwrap (`$( (cmd) )`, nested past MAX_STEPS) are unknown, so the line stays native.
+  const subs = substitutions(cmd);
+  if (!subs) return undefined;
+  if ([...segments, ...subs.flatMap(commandSegments)].some((s) => staysNative(s, cwd)))
+    return undefined;
+  // A line of several commands is routed only when every one of them is known to just read:
+  // anything else in it would run in the sandbox without Claude Code's Bash permission prompt.
+  if (segments.length > 1 && !segments.every((s) => readsOnly(s, cwd))) return undefined;
   // git history reads have a classified answer: fixes traced to their origin, risk per
-  // file, branches vs base — em_history, not a raw log through em_execute.
+  // file, branches vs base — em_history, not a raw log through em_execute. em_history reads
+  // the root's repository only, so a read of another one (or of none) is judged like any command.
   const history = historyCall(cmd);
-  if (history) {
+  const dir = history && historyDir(segments, cwd);
+  // A git read in another repository is not em_history's (nor em_execute's, which runs in the root).
+  if (history && dir && !sameRepo(root, dir)) return undefined;
+  if (history && dir && inRootRepo(root, dir)) {
     return {
       tool: "em_history",
       rule: "history",
       reason: `the git history is already classified (commit kinds, fixes traced to the change that caused them, risk per file); em_history ${history} answers this without the raw log`,
     };
   }
+  // Relative paths resolve where the shell is by then: `cd logs && cat app.log` reads logs/app.log.
+  let at: string | undefined = cwd;
+  let steps = 0;
   for (const segment of segments) {
-    const heavy = heavySegment(segment, cwd);
-    if (!heavy) continue;
-    return {
-      tool: "em_execute",
-      rule: heavy.rule,
-      reason: `\`${headOf(segment)}\` ${heavy.text}; em_execute {language:"shell", code, intent} keeps the output out of context and returns only matching sections`,
-    };
+    const heavy = heavySegment(segment, at ?? cwd);
+    if (heavy)
+      return {
+        tool: "em_execute",
+        rule: heavy.rule,
+        reason: `\`${headOf(segment)}\` ${heavy.text}; em_execute {language:"shell", code, intent} keeps the output out of context and returns only matching sections`,
+      };
+    const cd = CD.exec(segment);
+    if (cd) at = ++steps > MAX_STEPS ? undefined : at && changeDir(at, cd[1]!);
   }
   return undefined;
+}
+
+/** Would em_execute_file accept this path? It is given the root as a real path, like the server. */
+function executeFileTakes(root: string, fp: string): boolean {
+  try {
+    const real = realpathSync(root);
+    confinePath(real, resolve(root, fp), loadPermissionRules(real));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Decide whether a native tool call is better served by an em_* tool. */
@@ -471,19 +1276,21 @@ export function suggest(
 ): Suggestion | undefined {
   switch (toolName) {
     case "Bash":
-      return bashSuggestion(String(input.command ?? ""), extra.cwd ?? root);
+      return bashSuggestion(String(input.command ?? ""), root, extra.cwd ?? root);
     case "Read": {
       const fp = String(input.file_path ?? "");
       if (!fp) return undefined;
+      // An offset or limit is a window the model already chose: bounded, like `sed -n 'A,Bp'`.
+      if (input.offset != null || input.limit != null) return undefined;
       const ext = extname(fp).toLowerCase();
       if (VISUAL_EXT.has(ext)) return undefined;
       try {
-        const abs = resolve(root, fp);
-        const st = statSync(abs);
+        const st = statSync(resolve(root, fp));
         if (st.size > 200 * 1024 || (BIG_TEXT_EXT.has(ext) && st.size > 20 * 1024)) {
-          // em_execute_file refuses what a Read deny or ask rule matches; leave the native Read
+          // em_execute_file refuses a file outside the root (Claude Code's own saved tool
+          // outputs among them) and what a Read deny or ask rule matches; leave the native Read
           // to Claude Code's own permission check instead of redirecting to a dead end.
-          if (!checkReadPath(loadPermissionRules(root), abs).allowed) return undefined;
+          if (!executeFileTakes(root, fp)) return undefined;
           return {
             tool: "em_execute_file",
             rule: "big-read",
@@ -568,11 +1375,15 @@ function projectRel(ctx: ProjectContext, fp: string): string | undefined {
   return rel.startsWith("..") ? undefined : rel;
 }
 
+const GRAPH_HINT_TOOLS = new Set(["Grep", "Glob", "Read"]);
+
 /**
  * Non-blocking context for navigation tools: matching graph symbols for Grep/Glob
  * patterns, coverage gaps for files about to be read. Never denies anything.
  */
 function graphContext(ctx: ProjectContext, input: HookInput): string | undefined {
+  // Only these tools get a graph hint: any other call must not open the database.
+  if (!GRAPH_HINT_TOOLS.has(input.tool_name ?? "")) return undefined;
   try {
     const db = getStorage(ctx, { vectors: false });
     if (!db.graphCounts().nodes) return undefined;
@@ -608,7 +1419,11 @@ function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefine
     const repeatAfter = ctx.config.recall.repeatAfter;
     const edit = EDIT_TOOLS.has(input.tool_name ?? "");
     const results = [
-      memoriesForFile(db, rel, { sessionId, symbols: fileSymbols(db, rel), repeatAfter }),
+      memoriesForFile(db, rel, {
+        sessionId,
+        symbols: fileSymbols(db, rel),
+        repeatAfter,
+      }),
       fileContext(db, rel, { sessionId, edit, repeatAfter }),
     ];
     const shown = results.filter((r) => r.text);
@@ -626,17 +1441,24 @@ function fileKnowledge(ctx: ProjectContext, input: HookInput): string | undefine
   }
 }
 
-/** Files a `git commit` command will include: the index, plus tracked changes with -a. */
-function commitFiles(root: string, cmd: string): string[] {
+/**
+ * Files a `git commit` command will include: the index, plus tracked changes with -a. git runs
+ * where the command does (the hook cwd, which follows a `cd` into a nested repository) and names
+ * files from that repository's top level; each is re-keyed onto the session root, which the
+ * database's paths are relative to, whether the root lies above the repository or inside it.
+ */
+function commitFiles(root: string, cwd: string, cmd: string): string[] {
+  const top = git(cwd, ["rev-parse", "--show-toplevel"], { allowFail: true }).trim();
+  if (!top) return [];
+  // -z: names unquoted, so non-ASCII paths match the database's.
   const list = (args: string[]) =>
-    git(root, args, { allowFail: true })
-      .split("\n")
-      .map((l) => l.trim())
+    git(cwd, [...args, "-z"], { allowFail: true })
+      .split("\0")
       .filter(Boolean);
   const files = new Set(list(["diff", "--cached", "--name-only"]));
   if (/\s(-[a-zA-Z]*a[a-zA-Z]*|--all)\b/.test(cmd))
     for (const f of list(["diff", "--name-only"])) files.add(f);
-  return [...files];
+  return [...files].map((f) => relative(root, join(top, f)));
 }
 
 /** Before `git commit`: the bug-prone and widely imported files it includes. */
@@ -646,7 +1468,7 @@ function commitKnowledge(ctx: ProjectContext, input: HookInput): string | undefi
   if (!/(^|[;&|]\s*)git\s+commit\b/.test(cmd)) return undefined;
   try {
     const db = getStorage(ctx, { vectors: false });
-    return commitContext(db, commitFiles(ctx.root, cmd)) || undefined;
+    return commitContext(db, commitFiles(ctx.root, input.cwd || ctx.root, cmd)) || undefined;
   } catch {
     return undefined;
   }
@@ -675,7 +1497,11 @@ async function webKnowledge(ctx: ProjectContext, input: HookInput): Promise<stri
   if (!text.trim()) return undefined;
   try {
     const db = getStorage(ctx, { vectors: false });
-    const r = await recallForText(db, text, { maxMemories: 0, maxDocs: 3, path: "web" });
+    const r = await recallForText(db, text, {
+      maxMemories: 0,
+      maxDocs: 3,
+      path: "web",
+    });
     if (!r.text) return undefined;
     const pages = r.text.split("\n").filter((l) => l.startsWith("- docs:"));
     return [
@@ -698,7 +1524,12 @@ function withContext(
 ): HookOutput | undefined {
   if (!extra) return out;
   if (!out)
-    return { hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: extra } };
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        additionalContext: extra,
+      },
+    };
   const cur = out.hookSpecificOutput?.additionalContext;
   return {
     ...out,
@@ -716,7 +1547,7 @@ export const preToolUse: HookHandler = async (
   if (!input.tool_name || !input.tool_input) return undefined;
   // em_swarm is eminiar's own tool: stamp (or strip) its caller, never route or annotate it.
   if (isSwarmTool(input.tool_name)) return swarmStampCaller(input);
-  const ctx = getContext(input.cwd);
+  const ctx = sessionContext(input.cwd);
   // A swarm worker starting a tool is alive: keep its capacity slot and its task.
   if (input.agent_id) swarmTouch(ctx, input);
   // Swarm capacity holds in every routing mode, and a denial wins over everything else.
@@ -735,7 +1566,10 @@ export const preToolUse: HookHandler = async (
   }
 };
 
-type RoutedInput = HookInput & { tool_name: string; tool_input: Record<string, unknown> };
+type RoutedInput = HookInput & {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+};
 
 /** Routing proper: knowledge hints, then the routing mode's decision for this call. */
 async function route(
@@ -753,11 +1587,12 @@ async function route(
   const mode = effectiveRoutingMode(ctx.config);
   if (mode === "off") return withContext(undefined, memo);
   const coexisting = contextModeInstalled() && ctx.config.routing.deferToContextMode;
-  // context-mode already routes these; adding a second opinion only confuses the model.
-  if (coexisting && ["Bash", "Read", "Grep", "WebFetch"].includes(input.tool_name))
-    return withContext(undefined, memo);
-
   const graph = graphContext(ctx, input);
+  // context-mode already routes these: drop the routing suggestion, keep what only eminiar
+  // knows (symbol hints, coverage warnings, the file memo).
+  if (coexisting && ["Bash", "Read", "Grep", "WebFetch"].includes(input.tool_name))
+    return withContext(undefined, joinHints(graph, memo));
+
   const hint = joinHints(graph, memo);
   // graphContext names matching symbols only when the graph has them: that is the signal
   // to route a Grep for the identifier to em_symbols / em_search instead of rg.
@@ -765,7 +1600,10 @@ async function route(
     input.tool_name === "Grep" && graph
       ? literalOf(String(input.tool_input.pattern ?? ""))
       : undefined;
-  const s = suggest(input.tool_name, input.tool_input, ctx.root, { symbol, cwd: input.cwd });
+  const s = suggest(input.tool_name, input.tool_input, ctx.root, {
+    symbol,
+    cwd: input.cwd,
+  });
   const record = routingRecorder(ctx, input, s);
   if (!s) {
     record("allow");

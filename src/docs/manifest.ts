@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { PROJECT_RELATIVE_PATH_RE } from "../config.js";
 import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 
@@ -95,11 +96,15 @@ function empty(): DocsManifest {
   return { version: 1, sources: [] };
 }
 
-/** A manifest as read, and how many `sources` entries it held that were not kept. */
-function normalize(raw: unknown): { manifest: DocsManifest; dropped: number } {
-  if (!raw || typeof raw !== "object") return { manifest: empty(), dropped: 0 };
+/**
+ * A manifest as read, how many `sources` entries it held that were not kept, and the names of
+ * the path sources among them dropped for a path outside the project.
+ */
+function normalize(raw: unknown): { manifest: DocsManifest; dropped: number; outside: string[] } {
+  if (!raw || typeof raw !== "object") return { manifest: empty(), dropped: 0, outside: [] };
   const sources = Array.isArray((raw as DocsManifest).sources) ? (raw as DocsManifest).sources : [];
   const out: DocSource[] = [];
+  const outside: string[] = [];
   const seen = new Set<string>();
   for (const s of sources) {
     if (!s || typeof s !== "object" || typeof s.name !== "string") continue;
@@ -107,21 +112,39 @@ function normalize(raw: unknown): { manifest: DocsManifest; dropped: number } {
     if (s.kind !== "url" && s.kind !== "path") continue;
     if (s.kind === "url" && !(Array.isArray(s.urls) && s.urls.length)) continue;
     if (s.kind === "path" && typeof s.path !== "string") continue;
+    // A committed manifest must not point a sync at files outside the project (../, /, a drive).
+    if (s.kind === "path" && !PROJECT_RELATIVE_PATH_RE.test(s.path as string)) {
+      process.stderr.write(
+        `eminiar: ignoring docs source ${JSON.stringify(s.name)}: its path ${JSON.stringify(s.path)} must be inside the project\n`,
+      );
+      outside.push(s.name);
+      continue;
+    }
     seen.add(s.name);
     out.push({
       ...s,
       addedAt: typeof s.addedAt === "string" ? s.addedAt : new Date(0).toISOString(),
     });
   }
-  return { manifest: { version: 1, sources: out }, dropped: sources.length - out.length };
+  return {
+    manifest: { version: 1, sources: out },
+    dropped: sources.length - out.length,
+    outside,
+  };
 }
 
 /**
  * Why a write would lose part of a parsed manifest, or undefined: a version other than 1 (a
  * newer eminiar's format), top-level keys other than version and sources, a `sources` that is
- * not an array, or entries normalize() did not keep (bad name, duplicate, unknown kind).
+ * not an array, or entries normalize() did not keep (bad name, duplicate, unknown kind, a path
+ * outside the project).
  */
-function lossyReason(raw: Record<string, unknown>, dropped: number): string | undefined {
+function lossyReason(
+  raw: Record<string, unknown>,
+  dropped: number,
+  outside: string[],
+  removing?: string | undefined,
+): string | undefined {
   if (raw.version !== 1)
     return raw.version === undefined
       ? "it has no version (this eminiar writes version 1)"
@@ -130,7 +153,10 @@ function lossyReason(raw: Record<string, unknown>, dropped: number): string | un
   if (extra.length) return `it has keys this eminiar does not know (${extra.sort().join(", ")})`;
   if (Object.hasOwn(raw, "sources") && !Array.isArray(raw.sources))
     return "its sources is not an array";
-  if (dropped) return `${dropped} of its sources ${dropped === 1 ? "is" : "are"} not valid entries`;
+  const rest = outside.filter((n) => n !== removing);
+  const lost = dropped - (outside.length - rest.length);
+  if (lost)
+    return `${lost} of its sources ${lost === 1 ? "is" : "are"} not valid entries${rest.length ? ` (${rest.join(", ")}: path outside the project)` : ""}`;
   return undefined;
 }
 
@@ -144,7 +170,12 @@ export const MANIFEST_MAX_BYTES = 1024 * 1024;
 /** What is at a manifest path: nothing, a manifest, or a file that was not read (and why). */
 export type ManifestProbe =
   | { state: "missing" }
-  | { state: "ok"; manifest: DocsManifest }
+  | {
+      state: "ok";
+      manifest: DocsManifest;
+      /** Path sources normalize() dropped for a path outside the project, by name. */
+      outside?: string[] | undefined;
+    }
   | { state: "refused"; reason: string };
 
 /** Options for probeManifestAt. */
@@ -156,6 +187,11 @@ export interface ManifestProbeOptions {
    * a write would reduce (lossyReason).
    */
   write?: boolean | undefined;
+  /**
+   * A write that removes this source: its entries dropped for a path outside the project are not
+   * lost by it, so `em_docs remove` can clear such an entry from the file.
+   */
+  removing?: string | undefined;
 }
 
 /**
@@ -176,7 +212,7 @@ export class ManifestRefusedError extends Error {
 }
 
 /** `child` is `parent` or below it (both already absolute and resolved the same way). */
-function within(child: string, parent: string): boolean {
+export function within(child: string, parent: string): boolean {
   const rel = relative(parent, child);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
@@ -276,12 +312,12 @@ export function probeManifestAt(file: string, opts: ManifestProbeOptions = {}): 
     }
     if (!raw || typeof raw !== "object" || Array.isArray(raw))
       return { state: "refused", reason: "it is not a JSON object" };
-    const { manifest, dropped } = normalize(raw);
+    const { manifest, dropped, outside } = normalize(raw);
     if (opts.write) {
-      const lossy = lossyReason(raw as Record<string, unknown>, dropped);
+      const lossy = lossyReason(raw as Record<string, unknown>, dropped, outside, opts.removing);
       if (lossy) return { state: "refused", reason: lossy };
     }
-    return { state: "ok", manifest };
+    return { state: "ok", manifest, ...(outside.length ? { outside } : {}) };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     // Removed between the stat and the open: nothing is there to lose.
@@ -334,9 +370,13 @@ export function readManifestForWrite(ctx: ProjectContext): DocsManifest {
  * leave the project, or write through a symlink. The text goes to a new temp file in the same
  * folder, renamed over the manifest, so nothing is written through whatever is at the path.
  */
-export function writeManifest(ctx: ProjectContext, m: DocsManifest): string {
+export function writeManifest(
+  ctx: ProjectContext,
+  m: DocsManifest,
+  removing?: string | undefined,
+): string {
   const file = manifestPath(ctx);
-  const opts = { root: ctx.root, write: true };
+  const opts = { root: ctx.root, write: true, removing };
   const p = probeManifestAt(file, opts);
   if (p.state === "refused") throw new ManifestRefusedError(file, p.reason);
   const dir = dirname(file);
@@ -383,7 +423,8 @@ export function makeSource(input: DocSourceInput): DocSource {
   const path = input.path?.trim();
   if (input.kind === "url" && !urls.length) throw new Error(`${name}: a url source needs urls`);
   if (input.kind === "path" && !path) throw new Error(`${name}: a path source needs a path`);
-  if (path && (path.startsWith("/") || path.startsWith("..")))
+  // The rule normalize() reads the manifest with, so an added source is never dropped on read.
+  if (path && !PROJECT_RELATIVE_PATH_RE.test(path))
     throw new Error(`${name}: path must be inside the project`);
   const src: DocSource = {
     name,
@@ -429,12 +470,20 @@ export function upsertSources(
   return { added, updated, file };
 }
 
+/**
+ * Remove a source by name. An entry that is only in the file (dropped on read for a path outside
+ * the project) is removed too: the write loses nothing else, so the probe allows it.
+ */
 export function removeSource(ctx: ProjectContext, name: string): boolean {
-  const m = readManifestForWrite(ctx);
+  const file = manifestPath(ctx);
+  const p = probeManifestAt(file, { root: ctx.root, write: true, removing: name });
+  if (p.state === "refused") throw new ManifestRefusedError(file, p.reason);
+  if (p.state === "missing") return false;
+  const m = p.manifest;
   const before = m.sources.length;
   m.sources = m.sources.filter((s) => s.name !== name);
-  if (m.sources.length === before) return false;
-  writeManifest(ctx, m);
+  if (m.sources.length === before && !p.outside?.includes(name)) return false;
+  writeManifest(ctx, m, name);
   return true;
 }
 

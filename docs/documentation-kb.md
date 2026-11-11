@@ -73,6 +73,12 @@ em_docs {action: "add", path: "specs/openapi.yaml"}
 em_docs {action: "add", provider: "npm:zod"}
 ```
 
+A `path` source must stay inside the project. `add` refuses an absolute path, a drive letter or a
+`..` segment, and a manifest entry like that is ignored with a stderr note: every sync reports
+it and removes pages indexed for it before, and `em_docs remove` deletes it from the file. A sync and
+`em_reindex {scope: "docs"}` skip any file that resolves outside the project through a symlink (a
+committed `docs/link -> ~` indexes nothing); a sync lists them in its errors.
+
 ### Crawl budgets
 
 | Source | Depth | Max pages |
@@ -123,7 +129,7 @@ counts. `remove` with the orphaned name drops those pages; `add` with the same n
   name.
 - A `WebSearch` is told which sources exist. Matching indexed pages are attached.
 - The session brief lists the sources.
-- `/em-onboard` builds the set and writes the `onboarding/documentation` memory.
+- `/eminiar:em-onboard` builds the set and writes the `onboarding/documentation` memory.
 
 ## Share and extend
 

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { loadPermissionRules } from "../permissions/settings.js";
 import { describeRun, execute } from "../sandbox/execute.js";
 import { confinePath } from "../sandbox/file.js";
-import { processOutput } from "../sandbox/output.js";
+import { cleanStderr, processOutput } from "../sandbox/output.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
 import { LANG_ENUM } from "./em_execute.js";
@@ -46,17 +46,22 @@ export const emExecuteFile = defineTool({
     } catch (err) {
       return errorResult((err as Error).message);
     }
+    // Cleaned once: the output, the stderr document, the header and the tail all use it.
+    const stderr = cleanStderr(r.stderr);
     const processed = await processOutput(getStorage(ctx), ctx, {
       stdout: r.stdout,
+      stderr,
       title: `file: ${args.path}`,
       source: "exec",
       intent: args.intent,
       maxTokens: args.max_tokens,
     });
-    const parts = [describeRun(r)];
+    const parts = [describeRun({ ...r, stderr })];
     if (processed.text) parts.push(processed.text);
-    if (r.exitCode !== 0 && r.stderr.trim())
-      parts.push(`stderr (tail):\n${r.stderr.trim().slice(-2048)}`);
+    // stderr is part of the output. When the intent picked what came back, still show how a
+    // failure ended; without one the preview's tail already does.
+    if (r.exitCode !== 0 && stderr && processed.documentId !== undefined && args.intent)
+      parts.push(`stderr (tail):\n${stderr.slice(-2048)}`);
     const out = parts.join("\n");
     recordStat(ctx, "em_execute_file", {
       rawChars: r.stdout.length + r.stderr.length,

@@ -20,8 +20,20 @@ Use these instead of `Bash` or `Read` when the output can be large.
 | Tool | Parameters | Use for |
 |---|---|---|
 | `em_execute` | `language`, `code`, `intent`, `queries`, `timeout_ms`, `max_tokens` | git log/diff, test runs, dependency trees, logs, API calls |
-| `em_batch_execute` | `commands[{label, command, language}]`, `queries`, `intent`, `concurrency` | Several commands in parallel, with questions answered in one round trip |
-| `em_execute_file` | `path`, `code`, `intent` | Processing a large file. Your code gets the path in `$EM_FILE` and only what it prints returns |
+| `em_batch_execute` | `commands[{label, command, language}]`, `queries`, `intent`, `concurrency`, `timeout_ms`, `max_tokens` | Several commands in parallel, with questions answered in one round trip |
+| `em_execute_file` | `path`, `code`, `language` (default `shell`), `intent`, `timeout_ms`, `max_tokens` | Processing a large file. Your code gets the path in `$EM_FILE` and only what it prints returns |
+
+Each run is a child process in the project root with a stripped environment, not an isolated
+sandbox: it can read and write your files and reach the network. Shell code is checked against
+your Claude Code `Bash` deny and ask rules. Code in other languages is not checked; turn those
+languages off with `sandbox.disabledLanguages` when your Bash rules must hold. See
+[How it works › Sandbox](how-it-works.md#sandbox).
+
+**What comes back.** stdout, then stderr after a `--- stderr ---` line, so test runners that report
+on stderr (Jest) are searched too. The two are indexed as separate documents, and the 5 KB rule
+below counts them together. Progress frames that a carriage return overwrote are dropped. The
+header (the first line, or each `## label` line of `em_batch_execute`) gives the exit code, the
+stdout size and, when there is any, the size of the stderr that comes back.
 
 **How `intent` works.** Output under 5 KB returns in full. Larger output is indexed and only the
 sections that match `intent` come back, with a list of searchable terms. Use `em_search` to dig
@@ -40,7 +52,7 @@ em_execute {language: "shell", code: "npm test", intent: "failing tests and thei
 |---|---|---|
 | `em_search` | `queries`, `source`, `content_type`, `sort`, `mode`, `since`, `limit` | Anything indexed: command output, files, pages, docs, memories, git messages, sessions |
 | `em_fetch_and_index` | `url` or `urls`, `queries`, `ttl_hours`, `force` | Fetch web pages, index them, return only the relevant sections. Cached for 24 hours |
-| `em_index` | `path` or `content`, `title`, `source`, `content_type`, `recursive`, `glob` | Add files, a directory or pasted text to the index |
+| `em_index` | `path` or `content`, `title`, `source`, `content_type`, `recursive`, `glob` | Add files, a directory or pasted text to the index. Files a `Read` deny or `ask` rule matches are refused or skipped |
 
 `em_search` options:
 
@@ -55,11 +67,12 @@ em_execute {language: "shell", code: "npm test", intent: "failing tests and thei
 
 | Tool | Parameters | Use for |
 |---|---|---|
-| `em_remember` | `content`, `kind`, `name`, `status`, `supersedes`, `tags`, `related_files`, `related_nodes` | Save a decision, constraint, fact or fix |
-| `em_recall` | `query`, `kind`, `topic`, `limit` | Find past decisions, constraints, errors and fixes |
-| `em_memory` | `action`: `list`, `read`, `edit`, `rename`, `delete`, `status` | Manage the memory files |
+| `em_remember` | `content`, `kind`, `name`, `replace`, `status`, `supersedes`, `tags`, `related_files`, `related_nodes` | Save a decision, constraint, fact or fix. `replace: true` overwrites a memory with the same name |
+| `em_recall` | `query`, `kind`, `topic`, `limit`, `include_session_history` | Find past decisions, constraints, errors and fixes |
+| `em_memory` | `action`: `list`, `read`, `edit`, `rename`, `delete`, `status`; `name`, `topic`, `kind`, `status`, `find`, `replace`, `regex`, `new_name`, `confirm`, `limit`, `max_tokens` | Manage the memory files |
 
 Memory kinds: `decision`, `constraint`, `fact`, `preference`, `todo`, `note`, `onboarding`.
+Decision statuses: `proposed`, `accepted` (default), `superseded`, `deprecated`.
 
 See [Memory and recall](memory-and-recall.md).
 
@@ -81,11 +94,11 @@ See [Documentation knowledge base](documentation-kb.md).
 
 | Tool | Parameters | Use for |
 |---|---|---|
-| `em_architecture` | `aspects` | The project map: languages, folders, entry points, routes, hotspots, clusters, cycles, decisions |
-| `em_symbols` | `mode`: `overview`, `find`, `references`; `file`, `name_path`, `include_body` | Navigate code by symbol instead of reading whole files |
-| `em_graph_impact` | `node`, `mode`, `to`, `depth`, `edge_kinds` | What breaks if a file or symbol changes, and why |
-| `em_graph_changes` | `ref` | The symbols a diff touches, their exposure, and the files it can reach |
-| `em_graph_query` | `query`, `kind`, `preset`, `pattern` | Find nodes, run a preset, or walk typed edges |
+| `em_architecture` | `aspects`, `max_tokens` | The project map: languages, folders, entry points, routes, hotspots, clusters, cycles, decisions |
+| `em_symbols` | `mode`: `overview`, `find`, `references`; `file`, `name_path`, `substring`, `depth`, `include_body`, `kind`, `limit`, `max_tokens` | Navigate code by symbol instead of reading whole files |
+| `em_graph_impact` | `node`, `mode`, `to`, `depth`, `edge_kinds`, `include_git`, `limit` | What breaks if a file or symbol changes, and why |
+| `em_graph_changes` | `ref`, `limit` | The symbols a diff touches, their exposure, and the files it can reach |
+| `em_graph_query` | `query`, `kind`, `path`, `preset`, `hotspot_kind`, `pattern`, `limit` | Find nodes, run a preset, or walk typed edges |
 | `em_graph_add` | `nodes`, `edges` | Add curated concepts and links to the graph |
 | `em_index_status` | — | Is the graph fresh? Which files were skipped and why? |
 
@@ -110,7 +123,7 @@ See [Knowledge graph and history](knowledge-graph.md).
 
 | Tool | Parameters | Use for |
 |---|---|---|
-| `em_history` | `action`, `path`, `sha`, `name`, `name_path`, `query`, `kinds`, `author`, `since`, `until`, `risky` | The classified git history |
+| `em_history` | `action`, `path`, `paths`, `sha`, `name`, `name_path`, `query`, `kinds`, `author`, `since`, `until`, `risky`, `limit`, `refresh` | The classified git history |
 
 | Action | Answers |
 |---|---|
@@ -179,13 +192,17 @@ em_adjudicate {action: "feedback", id: 42, outcome: "too_small", note: "needed o
 
 | Tool | Use for |
 |---|---|
-| `em_stats` | Tokens kept out of context, by `session`, `project` or `lifetime`, ending with today's and the session's cost |
+| `em_stats` | Estimated tokens kept out of context (4 characters per token, shown with `≈`), by `session`, `project` or `lifetime`, ending with today's and the session's cost. Savings are split by kind: measured savings are output that `em_execute`, `em_execute_file`, `em_batch_execute` and `em_fetch_and_index` produced and kept out of context; counterfactual savings are what a native `Read`, `Grep` or `git` call might have returned for a search, docs, graph, symbol or history answer (every file a graph answer touches, every whole chunk a search hit), so they can overstate. Session and project totals net each tool per session; the lifetime total nets each tool once, so it can differ slightly from the project total |
 | `em_usage` | Tokens, cache, cost and insights per model call from the local transcripts. `view`: `summary`, `daily`, `weekly`, `monthly`, `models`, `sessions`, `blocks`, `turns`, `tools`, `insights`, `savings`; `scope`: `project` or `session`; `since`: `30d` or an ISO date; `json`. See [Usage insights](usage.md) |
 | `em_doctor` | Installation health |
 | `em_reindex` | Rebuild part of the index: `code`, `git`, `metrics`, `docs`, `memories`, `embeddings` or `all`. Incremental unless `full: true` |
-| `em_purge` | Permanently delete project data: `index`, `sessions`, `graph`, `memories` (the database mirror only), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests) or `all`. Needs `confirm: true` |
+| `em_purge` | Permanently delete project data: `index`, `sessions` (events and the session history `em_recall` searches, snapshots, stats), `graph`, `memories` (the database mirror only), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests) or `all`. Needs `confirm: true` |
 
 ## Slash commands
+
+With the plugin install (the default) Claude Code namespaces these skills, so `/em-onboard` is
+typed `/eminiar:em-onboard`. A `--method settings` install copies them to the user `skills/`
+folder, where they keep the short names below.
 
 | Command | What it does |
 |---|---|

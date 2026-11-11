@@ -20,6 +20,7 @@ import {
 } from "../api.js";
 import { ErrorBox, KV, Spinner, toast, useAsync } from "../components.js";
 import { Badge, Card, EmptyState, Hero, Segmented, type Tone } from "../ds.js";
+import { classifyHref } from "../markdown/links.js";
 import { navigate } from "../router.js";
 import { ago, cls, day, fmt } from "../util.js";
 import { KnowledgeGalaxy } from "./KnowledgeGalaxy.js";
@@ -36,17 +37,25 @@ function KindTag({ kind }: { kind: string }): JSX.Element {
   return <Badge tone={KIND_TONES[kind] ?? "muted"}>{kind}</Badge>;
 }
 
+/** Seed URLs come from docs.json or the catalog: only web links are clickable, the rest is text. */
 function Links({ urls }: { urls: string[] }): JSX.Element {
   return (
     <span class="break">
-      {urls.map((u, i) => (
-        <>
-          {i ? ", " : ""}
-          <a href={u} target="_blank" rel="noreferrer">
-            {u}
-          </a>
-        </>
-      ))}
+      {urls.map((u, i) => {
+        const t = classifyHref(u);
+        return (
+          <>
+            {i ? ", " : ""}
+            {t.kind === "external" ? (
+              <a href={t.href} target="_blank" rel="noreferrer">
+                {u}
+              </a>
+            ) : (
+              u
+            )}
+          </>
+        );
+      })}
     </span>
   );
 }

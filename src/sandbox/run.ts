@@ -15,13 +15,15 @@ export interface RunResult {
   signal: NodeJS.Signals | null;
   timedOut: boolean;
   truncated: boolean;
+  /** Characters of stderr dropped from the front to stay within the cap (0 when none). */
+  stderrDropped?: number;
   durationMs: number;
 }
 
 /**
  * Spawn a process in its own group so a timeout kills the whole tree. stdout is
  * capped at `maxOutputBytes` (the process is killed once exceeded); stderr keeps
- * only its last 8 KB.
+ * its last `maxOutputBytes` characters, since test runners such as Jest report there.
  */
 export function runProcess(argv: string[], opts: RunOptions): Promise<RunResult> {
   const started = Date.now();
@@ -36,6 +38,7 @@ export function runProcess(argv: string[], opts: RunOptions): Promise<RunResult>
     const out: Buffer[] = [];
     let outBytes = 0;
     let errTail = "";
+    let errDropped = 0;
     let truncated = false;
     let timedOut = false;
     let done = false;
@@ -64,16 +67,25 @@ export function runProcess(argv: string[], opts: RunOptions): Promise<RunResult>
       }
       out.push(d);
     });
-    child.stderr?.on("data", (d: Buffer) => {
-      errTail = (errTail + d.toString()).slice(-8192);
+    // A decoder, so a character split across two chunks is not turned into U+FFFD.
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (d: string) => {
+      errTail += d;
+      // Trim only past twice the cap, so a chatty stderr costs linear time, not a copy per chunk.
+      if (errTail.length > 2 * opts.maxOutputBytes) {
+        errDropped += errTail.length - opts.maxOutputBytes;
+        errTail = errTail.slice(-opts.maxOutputBytes);
+      }
     });
     const finish = (exitCode: number | null, signal: NodeJS.Signals | null) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      const stderr = errTail.slice(-opts.maxOutputBytes);
       resolve({
         stdout: Buffer.concat(out).toString("utf8"),
-        stderr: errTail,
+        stderr,
+        stderrDropped: errDropped + (errTail.length - stderr.length),
         exitCode,
         signal,
         timedOut,

@@ -36,6 +36,15 @@ Tokens rotate every 15 minutes because …
 | `supersedes` | The older decision this one replaces. eminiar marks the older one `superseded` |
 | `related` | Files (`file:`) and symbols (`sym:`) the memory is about. Used for [file recall](#automatic-recall) |
 
+A name is `slug` or `topic/slug` in lowercase `[a-z0-9._-]`. `em_remember`, `em_memory` and the
+dashboard refuse any other name before they touch a file, so a name like `../../x` cannot reach
+a file outside the memories directory. `supersedes` is kept as written (`mem:<name>` works too);
+the named memory is marked superseded when the value is set or changed, not on every later save.
+A memory file must resolve inside the memories directory: a topic or file symlink that leads
+anywhere else (`~`, `src/`, `CLAUDE.md`) is listed as skipped, not imported, and these tools
+refuse to read or write through it. The memories directory itself may be a link to another folder
+of the project.
+
 **The files are the source of truth.** You can edit, move or delete them by hand. The next
 memory call imports the changes again. To force it, run `em_reindex {scope: "memories"}`.
 
@@ -58,7 +67,8 @@ Each memory file is:
 
 ## Onboarding memories
 
-`/em-onboard` writes five memories under `onboarding/`:
+`/eminiar:em-onboard` (`/em-onboard` with a `--method settings` install) writes five memories
+under `onboarding/`:
 
 | Memory | Contents |
 |---|---|
@@ -82,7 +92,7 @@ Hooks bring the relevant knowledge to Claude at the right moment.
 | **Before `git commit`** | The bug-prone and widely imported files in the commit | `eminiar history:` |
 | **After a failed tool call** | Earlier occurrences of the same error, with how they were resolved, and memories that mention it | `eminiar recall —` |
 | **Before `WebSearch` / `WebFetch`** | Indexed doc pages that already cover the query | `eminiar docs:` |
-| **When a subagent starts** | The project brief plus the memories and doc pages for its task | (in the prompt) |
+| **When a subagent is spawned** | The project brief plus the memories and doc pages for its task. Only `enforce` routing puts it in the subagent prompt; `annotate` gives it to the main session as context, and `off` adds nothing | `Project brief (eminiar):` |
 | **Session start** | Project brief: overview, accepted decisions, constraints, preferences, hot files | — |
 
 ### Rules that keep recall useful
@@ -100,7 +110,9 @@ Hooks bring the relevant knowledge to Claude at the right moment.
   queries. File history comes from a per-file risk table that is rebuilt when `HEAD` moves.
   Until the first build (the server warm-up or `em_history {action:"overview"}`) the session
   start says so.
-- **Every routing mode.** Recall works even with `routing.mode: off`.
+- **Every routing mode.** Recall on prompts, files, commits, errors and web calls works even with
+  `routing.mode: off`. The subagent brief is the exception: it follows the routing mode (see the
+  table above).
 - **Measured.** Every decision is recorded, fired or quiet, with the reason each candidate stayed
   out. `em_stats` shows the hit rate per path. From the terminal:
 
@@ -118,7 +130,7 @@ history and symbol questions to the knowledge tools:
 | Native call | Redirected to |
 |---|---|
 | `git log`, `git blame`, `git show <sha>`, `git shortlog` | `em_history` with the matching action (`file`, `commit`, `branch`, `search`, `symbol`, `timeline`, `overview`) |
-| `Grep` for an identifier the graph defines | `em_symbols {name_path, mode:"references"}` / `em_search {source:"code"}`; a files-only grep is annotated, a content grep is denied |
+| `Grep` for an identifier the graph defines | `em_symbols {name_path, mode:"references"}` / `em_search {source:"code"}`; a files-only grep or a content grep with a `head_limit` is annotated, a content grep without one is denied |
 
 See [How it works › Routing](how-it-works.md#routing).
 

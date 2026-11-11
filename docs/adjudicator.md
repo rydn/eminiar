@@ -87,7 +87,7 @@ You can turn it on in any of these ways:
   `eminiar upgrade`, and once `~/.eminiar/config.json` already says on or off.
   `eminiar install --adjudicator[=heuristic|embedding|typesafe|groq|cerebras|ollama|lmstudio|llamacpp]`
   turns it on without asking.
-- **During onboarding.** `/em-onboard` asks the same question. It never takes a key in chat. It
+- **During onboarding.** `/eminiar:em-onboard` asks the same question. It never takes a key in chat. It
   tells you to run `eminiar adjudicator key set` in your own terminal.
 - **From the CLI**, at any time:
 

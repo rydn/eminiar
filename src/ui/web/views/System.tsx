@@ -13,7 +13,10 @@ interface Check {
 
 function Doctor(): JSX.Element {
   const [fix, setFix] = useState(false);
-  const q = useAsync(() => api<Check[]>("/api/doctor", { fix: fix ? 1 : undefined }), [fix]);
+  const q = useAsync(
+    () => (fix ? post<Check[]>("/api/doctor", { fix: true }) : api<Check[]>("/api/doctor")),
+    [fix],
+  );
   const bad = (q.data ?? []).filter((c) => !c.ok).length;
   return (
     <>

@@ -1,6 +1,6 @@
 {
   "name": "eminiar",
-  "version": "0.13.1",
+  "version": "0.14.3",
   "description": "Local-first context, memory and knowledge-graph plugin for Claude Code and Cursor. Sandboxed execution, FTS5 + vector search, session continuity, and a code graph — nothing leaves your machine.",
   "type": "module",
   "license": "MIT",
@@ -70,6 +70,7 @@
     "better-sqlite3": "^13.0.3",
     "fast-glob": "^3.3.3",
     "ignore": "^7.0.12",
+    "micromatch": "^4.0.8",
     "sqlite-vec": "^0.1.9",
     "tsx": "^4.23.15",
     "turndown": "^7.2.4",
@@ -81,6 +82,7 @@
     "@biomejs/biome": "^2.5.15",
     "@types/better-sqlite3": "^9.6.0",
     "@types/d3-force": "^3.0.10",
+    "@types/micromatch": "^4.0.10",
     "@types/node": "^24.0.0",
     "@types/prismjs": "^1.26.6",
     "@types/turndown": "^5.0.5",

@@ -107,6 +107,15 @@ function symbolsAt(db: StorageAdapter, path: string, hunks: Hunk[]): Map<string,
 }
 
 /**
+ * True when `ref` can only be read as a revision or range (`HEAD~1`, `main...HEAD`, a sha,
+ * `main@{2 weeks ago}`): never an option (a leading `-`), and no control characters. It is
+ * passed as one argument with no shell, so only the leading dash matters to git.
+ */
+export function isDiffRef(ref: string): boolean {
+  return ref.length > 0 && ref.length <= 256 && !ref.startsWith("-") && !/\p{Cc}/u.test(ref);
+}
+
+/**
  * Map a git diff (working tree by default, or against `ref`) to the symbols it
  * touches, classify each by how exposed it is, and merge the impact of all of them
  * into one list of affected files. Untracked files count as fully changed.
@@ -116,8 +125,22 @@ export function detectChanges(
   root: string,
   opts: { ref?: string | undefined; limit?: number | undefined } = {},
 ): ChangeSet {
-  const args = ["diff", "--unified=0", "--no-color", "--relative", "--no-ext-diff"];
-  if (opts.ref) args.push(opts.ref);
+  const args = [
+    "diff",
+    "--unified=0",
+    "--no-color",
+    "--relative",
+    "--no-ext-diff",
+    "--no-textconv",
+  ];
+  if (opts.ref) {
+    // The ref comes from the model (em_graph_changes) or a dashboard query string. An option
+    // such as `--output=<file>` would make git write that file, so refuse anything that is not
+    // a revision and mark the end of options for git too.
+    if (!isDiffRef(opts.ref))
+      throw new Error(`not a ref, sha or range: ${JSON.stringify(opts.ref)}`);
+    args.push("--end-of-options", opts.ref);
+  }
   const hunks = parseUnifiedDiff(git(root, args));
   if (!opts.ref) {
     for (const p of git(root, ["ls-files", "--others", "--exclude-standard"]).split("\n")) {

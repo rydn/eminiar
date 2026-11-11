@@ -102,7 +102,7 @@ export function Sessions(): JSX.Element {
                   </div>
                   <div class="ss-prompt">{(s.last_prompt ?? "(no prompt yet)").slice(0, 100)}</div>
                   <div class="muted small">
-                    {s.calls} calls · {fmt(s.savedTokens)} saved · {pct(s.efficiency)}
+                    {s.calls} calls · ≈{fmt(s.savedTokens)} saved (estimated) · {pct(s.efficiency)}
                     {s.source ? ` · ${s.source}` : ""}
                   </div>
                 </div>

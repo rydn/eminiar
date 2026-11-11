@@ -42,7 +42,8 @@ Claude Code is very capable, but three things slow it down on a real project:
 
 eminiar is a Claude Code plugin that also installs into Cursor. It adds an MCP server with 24
 `em_*` tools and a set of hooks.
-Everything runs locally in one SQLite database per project.
+Everything runs locally: one SQLite database per project, plus a small global one for lifetime
+statistics and the fetch cache.
 
 | | Without eminiar | With eminiar |
 |---|---|---|
@@ -56,18 +57,21 @@ Everything runs locally in one SQLite database per project.
 
 ## What you get
 
-### 🧪 Sandboxed execution — keep raw output out of context
+### 🧪 Code execution — keep raw output out of context
 
 `em_execute`, `em_batch_execute` and `em_execute_file` run shell, JavaScript and TypeScript, plus
 Python, Ruby, Go, PHP, Perl, R, Elixir, Rust and C# when they are installed. Output over 5 KB is
-indexed. Claude gets back only the sections that match its `intent`. Snippets obey your Claude
-Code `Bash` deny rules, and `em_execute_file` refuses a `path` that one of your `Read` deny rules
-matches ([which rule forms](docs/how-it-works.md#sandbox)).
+indexed. Claude gets back only the sections that match its `intent`. Shell snippets are checked
+against your Claude Code `Bash` deny and ask rules, and `em_execute_file` refuses a `path` that
+one of your `Read` deny rules matches. Snippets in other languages are not rule-checked, and
+the sandbox is not an isolation boundary
+([what is enforced](docs/how-it-works.md#what-the-sandbox-enforces)).
 
 Hooks route noisy commands for Claude. A Bash line is judged one command at a time: output that
-is already bounded (`| head`, `| wc`, `grep -l`, `cat` of a small file) and commands that change
-files stay native. `git log`, `git blame` and `git show` go to `em_history`, and a `Grep` for a
-symbol the graph knows goes to `em_symbols`. `em_stats` shows each routing decision and the rule
+is already bounded (`| head`, `| wc`, `grep -l`, `cat` of a small file) and commands it
+recognises as changing something (files, a cluster, a remote API) stay native. `git log`,
+`git blame` and `git show` go to `em_history`, and a `Grep` for a symbol the graph knows goes to
+`em_symbols`. `em_stats` shows each routing decision and the rule
 behind it, so you can see what was sent where.
 
 ### 🔎 Hybrid search — keyword and meaning together
@@ -80,9 +84,10 @@ download.
 ### 🧠 Memory that comes back by itself
 
 `em_remember` writes plain markdown files to `.eminiar/memories/`. You can read them, edit them
-and commit them. Decisions have an ADR-style status (`proposed`, `accepted`, `superseded`). Hooks
-attach matching memories to your prompts, to file reads and edits, to failed commands and to
-subagent briefs. **Claude does not have to remember to look.**
+and commit them. Decisions have an ADR-style status (`proposed`, `accepted`, `superseded`,
+`deprecated`). Hooks attach matching memories to your prompts, to file reads and edits, to failed
+commands and, in `enforce` routing mode, to subagent prompts. **Claude does not have to remember
+to look.**
 
 Recall matches a memory when the prompt names it, one of its tags, a file it mentions or a
 symbol from that file. A memory can come back later in a long session. To see why a memory did
@@ -221,11 +226,13 @@ npx eminiar doctor            # checks every part
 Restart Claude Code (or Cursor). Then, in your project:
 
 ```text
-/em-onboard             # writes onboarding memories and builds the docs knowledge base
+/eminiar:em-onboard     # writes onboarding memories and builds the docs knowledge base
 ```
 
-That is all. Use Claude Code or Cursor as usual. To see how much context eminiar saves, run
-`/em-stats` or open the dashboard with `eminiar ui`. One flag covers Cursor because the hook
+That is all. Use Claude Code or Cursor as usual. To see an estimate of how much context eminiar
+saves, run `/eminiar:em-stats` or open the dashboard with `eminiar ui`; execution output kept out of
+context is measured, search and graph savings are counted against what native calls might have
+returned ([details](docs/tools.md#housekeeping)). One flag covers Cursor because the hook
 runner speaks both dialects; see [Cursor](docs/getting-started.md#cursor) for what differs.
 
 **For a team:** run `npx eminiar install --team` once and commit `eminiar.config.json` and
@@ -257,8 +264,8 @@ flowchart LR
 - **Hooks** run on session start, prompts, tool calls and failures. They capture session events,
   route noisy commands to the sandbox, and attach relevant knowledge.
 - **The MCP server** provides the `em_*` tools and keeps the index and graph up to date.
-- **Storage** is one SQLite file per project under `~/.eminiar/`. Memories also live as markdown
-  in your repo.
+- **Storage** is one SQLite file per project under `~/.eminiar/`, plus `~/.eminiar/global.db` for
+  lifetime statistics and the fetch cache. Memories also live as markdown in your repo.
 
 Read more in [How it works](docs/how-it-works.md).
 
@@ -285,20 +292,25 @@ Read more in [How it works](docs/how-it-works.md).
 
 Your code, tool output and memories stay on your machine. eminiar uses the network only to:
 
+- download the eminiar package and its dependencies from the npm registry on `install`, and
+  `eminiar@latest` on `upgrade`;
 - download the embedding model once (you can skip this with `install --no-model`);
 - fetch web pages and documentation that you or Claude ask it to index;
 - look up package metadata in the npm, PyPI and Go registries when it adds documentation;
 - only if you turn on the adjudicator with a remote provider and agree to it: send redacted
   prompt and task text to that provider ([what is sent](docs/adjudicator.md#providers-and-privacy)).
 
-The dashboard listens on `127.0.0.1` only.
+The dashboard listens on `127.0.0.1` only. On disk, `~/.eminiar` is readable by your user alone
+(macOS and Linux), and secrets with a known shape or name are masked in stored command and page
+output ([what is kept as written](docs/how-it-works.md#privacy-and-data)).
 
 ## About
 
 eminiar is for people who use Claude Code or Cursor on a real codebase and want it to remember
 decisions, see the structure of the code and stop filling its context with raw output. It is
-local-first: one SQLite database per project, no cloud service, and the dashboard listens on
-`127.0.0.1` only. It is open source under the MIT license, written by Ryan Dick.
+local-first: one SQLite database per project (plus a small global one), no cloud service, and the
+dashboard listens on `127.0.0.1` only. It is open source under the MIT license, written by
+Ryan Dick.
 
 ## License
 

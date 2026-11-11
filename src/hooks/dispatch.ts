@@ -1,4 +1,4 @@
-import { getContext } from "../context.js";
+import { sessionContext } from "../context.js";
 import { failedText, rawEnforced, swarmAgentReturned, swarmGate } from "../swarm/hooks.js";
 import { budgetFor, clearBudget, startBudget } from "./budget.js";
 import { cursorDir, detectClient, fromCursor, toCursor } from "./cursor.js";
@@ -116,7 +116,7 @@ function failClosed(input: HookInput, err: unknown): string | undefined {
     // The handler may have reserved a spawn slot before it ran late or threw; the denied call
     // never starts a worker, so release it or the retry the deny text invites is refused.
     try {
-      swarmAgentReturned(getContext(input.cwd), input);
+      swarmAgentReturned(sessionContext(input.cwd), input);
     } catch {
       // best effort
     }
@@ -150,7 +150,7 @@ async function runCursor(parsed: Record<string, unknown>, budgetMs?: number): Pr
   }
   let root = input.cwd;
   try {
-    root = getContext(input.cwd).root;
+    root = sessionContext(input.cwd).root;
   } catch {
     // the cwd is still a usable key for parked context
   }

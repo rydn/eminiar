@@ -12,9 +12,9 @@ documentation that Claude uses, from your terminal. Run `eminiar help` for the f
 | `eminiar install` | Install into Claude Code. Options: `--no-model`, `--method plugin\|settings`, `--cursor`, `--team`, `--marketplace github:org/repo`, `--statusline`, `--node PATH` (Node.js binary the hooks and MCP server run), `--yes`, `--force` |
 | `eminiar install --adjudicator[=X] [--accept-remote]` | Also turn on the [adjudicator](adjudicator.md) with provider `X` (`heuristic`, `embedding`, `typesafe`, `groq`, `cerebras`, `ollama`, `lmstudio` or `llamacpp`; bare `--adjudicator` = `heuristic`). Without the flag, an interactive install asks *"Use the adjudicator for tool, model and agent selection?"* (default No); `--yes` skips the question. A remote provider needs consent, and without a terminal only `--accept-remote` gives it |
 | `eminiar install --cursor` | Also register with Cursor: hooks in `~/.cursor/hooks.json`, the MCP server in `~/.cursor/mcp.json`, skills in `~/.cursor/skills/`. Without the `claude` CLI this installs for Cursor only |
-| `eminiar upgrade` | Update to the latest version and re-register with every client from the last install |
+| `eminiar upgrade` | Update to the latest version and re-register with every client from the last install; the embedding model is downloaded again only if one was installed |
 | `eminiar uninstall [--purge-data] [--yes]` | Remove from Claude Code and Cursor. Data is kept unless you add `--purge-data`. `--yes` skips the confirmation |
-| `eminiar doctor [--json] [--fix]` | Check installation health. `--fix` re-pins Node.js and the root, and clears Claude Code's cached launch failure |
+| `eminiar doctor [--json] [--fix]` | Check installation health. `--fix` re-pins Node.js and the root, clears Claude Code's cached launch failure and removes keys equal to the current default from `~/.eminiar/config.json` (a `.bak` copy is kept). Config warnings (keys in `~/.eminiar/config.json` that equal the current default, unknown keys, stale `graph` lists, `memories.dir` outside the project, Bash deny rules with non-shell sandbox languages) do not change the exit status |
 | `eminiar replace-context-mode [--yes] [--revert-gateway]` | Remove the context-mode plugin after you are satisfied with eminiar. `--revert-gateway` restores the gateway the replacement changed |
 
 ## Search and recall

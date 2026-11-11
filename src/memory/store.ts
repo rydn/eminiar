@@ -1,7 +1,10 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -11,6 +14,7 @@ import { dirname, join, relative, sep } from "node:path";
 import fg from "fast-glob";
 import { hashText } from "../chunker/types.js";
 import type { ProjectContext } from "../context.js";
+import { within } from "../docs/manifest.js";
 import { memoryId } from "../graph/ids.js";
 import { indexContent } from "../index/indexer.js";
 import type { StorageAdapter } from "../storage/adapter.js";
@@ -55,6 +59,18 @@ export function isValidName(name: string): boolean {
   return name.length <= 120 && NAME_RE.test(name);
 }
 
+/**
+ * Throws unless `name` is a valid memory name. The name becomes the file path (relOf), so every
+ * entry point that takes one from a caller (tools, dashboard, CLI) checks it here first:
+ * `../../x` would otherwise read, rewrite or delete any .md file the process can reach.
+ */
+function assertValidName(name: string): void {
+  if (!isValidName(name))
+    throw new Error(
+      `invalid memory name "${name}": use lowercase slug or topic/slug with [a-z0-9._-], e.g. auth/session-tokens`,
+    );
+}
+
 export function isKind(k: unknown): k is MemoryKind {
   return typeof k === "string" && (MEMORY_KINDS as readonly string[]).includes(k);
 }
@@ -75,6 +91,80 @@ export function relOf(ctx: ProjectContext, name: string): string {
 
 function absOf(ctx: ProjectContext, name: string): string {
   return join(ctx.root, relOf(ctx, name));
+}
+
+type RealPath = (p: string) => string;
+
+/** realpathSync.native, cached in `memo` across the files of one call (few folders, many files). */
+function realPaths(memo: Map<string, string>): RealPath {
+  return (p) => {
+    let r = memo.get(p);
+    if (r === undefined) {
+      r = realpathSync.native(p);
+      memo.set(p, r);
+    }
+    return r;
+  };
+}
+
+/**
+ * Where `abs` really is: its target when it is a symlink, otherwise below the realpath of its
+ * nearest existing folder (the one a write would create it in), so a regular file costs an lstat
+ * and its folder's cached realpath. Throws when that does not resolve (dangling, a loop).
+ */
+function realLocation(abs: string, real: RealPath): string {
+  if (lstatSync(abs, { throwIfNoEntry: false })?.isSymbolicLink()) return real(abs);
+  // lstat, so a dangling folder link stops the walk and fails realpath instead of being created.
+  let dir = dirname(abs);
+  while (!lstatSync(dir, { throwIfNoEntry: false }) && dirname(dir) !== dir) dir = dirname(dir);
+  return join(real(dir), relative(dir, abs));
+}
+
+/** The memories folder once symlinks are resolved, or undefined when that leaves the project. */
+function memoriesBound(ctx: ProjectContext, real: RealPath): string | undefined {
+  const configured = memoriesDir(ctx);
+  // An existing folder by its on-disk name: on a case-insensitive filesystem `.eminiar/Memories`
+  // is the folder `memories`, and the files below it resolve to that spelling.
+  const dir = lstatSync(configured, { throwIfNoEntry: false })
+    ? real(configured)
+    : realLocation(configured, real);
+  return within(dir, real(ctx.root)) ? dir : undefined;
+}
+
+/**
+ * `abs` stays inside the memories folder once symlinks are resolved, and that folder inside the
+ * project. A memories folder linked to another folder of the project works; a topic or file link
+ * anywhere else (`rules.md -> ../../CLAUDE.md`, a topic -> src/ or ~) cannot lead a read, a
+ * header repair or a write to a file that is not a memory.
+ */
+function insideMemories(
+  ctx: ProjectContext,
+  abs: string,
+  memo: Map<string, string> = new Map(),
+): boolean {
+  const real = realPaths(memo);
+  try {
+    const bound = memoriesBound(ctx, real);
+    if (bound === undefined) return false;
+    // The folder itself is `bound` (by its on-disk name), however its configured spelling reads.
+    return abs === memoriesDir(ctx) || within(realLocation(abs, real), bound);
+  } catch {
+    return false; // dangling, a loop, or gone since it was listed
+  }
+}
+
+/** Throws unless memory `name` is a valid name whose file stays inside the memories folder. */
+function assertMemoryPath(ctx: ProjectContext, name: string): void {
+  assertValidName(name);
+  if (!insideMemories(ctx, absOf(ctx, name)))
+    throw new Error(
+      `memory "${name}" is dangling or outside the memories folder (a symlink under ${memoriesRel(ctx)}); refusing to touch it`,
+    );
+}
+
+/** The memory name a `supersedes` value names: `mem:` / `memory:` prefixes are accepted. */
+function supersededName(v: string | undefined): string | undefined {
+  return v?.replace(/^mem(?:ory)?:/, "");
 }
 
 /** The name a file under the memories dir denotes, or undefined when it is not a valid one. */
@@ -236,7 +326,7 @@ function syncGraph(db: StorageAdapter, name: string, rel: string, g: GraphInput)
   // `mem:` references in the body connect memories too, as their own edge kind so a
   // header's deliberate `related:` list stays distinguishable from passing references.
   for (const other of memoryLinks(g.body, name)) push(memoryId(other), "links");
-  if (g.supersedes) push(memoryId(g.supersedes.replace(/^mem(?:ory)?:/, "")), "supersedes");
+  if (g.supersedes) push(memoryId(supersededName(g.supersedes)!), "supersedes");
   if (edges.length) db.graphUpsertEdges(edges);
 }
 
@@ -358,6 +448,7 @@ export function setMeta(
   name: string,
   patch: Record<string, string | undefined>,
 ): boolean {
+  assertMemoryPath(ctx, name);
   const abs = absOf(ctx, name);
   if (!existsSync(abs)) return false;
   const parsed = parseMemoryFile(readFileSync(abs, "utf8"));
@@ -372,8 +463,17 @@ export function setMeta(
   return true;
 }
 
-/** Rows from before memories were files become files once; the old row and document go. */
-function migrateLegacy(ctx: ProjectContext, db: StorageAdapter): number {
+/**
+ * Rows from before memories were files become files once; the old row and document go. A row
+ * whose file would land outside the memories folder stays in the database for a later run and
+ * is listed in `skipped`.
+ */
+function migrateLegacy(
+  ctx: ProjectContext,
+  db: StorageAdapter,
+  skipped: string[],
+  memo: Map<string, string>,
+): number {
   let n = 0;
   for (const row of db.memoryLegacyRows()) {
     const kind = isKind(row.kind) ? row.kind : "note";
@@ -381,6 +481,10 @@ function migrateLegacy(ctx: ProjectContext, db: StorageAdapter): number {
     const taken = existsSync(absOf(ctx, base)) || !!db.memoryGetByName(base);
     const name = taken ? `${base}-${row.id}` : base;
     const created = new Date(row.created_at).toISOString();
+    if (!insideMemories(ctx, absOf(ctx, name), memo)) {
+      skipped.push(relOf(ctx, name));
+      continue;
+    }
     if (!existsSync(absOf(ctx, name))) {
       writeMemoryFile(
         ctx,
@@ -408,22 +512,58 @@ export interface ReconcileSummary {
   synced: number;
   removed: number;
   migrated: number;
-  /** Files whose path is not a valid name (uppercase, spaces, nested deeper than one topic). */
+  /**
+   * Files whose path is not a valid name (uppercase, spaces, nested deeper than one topic), files
+   * and linked folders (listed once) that resolve outside the memories folder, and legacy rows
+   * left in the database for that reason.
+   */
   skipped: string[];
 }
 
 /** Bring the database in line with the files: cheap (stat per file) and safe to call often. */
 export function reconcile(ctx: ProjectContext, db: StorageAdapter): ReconcileSummary {
   const out: ReconcileSummary = { files: 0, synced: 0, removed: 0, migrated: 0, skipped: [] };
-  out.migrated = migrateLegacy(ctx, db);
+  const memo = new Map<string, string>();
+  out.migrated = migrateLegacy(ctx, db, out.skipped, memo);
   const dir = memoriesDir(ctx);
-  const files = existsSync(dir)
-    ? fg.sync("**/*.md", { cwd: dir, absolute: true, onlyFiles: true, dot: true })
-    : [];
+  const files: string[] = [];
+  if (lstatSync(dir, { throwIfNoEntry: false })) {
+    if (!existsSync(dir) || !insideMemories(ctx, dir, memo)) {
+      // The folder itself is a dangling link or leads out of the project (often for a moment: a
+      // checkout, a link being replaced). Nothing under it is read, and the rows are kept:
+      // forgetting them here would drop every memory from search until the next reconcile.
+      out.skipped.push(memoriesRel(ctx));
+      return out;
+    }
+    // fast-glob follows symlinks: a top-level topic or file link that leads out of the memories
+    // folder is listed once and never walked (a `x -> ~` would read every .md file in ~).
+    const ignore: string[] = [];
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, e.name);
+      if (!e.isSymbolicLink() || insideMemories(ctx, abs, memo)) continue;
+      out.skipped.push(relative(ctx.root, abs));
+      ignore.push(fg.escapePath(e.name), `${fg.escapePath(e.name)}/**`);
+    }
+    // Names nest one topic deep; depth 3 still finds one level more, reported as skipped.
+    // Entries rather than files only, so a dangling link (a symlink whose target is gone, which
+    // fast-glob reports as a link instead of following it) is reported instead of vanishing.
+    for (const e of fg.sync("**/*.md", {
+      cwd: dir,
+      absolute: true,
+      onlyFiles: false,
+      objectMode: true,
+      dot: true,
+      deep: 3,
+      ignore,
+    })) {
+      if (e.dirent.isFile()) files.push(e.path);
+      else if (e.dirent.isSymbolicLink()) out.skipped.push(relative(ctx.root, e.path));
+    }
+  }
   const seen = new Set<string>();
   for (const f of files) {
     const name = nameOfFile(ctx, f);
-    if (!name) {
+    if (!name || !insideMemories(ctx, f, memo)) {
       out.skipped.push(relative(ctx.root, f));
       continue;
     }
@@ -467,10 +607,7 @@ export function write(
   superseded?: string | undefined;
 } {
   const name = input.name?.trim() || autoName(db, input.kind, input.content);
-  if (!isValidName(name))
-    throw new Error(
-      `invalid memory name "${name}": use lowercase slug or topic/slug with [a-z0-9._-], e.g. auth/session-tokens`,
-    );
+  assertMemoryPath(ctx, name);
   const abs = absOf(ctx, name);
   const prev = db.memoryGetByName(name);
   const exists = !!prev || existsSync(abs);
@@ -502,10 +639,22 @@ export function write(
   if (input.supersedes) meta.supersedes = input.supersedes;
   writeMemoryFile(ctx, name, meta, input.content);
   const r = syncFile(ctx, db, name, { force: true, sessionId: input.sessionId })!;
+  // The header keeps `supersedes` as written (`mem:x` is accepted, as in syncGraph). The target is
+  // marked only when this write sets or changes the name, so re-saving the memory (the dashboard
+  // passes it back on every edit) never rewrites the target or undoes a status set on it since.
+  // An invalid name, or one whose file is outside the memories folder, is stored but not marked:
+  // the memory is already written, so this stays a quiet no-op rather than a throw.
+  const sup = supersededName(input.supersedes);
   let superseded: string | undefined;
-  if (input.supersedes && input.supersedes !== name) {
-    if (setMeta(ctx, db, input.supersedes, { status: "superseded" })) superseded = input.supersedes;
-  }
+  if (
+    sup &&
+    sup !== name &&
+    sup !== supersededName(str(extra.supersedes)) &&
+    isValidName(sup) &&
+    insideMemories(ctx, absOf(ctx, sup)) &&
+    setMeta(ctx, db, sup, { status: "superseded" })
+  )
+    superseded = sup;
   return { name, path: relOf(ctx, name), created: !exists, row: r.row, superseded };
 }
 
@@ -514,6 +663,7 @@ export function read(
   db: StorageAdapter,
   name: string,
 ): MemoryFile | undefined {
+  assertMemoryPath(ctx, name);
   const synced = syncFile(ctx, db, name);
   if (!synced) return undefined;
   const parsed = parseMemoryFile(readFileSync(absOf(ctx, name), "utf8"));
@@ -559,6 +709,7 @@ export function edit(
   name: string,
   opts: { find: string; replace: string; regex?: boolean | undefined },
 ): number {
+  assertMemoryPath(ctx, name);
   const abs = absOf(ctx, name);
   if (!existsSync(abs)) throw new Error(`memory "${name}" does not exist`);
   syncFile(ctx, db, name);
@@ -582,7 +733,8 @@ export function rename(
   from: string,
   to: string,
 ): { refsUpdated: number } {
-  if (!isValidName(to)) throw new Error(`invalid memory name "${to}"`);
+  assertMemoryPath(ctx, from);
+  assertMemoryPath(ctx, to);
   const absFrom = absOf(ctx, from);
   const absTo = absOf(ctx, to);
   if (!existsSync(absFrom)) throw new Error(`memory "${from}" does not exist`);
@@ -602,10 +754,12 @@ export function rename(
 
   let refsUpdated = 0;
   const ref = new RegExp(`mem:${escapeRe(from)}(?![a-z0-9._/-])`, "g");
+  const memo = new Map<string, string>();
   for (const row of db.memoryList({ limit: 100_000 })) {
     if (!row.name || row.name === to) continue;
     const abs = absOf(ctx, row.name);
-    if (!existsSync(abs)) continue;
+    // A row's file may have become a link out of the memories folder since it was imported.
+    if (!existsSync(abs) || !insideMemories(ctx, abs, memo)) continue;
     const text = readFileSync(abs, "utf8");
     if (!ref.test(text)) continue;
     ref.lastIndex = 0;
@@ -616,9 +770,23 @@ export function rename(
   return { refsUpdated };
 }
 
+/** `abs` is a symlink whose target does not exist. */
+function danglingLink(abs: string): boolean {
+  return !!lstatSync(abs, { throwIfNoEntry: false })?.isSymbolicLink() && !existsSync(abs);
+}
+
 /** Delete the file and everything mirrored from it. */
 export function remove(ctx: ProjectContext, db: StorageAdapter, name: string): boolean {
+  assertValidName(name);
   const abs = absOf(ctx, name);
+  // A dangling link (its target is gone) may go: unlink removes the link, never a target, as long
+  // as the folder holding it is inside the memories folder. reconcile lists such links in skipped.
+  if (danglingLink(abs) && insideMemories(ctx, dirname(abs))) {
+    unlinkSync(abs);
+    forgetInDb(db, name, relOf(ctx, name));
+    return true;
+  }
+  assertMemoryPath(ctx, name);
   const existed = existsSync(abs) || !!db.memoryGetByName(name);
   if (existsSync(abs)) unlinkSync(abs);
   forgetInDb(db, name, relOf(ctx, name));
