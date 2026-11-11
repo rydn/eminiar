@@ -419,7 +419,10 @@ describe("embeddings (stub provider, no model)", () => {
   });
 
   it("keeps prompts apart when their vectors are far apart, whatever their words share", async () => {
-    sessions([T0, T0 + DAY, T0 + 2 * DAY]);
+    // three different texts with the same words (identical texts share one vector)
+    [P, P.toLowerCase(), `${P}.`].forEach((t, i) => {
+      session(`far${i}`, T0 + i * DAY, t, [SLACK]);
+    });
     const p = stub({ "for me": [1, 0] });
     // the first prompt is placed on one axis, the others on the orthogonal one
     const split = {
@@ -454,5 +457,140 @@ describe("embeddings (stub provider, no model)", () => {
     const p = stub(same);
     expect((await scan(ctx, db, { embeddings: p, dryRun: true })).mode).toBe("lexical");
     expect(p.embedded).toBe(0);
+  });
+});
+
+describe("review fixes: stable dedupe, one bad prompt, bounded scan", () => {
+  beforeEach(() => fresh());
+
+  const A = "Check Slack channel for open pull requests and review them carefully";
+  const B = "Check Slack channel for open pull requests and review them";
+
+  async function dismissAll(): Promise<void> {
+    for (const s of suggestions(ctx, db, { status: "pending" })) dismissSuggestion(ctx, db, s.id);
+  }
+
+  it("a dismissed suggestion stays dismissed when its cluster grows and a word changes", async () => {
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], A);
+    expect((await scan(ctx, db, lexical)).suggested).toBe(1);
+    await dismissAll();
+    sessions([T0 + 3 * DAY, T0 + 4 * DAY, T0 + 5 * DAY], B);
+    const r = await scan(ctx, db, lexical);
+    expect(r.suggested).toBe(0);
+    expect(r.known).toBe(1);
+    expect(suggestions(ctx, db, { status: "pending" })).toHaveLength(0);
+  });
+
+  it("stays known when only the changed wording is left in range", async () => {
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], A);
+    await scan(ctx, db, lexical);
+    await dismissAll();
+    sessions([T0 + 3 * DAY, T0 + 4 * DAY, T0 + 5 * DAY], B);
+    const r = await scan(ctx, db, { ...lexical, since: T0 + 3 * DAY });
+    expect(r.suggested).toBe(0);
+    expect(r.known).toBe(1);
+  });
+
+  it("stays known when the clustering switches from words to embeddings", async () => {
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], A);
+    const first = await scan(ctx, db, lexical);
+    expect(first.suggested).toBe(1);
+    await dismissAll();
+    // embeddings group a paraphrase in as well: the cluster, its top words and its
+    // representative all change
+    const C = "Look through the slack channel for open pull requests and review those";
+    sessions([T0 + 6 * DAY, T0 + 7 * DAY, T0 + 8 * DAY, T0 + 9 * DAY, T0 + 10 * DAY], C);
+    const r = await scan(ctx, db, { embeddings: stub({ slack: [1, 0] }) });
+    expect(r.mode).toBe("embeddings");
+    expect(r.suggested).toBe(0);
+    expect(r.known).toBe(1);
+  });
+
+  it("reads every past suggestion, not only the newest 1000", async () => {
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], A);
+    await scan(ctx, db, lexical);
+    await dismissAll();
+    for (let i = 0; i < 1100; i++) {
+      db.playbooks.suggestionAdd({
+        name: `other-${i}`,
+        title: `other ${i}`,
+        prompt: `unrelated chore number ${i} zebra`,
+        ts: Date.now() + 1000 + i,
+      });
+    }
+    sessions([T0 + 3 * DAY, T0 + 4 * DAY, T0 + 5 * DAY], B);
+    const r = await scan(ctx, db, lexical);
+    expect(r.suggested).toBe(0);
+    expect(r.known).toBe(1);
+  });
+
+  it("skips a prompt over the store limit and still stores the other candidates", async () => {
+    const long = `Please summarise the incident notes and post them to slack. ${"The cache warmed slowly. ".repeat(900)}`;
+    expect(long.length).toBeGreaterThan(20_000);
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], long);
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], "Check github for open pull requests and review them", [
+      "mcp__claude_ai_github__list_pull_requests",
+    ]);
+    const r = await scan(ctx, db, lexical);
+    expect(r.suggested).toBe(1);
+    expect(r.skipped).toBe(3);
+    expect(suggestions(ctx, db).map((s) => s.title)).toEqual([expect.stringContaining("github")]);
+    // the next scan works the same instead of throwing for good
+    expect((await scan(ctx, db, lexical)).known).toBe(1);
+  });
+
+  it("one candidate the store refuses does not abort the others", async () => {
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], P);
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], "Summarise the payments error logs from last night", [
+      DD,
+    ]);
+    const real = db.playbooks.suggestionAdd.bind(db.playbooks);
+    let calls = 0;
+    db.playbooks.suggestionAdd = (s) => {
+      if (calls++ === 0) throw new Error("boom");
+      return real(s);
+    };
+    try {
+      const r = await scan(ctx, db, lexical);
+      expect(r.suggested).toBe(1);
+      expect(r.errors).toHaveLength(1);
+      expect(r.errors[0]).toContain("boom");
+    } finally {
+      db.playbooks.suggestionAdd = real;
+    }
+  });
+
+  it("looks at the most recent prompts only, says so, and lets the event loop run", async () => {
+    // the recurring task is the oldest: it falls outside the window
+    sessions([T0, T0 + DAY, T0 + 2 * DAY]);
+    for (let i = 0; i < 3100; i++)
+      session(
+        `bulk${i}`,
+        T0 + 10 * DAY + i * 1000,
+        `unique${i} alpha${i} beta${i} gamma${i} chore`,
+      );
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks++;
+    }, 0);
+    let r: Awaited<ReturnType<typeof scan>>;
+    try {
+      r = await scan(ctx, db, { ...lexical, dryRun: true });
+    } finally {
+      clearInterval(timer);
+    }
+    expect(r.truncated).toMatch(/most recent/);
+    expect(r.prompts).toBeLessThanOrEqual(3000);
+    expect(r.candidates).toHaveLength(0);
+    expect(ticks).toBeGreaterThan(0);
+  });
+
+  it("is deterministic across runs", async () => {
+    sessions([T0, T0 + DAY, T0 + 2 * DAY], A);
+    for (let i = 0; i < 300; i++)
+      session(`bulk${i}`, T0 + 10 * DAY + i * 1000, `chore ${i % 7} task`);
+    const a = await scan(ctx, db, { ...lexical, dryRun: true });
+    const b = await scan(ctx, db, { ...lexical, dryRun: true });
+    expect(b).toEqual(a);
   });
 });
