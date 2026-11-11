@@ -442,7 +442,9 @@ describe("#272 a private playbook that hides a committed one of the same name", 
   it("CLI list, show and run mark the hidden committed file", async () => {
     shadowed();
     const l = await cli(["list"]);
-    expect(l.out).toMatch(/^deploy {2}Mine.*\[hides committed \.eminiar\/playbooks\/deploy\.md\]/m);
+    expect(l.out).toMatch(
+      /^deploy {2}"Mine" {2}\(private\).*\[hides committed \.eminiar\/playbooks\/deploy\.md\]/m,
+    );
     expect(JSON.parse((await cli(["list", "--json"])).out)[0]).toMatchObject({
       name: "deploy",
       hides: COMMITTED(),

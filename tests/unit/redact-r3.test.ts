@@ -35,7 +35,7 @@ describe("R3-4 redactSecretsClean masks at least what redactSecrets masks", () =
   });
 
   it("still finds what only the cleaned pass sees, and stays idempotent", () => {
-    const s = "token=abc＂def ghp_​abcdefghijklmnopqrstuvwxyz0123";
+    const s = "token=abc＂def ghp_\u200babcdefghijklmnopqrstuvwxyz0123";
     const once = redactSecretsClean(s);
     expect(once).not.toContain("abcdefghijklmnopqrstuvwxyz0123");
     expect(once).not.toContain("def");
