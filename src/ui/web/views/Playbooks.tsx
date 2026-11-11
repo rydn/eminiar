@@ -10,6 +10,8 @@ import {
   type PlaybookSuggestionUi,
   type PlaybookUi,
   playbooksApi,
+  splitEvidence,
+  unreadableSkipped,
 } from "../playbooks-client.js";
 import { playbookTab, type PlaybookTab as Tab } from "../route.js";
 import { navigate, setLeaveGuard } from "../router.js";
@@ -244,8 +246,8 @@ function PlaybookCard({
   const remove = async () => {
     if (!confirm(`Delete playbook "${p.name}"? Its file is removed.`)) return;
     try {
-      await playbooksApi.remove(p.name);
-      toast(`deleted ${p.name}`);
+      const r = await playbooksApi.remove(p.name);
+      toast(r.note ? `deleted ${p.name}; ${r.note}` : `deleted ${p.name}`);
       onChanged();
     } catch (e) {
       toast((e as Error).message, true);
@@ -258,6 +260,7 @@ function PlaybookCard({
       right={
         <span style={wrap}>
           {p.private && <Badge tone="warn">private</Badge>}
+          {p.hides && <Badge tone="accent">hides committed {p.hides}</Badge>}
           {p.source === "suggested" && <Badge tone="purple">suggested</Badge>}
           {p.schedule && <Badge tone="accent">{p.schedule}</Badge>}
         </span>
@@ -415,6 +418,23 @@ function History({
   );
 }
 
+function Evidence({ text }: { text: string }): JSX.Element {
+  const { human, details } = splitEvidence(text);
+  return (
+    <div class="small muted">
+      {human}
+      {details && (
+        <details>
+          <summary>details</summary>
+          <span class="mono" style={{ overflowWrap: "anywhere" }}>
+            {details}
+          </span>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function Suggested({
   items,
   adding,
@@ -448,7 +468,7 @@ function Suggested({
           sub={<span class="mono small">{s.name}</span>}
           right={<span class="muted small">{ago(s.ts)}</span>}
         >
-          {s.evidence && <div class="small muted">{s.evidence}</div>}
+          {s.evidence && <Evidence text={s.evidence} />}
           <pre style={pre}>{s.prompt}</pre>
           {adding && (
             <div class="row" style={{ gap: 8 }}>
@@ -637,9 +657,15 @@ export function Playbooks({ params }: { params: Record<string, string> }): JSX.E
           </div>
         }
       />
-      {d.skipped.length > 0 && (
+      {unreadableSkipped(d.skipped, d.tracked ?? []).length > 0 && (
         <div class="small muted">
-          Skipped (unreadable or not a valid name): {d.skipped.join(", ")}
+          Skipped (unreadable or not a valid name):{" "}
+          {unreadableSkipped(d.skipped, d.tracked ?? []).join(", ")}
+        </div>
+      )}
+      {(d.tracked ?? []).length > 0 && (
+        <div class="small muted">
+          Skipped (tracked by git, so not treated as private): {(d.tracked ?? []).join(", ")}
         </div>
       )}
       {found && d.extraction && (

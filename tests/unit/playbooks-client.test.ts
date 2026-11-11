@@ -71,3 +71,49 @@ describe("dashboard playbooks client: closing a run", () => {
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ id: 7, status: "skipped" });
   });
 });
+
+describe("dashboard playbooks client: evidence and skipped files", () => {
+  type Helpers = {
+    splitEvidence: (e: string) => { human: string; details: string };
+    unreadableSkipped: (s: string[], t: string[]) => string[];
+  };
+  const load = async () => (await import(/* @vite-ignore */ CLIENT)) as Helpers;
+
+  it("shows only sessions, days and servers; the rest goes to details", async () => {
+    const { splitEvidence } = await load();
+    const r = splitEvidence(
+      "sig:abc123 seen in 3 sessions on 3 days; servers: slack, github; words: check slack pull; ids: 0123456789ab 0123456789cd",
+    );
+    expect(r.human).toBe("seen in 3 sessions on 3 days; servers: slack, github");
+    expect(r.details).toBe("sig:abc123; words: check slack pull; ids: 0123456789ab 0123456789cd");
+  });
+
+  it("leaves evidence without machine parts alone", async () => {
+    const { splitEvidence } = await load();
+    expect(splitEvidence("seen in 2 sessions on 2 days")).toEqual({
+      human: "seen in 2 sessions on 2 days",
+      details: "",
+    });
+  });
+
+  it("separates tracked files from the unreadable ones", async () => {
+    const { unreadableSkipped } = await load();
+    expect(unreadableSkipped(["a.md", "b.md", "c.md"], ["b.md"])).toEqual(["a.md", "c.md"]);
+    expect(unreadableSkipped(["a.md"], [])).toEqual(["a.md"]);
+  });
+
+  it("the delete response keeps the note the server sends", async () => {
+    vi.stubGlobal(
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({ removed: true, nowActive: "p/x.md", note: "x is now active" }),
+          { status: 200 },
+        ),
+    );
+    const { playbooksApi } = (await import(/* @vite-ignore */ CLIENT)) as {
+      playbooksApi: { remove: (n: string) => Promise<{ note?: string }> };
+    };
+    expect((await playbooksApi.remove("x")).note).toBe("x is now active");
+  });
+});

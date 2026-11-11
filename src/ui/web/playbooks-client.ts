@@ -29,6 +29,8 @@ export interface PlaybooksOverview {
   suggestions: PlaybookSuggestionUi[];
   /** Files in the playbook folders that could not be read (bad name, link, ...). */
   skipped: string[];
+  /** Files in the private folder that version control tracks (also listed in `skipped`). */
+  tracked: string[];
 }
 
 export interface PlaybookScanResult {
@@ -52,11 +54,38 @@ export interface PlaybookDraft {
   replace?: boolean | undefined;
 }
 
+export interface PlaybookDeleteResult {
+  removed: boolean;
+  /** Set when deleting a private copy uncovered a committed playbook of the same name. */
+  nowActive?: string;
+  note?: string;
+}
+
+/**
+ * A suggestion's evidence split for people: the human part (sessions, days, servers) and the
+ * machine part (signature, words, ids) the store keeps to recognise the task later.
+ */
+export function splitEvidence(evidence: string): { human: string; details: string } {
+  const m = /^sig:(\S+)\s+([\s\S]*)$/.exec(evidence);
+  const rest = m ? (m[2] ?? "") : evidence;
+  const cut = rest.search(/;\s*(?:words|ids):/);
+  const human = (cut < 0 ? rest : rest.slice(0, cut)).trim();
+  const tail = cut < 0 ? "" : rest.slice(cut).replace(/^;\s*/, "").trim();
+  const details = [m ? `sig:${m[1]}` : "", tail].filter(Boolean).join("; ");
+  return { human, details };
+}
+
+/** The skipped files that are not merely tracked ones (those get their own sentence). */
+export function unreadableSkipped(skipped: string[], tracked: string[]): string[] {
+  const t = new Set(tracked);
+  return skipped.filter((f) => !t.has(f));
+}
+
 export const playbooksApi = {
   overview: () => api<PlaybooksOverview>("/api/playbooks"),
   save: (d: PlaybookDraft) =>
     post<{ name: string; path: string; created: boolean }>("/api/playbooks/save", d),
-  remove: (name: string) => post<{ removed: boolean }>("/api/playbooks/delete", { name }),
+  remove: (name: string) => post<PlaybookDeleteResult>("/api/playbooks/delete", { name }),
   recordRun: (name: string) => post<{ id: number }>("/api/playbooks/run", { name }),
   /** Report how a run that is still `started` ended. */
   closeRun: (id: number, status: "done" | "failed" | "skipped") =>

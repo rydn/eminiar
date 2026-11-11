@@ -31,6 +31,8 @@ export interface PlaybookUi {
   updated: number;
   runs: number;
   lastRun: number | null;
+  /** Private only: the committed playbook file of the same name that this one hides. */
+  hides: string | null;
 }
 
 export interface PlaybookSuggestionUi {
@@ -45,7 +47,11 @@ export interface PlaybookSuggestionUi {
   evidence: string | null;
 }
 
-function toUi(row: PlaybookRow, stats: Map<string, { runs: number; last: number }>): PlaybookUi {
+function toUi(
+  ctx: ProjectContext,
+  row: PlaybookRow,
+  stats: Map<string, { runs: number; last: number }>,
+): PlaybookUi {
   const s = stats.get(row.name);
   return {
     name: row.name,
@@ -61,6 +67,7 @@ function toUi(row: PlaybookRow, stats: Map<string, { runs: number; last: number 
     updated: row.updated_at ?? row.created_at,
     runs: s?.runs ?? 0,
     lastRun: s?.last ?? null,
+    hides: row.private === 1 ? (store.shadowedBy(ctx, row.name) ?? null) : null,
   };
 }
 
@@ -87,7 +94,8 @@ export function playbooksOverview(ctx: ProjectContext): Record<string, unknown> 
     dir: store.playbooksRel(ctx),
     privateDir: store.privatePlaybooksRel(ctx),
   };
-  if (!c.viewing) return { ...base, playbooks: [], runs: [], suggestions: [], skipped: [] };
+  if (!c.viewing)
+    return { ...base, playbooks: [], runs: [], suggestions: [], skipped: [], tracked: [] };
   const db = getStorage(ctx);
   const rec = store.reconcile(ctx, db);
   const runs = store.runs(ctx, db, { limit: 200 });
@@ -97,7 +105,8 @@ export function playbooksOverview(ctx: ProjectContext): Record<string, unknown> 
   return {
     ...base,
     skipped: rec.skipped,
-    playbooks: store.list(ctx, db, { includePrivate: true }).map((r) => toUi(r, stats)),
+    tracked: rec.tracked,
+    playbooks: store.list(ctx, db, { includePrivate: true }).map((r) => toUi(ctx, r, stats)),
     runs,
     suggestions: c.extraction.enabled
       ? store.suggestions(ctx, db, { status: "pending", limit: 100 }).map(suggestionUi)
