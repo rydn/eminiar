@@ -87,7 +87,8 @@ swarms:
             - matcher: "Edit|Write"
               hooks:
                 - type: command
-                  command: "npx biome check --write --no-errors-on-unmatched ."
+                  # formats only the edited file: the other coder shares the tree
+                  command: "node \"$CLAUDE_PROJECT_DIR/.eminiar/hooks/format-edited.mjs\""
         prompt: Implement the claimed task. Keep the diff minimal.
       reviewer:
         description: Adversarial reviewer that tries to break the change.
@@ -96,9 +97,13 @@ swarms:
 ```
 
 Validation (zod) rejects unknown topology, bad names (`^[a-z][a-z0-9-]{0,31}$`), stages that
-name missing roles, malformed hooks (events limited to `PreToolUse`, `PostToolUse`, `Stop`;
-each hook `{type:"command", command, timeout?}`), and agent names longer than 64 characters.
-Errors carry the YAML path (`swarms.feature.agents.coder.count`).
+name missing roles, malformed hooks (each hook `{type:"command", command, timeout?}`), and agent
+names longer than 64 characters. Errors carry the YAML path (`swarms.feature.agents.coder.count`).
+A key the schema does not know (including a hook event other than `PreToolUse`, `PostToolUse`
+and `Stop`) is ignored with a note unless it is a typo of a known key, which is an error; while
+any are ignored, sync only creates missing agent files. A typo is one edit from a known key (two
+for keys of 7+ characters), so give a new key a name further than that from existing ones
+(`min_turns` next to `max_turns` would read as a typo, and older versions would reject it).
 
 ## Generated agents
 
@@ -124,7 +129,10 @@ You are the **coder** worker in the eminiar swarm "feature" …role prompt…
 - When the YAML gives a `tools` allowlist, the eminiar tools (`em_swarm`, `em_recall`,
   `em_search`, `em_symbols`, `em_history`, `em_execute`, …) are appended under both MCP name
   forms (`mcp__plugin_eminiar_eminiar__*` for plugin installs, `mcp__eminiar__*` for settings
-  installs). Without em_* tools a worker would be stranded by enforce-mode routing.
+  installs). Without em_* tools a worker would be stranded by enforce-mode routing. The
+  command runners (`em_execute`, `em_execute_file`, `em_batch_execute`) are the exception: a
+  role without `Bash` does not get them, and routing lets that worker's native call through
+  instead of denying it toward a tool it lacks, and leaves them out of its spawn prefix.
 - Sync only rewrites or deletes files carrying the `eminiar:swarm` marker. A hand-written file
   with the same name is reported as a conflict and left alone.
 

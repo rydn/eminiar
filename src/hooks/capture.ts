@@ -6,7 +6,7 @@ import {
   ev,
   withPriority,
 } from "../capture/classify.js";
-import { getContext } from "../context.js";
+import { sessionContext } from "../context.js";
 import { indexContent } from "../index/indexer.js";
 import { recallForError, recallForText, recordShown } from "../session/recall.js";
 import { globalDb } from "../stats/global.js";
@@ -72,7 +72,7 @@ export function persist(db: StorageAdapter, sessionId: string, events: EventInpu
 }
 
 function open(input: HookInput): { db: StorageAdapter; root: string; sessionId: string } {
-  const ctx = getContext(input.cwd);
+  const ctx = sessionContext(input.cwd);
   const db = getStorage(ctx, { vectors: false });
   const sessionId = input.session_id || "unknown";
   db.sessionUpsert({
@@ -94,7 +94,7 @@ let usageFailureLogged = false;
  */
 export function ingestUsage(db: StorageAdapter, input: HookInput, sessionId: string): void {
   try {
-    const ctx = getContext(input.cwd);
+    const ctx = sessionContext(input.cwd);
     if (!usageEnabled(ctx)) return;
     const overrides = ctx.config.usage.pricing;
     ingestSession(db, ctx.root, sessionId, input.transcript_path, { overrides });
@@ -113,7 +113,7 @@ export function ingestUsage(db: StorageAdapter, input: HookInput, sessionId: str
 
 export const userPromptSubmit: HookHandler = async (input) => {
   if (!input.prompt?.trim()) return undefined;
-  const ctx = getContext(input.cwd);
+  const ctx = sessionContext(input.cwd);
   const db = getStorage(ctx, { vectors: false });
   const sessionId = input.session_id || "unknown";
   // The session row and the prompt's events are bookkeeping: a database another process holds
@@ -212,10 +212,10 @@ function detectLoop(db: StorageAdapter, sessionId: string, key: string, summary:
 export const postToolUse: HookHandler = async (input) => {
   if (!input.tool_name) return undefined;
   // A swarm worker's call feeds the swarm ledger too (a no-op for every other caller).
-  if (input.agent_id) swarmActivity(getContext(input.cwd), input, false);
+  if (input.agent_id) swarmActivity(sessionContext(input.cwd), input, false);
   // A swarm worker's Agent call returned: its spawn reservation is done.
   const isAgent = input.tool_name === "Agent" || input.tool_name === "Task";
-  if (isAgent) swarmAgentReturned(getContext(input.cwd), input);
+  if (isAgent) swarmAgentReturned(sessionContext(input.cwd), input);
   const { db, root, sessionId } = open(input);
   const drafts = classifyToolCall({
     toolName: input.tool_name,
@@ -240,7 +240,7 @@ export const postToolUse: HookHandler = async (input) => {
   // The adjudicator (off by default; loaded only when enabled): the dispatch row of this
   // Agent call gets the exact subagent id from tool_response.
   if (isAgent && input.client !== "cursor") {
-    const ctx = getContext(input.cwd);
+    const ctx = sessionContext(input.cwd);
     if (ctx.config.adjudicator.enabled) {
       try {
         const { onPostAgent } = await import("../adjudicator/hooks.js");
@@ -282,7 +282,7 @@ function bestEffortWrites(db: StorageAdapter): (what: string, fn: () => void) =>
 
 export const postToolUseFailure: HookHandler = async (input) => {
   if (!input.tool_name) return undefined;
-  const ctx = getContext(input.cwd);
+  const ctx = sessionContext(input.cwd);
   // The one write this hook must not lose, first and with the event's full lock wait: a lost
   // release keeps the worker's slot until the reservation expires, so the retry is denied.
   if (input.tool_name === "Agent" || input.tool_name === "Task") swarmAgentReturned(ctx, input);
@@ -330,7 +330,7 @@ export const postToolUseFailure: HookHandler = async (input) => {
 
 export const subagentStop: HookHandler = (input) => {
   // A swarm worker is closed first: its task must not stay held if capture fails below.
-  if (input.agent_id) swarmSubagentStop(getContext(input.cwd), input);
+  if (input.agent_id) swarmSubagentStop(sessionContext(input.cwd), input);
   const { db, sessionId } = open(input);
   const msg = input.last_assistant_message ?? "";
   if (msg.trim()) {
@@ -360,7 +360,7 @@ export const stop: HookHandler = (input) => {
 
 export const sessionEnd: HookHandler = async (input) => {
   // Workers of this session that never sent SubagentStop are closed (no-op without swarms).
-  const ctx = getContext(input.cwd);
+  const ctx = sessionContext(input.cwd);
   swarmSessionEnd(ctx, input);
   const { db, sessionId } = open(input);
   db.sessionUpsert({ id: sessionId, ended_at: Date.now() });

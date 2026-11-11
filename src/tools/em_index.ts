@@ -1,13 +1,17 @@
+import { resolve } from "node:path";
 import { z } from "zod";
 import { kickEmbedding } from "../embeddings/queue.js";
-import { indexContent, indexPath } from "../index/indexer.js";
+import { forgetFile, indexContent, indexPath } from "../index/indexer.js";
+import { checkReadPath, loadPermissionRules } from "../permissions/settings.js";
+import { readRefusal } from "../sandbox/file.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export const emIndex = defineTool({
   name: "em_index",
+  annotations: LOCAL_WRITE,
   description:
-    "Index content into the local knowledge base so em_search can find it. Pass `content` (with a title) or a `path` (file or directory; directories use `glob`, default **/*.md). Markdown is chunked by heading, JSON by key path, code by declaration. Unchanged files are skipped.",
+    "Index content into the local knowledge base so em_search can find it. Pass `content` (with a title) or a `path` (file or directory; directories use `glob`, default **/*.md). Markdown is chunked by heading, JSON by key path, code by declaration. Unchanged files are skipped, and so are files a Read deny or ask rule matches.",
   schema: {
     path: z.string().optional().describe("File or directory, relative to the project root"),
     content: z.string().optional().describe("Inline content to index instead of a path"),
@@ -37,10 +41,23 @@ export const emIndex = defineTool({
       );
     }
     if (!args.path) return errorResult("provide `path` or `content`");
+    // Claude Code's Read rules, as em_execute_file applies them: the path as written, then its
+    // resolved forms. A denied target is refused; a denied file under a directory is skipped.
+    const rules = loadPermissionRules(ctx.root);
+    const abs = resolve(ctx.root, args.path);
+    const refused = readRefusal(rules, abs, args.path);
+    if (refused) {
+      forgetFile(db, abs); // indexed before the rule existed: it leaves the index too
+      return errorResult(refused);
+    }
     const s = indexPath(db, ctx.root, args.path, {
       source: args.source ?? "file",
       globs: args.glob ?? ctx.config.index.docs,
       recursive: args.recursive ?? true,
+      refuse: (file) => {
+        const c = checkReadPath(rules, file);
+        return c.allowed ? undefined : `refused by permission rule ${c.rule} (${c.kind})`;
+      },
     });
     const lines = [
       `${args.path}: ${s.files} file(s), ${s.indexed} indexed, ${s.unchanged} unchanged, ${s.chunks} chunks${s.fallbacks ? ` (${s.fallbacks} with no sections found; indexed as one chunk)` : ""}`,

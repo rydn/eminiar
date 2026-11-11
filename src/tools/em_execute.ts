@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { describeRun, execute } from "../sandbox/execute.js";
-import { processOutput } from "../sandbox/output.js";
+import { cleanStderr, processOutput } from "../sandbox/output.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, RUNS_CODE, text } from "./types.js";
 
 export const LANG_ENUM = z
   .string()
@@ -13,8 +13,9 @@ export const LANG_ENUM = z
 
 export const emExecute = defineTool({
   name: "em_execute",
+  annotations: RUNS_CODE,
   description:
-    "Run code in a sandbox inside the project root and return only stdout. Output over the index threshold (5 KB) is indexed; pass `intent` to get back just the matching sections plus a vocabulary of searchable terms. Use this instead of Bash for anything that prints a lot: git log/diff, test runs, dependency trees, logs, API calls. Shell snippets honour Claude Code's Bash deny rules. javascript and typescript run as ES modules; `import` and `require` both work.",
+    "Run code in a sandbox inside the project root and return its stdout, then its stderr after a `--- stderr ---` line. Output over the index threshold (5 KB) is indexed; pass `intent` to get back just the matching sections plus a vocabulary of searchable terms. Use this instead of Bash for anything that prints a lot: git log/diff, test runs, dependency trees, logs, API calls. Shell snippets honour Claude Code's Bash deny rules. javascript and typescript run as ES modules; `import` and `require` both work.",
   schema: {
     language: LANG_ENUM,
     code: z.string().min(1).describe("Program or shell script to run"),
@@ -40,9 +41,12 @@ export const emExecute = defineTool({
     } catch (err) {
       return errorResult((err as Error).message);
     }
+    // Cleaned once: the output, the stderr document, the header and the tail all use it.
+    const stderr = cleanStderr(r.stderr);
     const db = getStorage(ctx);
     const processed = await processOutput(db, ctx, {
       stdout: r.stdout,
+      stderr,
       // Never use the intent as the title: it would match every chunk via the title boost.
       title: `${args.language}: ${args.code.split("\n")[0]?.slice(0, 60) ?? ""}`,
       source: "exec",
@@ -50,19 +54,20 @@ export const emExecute = defineTool({
       queries: args.queries,
       maxTokens: args.max_tokens,
     });
-    const header = describeRun(r);
+    const header = describeRun({ ...r, stderr });
     const parts = [header];
     if (processed.text) parts.push(processed.text);
-    if (r.exitCode !== 0 && r.stderr.trim())
-      parts.push(`stderr (tail):\n${r.stderr.trim().slice(-2048)}`);
+    // stderr is part of the output. When a search picked what came back, still show how a
+    // failure ended; without one the preview's tail already does.
+    const searched = !!args.intent || !!args.queries?.length;
+    if (r.exitCode !== 0 && stderr && processed.documentId !== undefined && searched)
+      parts.push(`stderr (tail):\n${stderr.slice(-2048)}`);
     const out = parts.join("\n");
     recordStat(ctx, "em_execute", {
       rawChars: r.stdout.length + r.stderr.length,
       returnedChars: out.length,
       durationMs: Date.now() - started,
     });
-    return r.exitCode === 0
-      ? text(out)
-      : { ...text(out), isError: r.exitCode !== 0 && !processed.text };
+    return r.exitCode === 0 ? text(out) : { ...text(out), isError: !r.stdout.trim() };
   },
 });

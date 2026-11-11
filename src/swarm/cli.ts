@@ -190,6 +190,7 @@ export async function swarmCommand(
                 enforce: loaded.config.enforce,
                 allowed_agents: loaded.config.allowedAgents,
                 swarms: loaded.config.swarms.map((s) => s.name),
+                ignored_keys: loaded.config.ignoredKeys,
               }
             : loaded.state === "invalid"
               ? {
@@ -216,6 +217,8 @@ export async function swarmCommand(
           c.enabled ? "" : " · disabled (enabled: false)"
         }${enforceNote(c)}`,
       );
+      // Ignored keys do not fail validation: a teammate's newer eminiar may have written them.
+      if (c.ignoredKeys.length) io.err(formatIssues(c.rel, c.ignoredKeys));
       return 0;
     }
 

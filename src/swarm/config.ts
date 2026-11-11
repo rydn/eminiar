@@ -4,7 +4,9 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { z } from "zod";
 import { TIERS, type Tier } from "../adjudicator/types.js";
+import { editDistance } from "../search/typo.js";
 import { tierOf } from "../storage/dispatch.js";
+import { READONLY_BUILTINS } from "./agents.js";
 import { checkGlob, GlobError } from "./glob.js";
 
 /**
@@ -47,15 +49,6 @@ const FENCE_MSG = 'must not contain "---" (Claude Code would end the agent front
 /** Model aliases Claude Code accepts, or a Claude model id (incl. Bedrock/Vertex forms). */
 const MODEL_RE =
   /^(?:inherit|opusplan|(?:sonnet|opus|haiku|fable)(?:\[1m\])?|(?:[a-z0-9-]+\.)*claude-[a-z0-9.:@-]+(?:\[1m\])?)$/;
-const TOP_KEYS = new Set([
-  "version",
-  "enabled",
-  "sync",
-  "enforce",
-  "allowed_agents",
-  "defaults",
-  "swarms",
-]);
 
 export const DEFAULT_CONTEXT: ContextSpec = {
   memories: 4,
@@ -77,7 +70,9 @@ export const AGENT_COLORS = [
   "cyan",
 ] as const;
 
-// --- raw YAML schema (snake_case, strict so typos are reported, not ignored) ------------
+// --- raw YAML schema (snake_case) --------------------------------------------------------
+// zod strips keys it does not know; parseSwarmYaml lists them first (unknownKeys) and keeps a
+// typo of a known key an error.
 
 const ToolName = z
   .string()
@@ -105,7 +100,7 @@ const rank = (t: Tier) => TIERS.indexOf(t);
  * `model` values; an unset bound is the fallback model's tier (see roleRange).
  */
 const RawModelRange = z
-  .strictObject({ floor: z.enum(TIERS).optional(), ceiling: z.enum(TIERS).optional() })
+  .object({ floor: z.enum(TIERS).optional(), ceiling: z.enum(TIERS).optional() })
   .refine(
     (r) => !r.floor || !r.ceiling || rank(r.floor) <= rank(r.ceiling),
     `floor must not be above ceiling (${TIERS.join(" < ")})`,
@@ -141,7 +136,7 @@ const AgentName = z
     "swarm workers need no entry: they are allowed during a run of their swarm",
   );
 
-const RawContext = z.strictObject({
+const RawContext = z.object({
   memories: z.number().int().min(0).max(10).optional(),
   docs: z.number().int().min(0).max(10).optional(),
   history: z.boolean().optional(),
@@ -152,12 +147,12 @@ const RawContext = z.strictObject({
 });
 type RawContext = z.infer<typeof RawContext>;
 
-const RawHookCommand = z.strictObject({
+const RawHookCommand = z.object({
   type: z.literal("command"),
   command: z.string().trim().min(1).max(2000).refine(noFence, FENCE_MSG),
   timeout: z.number().int().positive().max(600).optional(),
 });
-const RawHookMatcher = z.strictObject({
+const RawHookMatcher = z.object({
   matcher: z
     .string()
     .max(200)
@@ -173,18 +168,19 @@ const RawHookMatcher = z.strictObject({
     .optional(),
   hooks: z.array(RawHookCommand).min(1).max(10),
 });
-const RawHooks = z.strictObject({
+const RawHooks = z.object({
   PreToolUse: z.array(RawHookMatcher).max(10).optional(),
   PostToolUse: z.array(RawHookMatcher).max(10).optional(),
   Stop: z.array(RawHookMatcher).max(10).optional(),
 });
 
-const RawAgent = z.strictObject({
+const RawAgent = z.object({
   description: z.string().trim().min(1).max(500).refine(noFence, FENCE_MSG),
   prompt: z.string().max(20_000).optional(),
   model: Model.optional(),
   model_range: RawModelRange.optional(),
   tools: z.array(ToolName).max(80).optional(),
+  tools_profile: z.enum(["readonly"]).optional(),
   disallowed_tools: z.array(ToolName).max(80).optional(),
   skills: z.array(SkillName).max(20).optional(),
   hooks: RawHooks.optional(),
@@ -199,7 +195,7 @@ const RawAgent = z.strictObject({
 });
 type RawAgent = z.infer<typeof RawAgent>;
 
-const RawSwarm = z.strictObject({
+const RawSwarm = z.object({
   description: z.string().trim().min(1).max(500),
   topology: z.enum(TOPOLOGIES).optional(),
   max_agents: z.number().int().min(1).max(16).optional(),
@@ -210,8 +206,7 @@ const RawSwarm = z.strictObject({
   agents: z.record(z.string(), RawAgent),
 });
 
-// Loose at the top so `x-*` keys can hold YAML anchors; other unknown keys are reported in
-// parseSwarmYaml.
+// Loose at the top so `x-*` keys can hold YAML anchors.
 const RawFile = z.looseObject({
   version: z.literal(1).optional(),
   enabled: z.boolean().optional(),
@@ -219,7 +214,7 @@ const RawFile = z.looseObject({
   enforce: z.boolean().optional(),
   allowed_agents: z.array(AgentName).max(50).optional(),
   defaults: z
-    .strictObject({
+    .object({
       model: Model.optional(),
       model_range: RawModelRange.optional(),
       skills: z.array(SkillName).max(20).optional(),
@@ -253,6 +248,87 @@ function mergeContext(...layers: Array<RawContext | undefined>): ContextSpec {
 }
 
 const uniq = <T>(xs: T[]): T[] => [...new Set(xs)];
+
+/** A key the schema does not know: the path of its object, the key, and that object's keys. */
+interface UnknownKey {
+  at: string[];
+  key: string;
+  known: string[];
+}
+
+/**
+ * Walk the parsed YAML along the file schema and list the keys it does not know. Top-level
+ * `x-*` keys (YAML anchor holders) and merge keys are part of the format.
+ */
+function unknownKeys(v: unknown, s: unknown = RawFile, at: string[] = []): UnknownKey[] {
+  if (s instanceof z.ZodOptional) s = s.unwrap();
+  if (Array.isArray(v))
+    return s instanceof z.ZodArray
+      ? v.flatMap((x, i) => unknownKeys(x, s.element, [...at, String(i)]))
+      : [];
+  if (!v || typeof v !== "object") return [];
+  const entries = Object.entries(v);
+  if (s instanceof z.ZodRecord)
+    return entries.flatMap(([k, x]) => unknownKeys(x, s.valueType, [...at, k]));
+  if (!(s instanceof z.ZodObject)) return [];
+  const known = Object.keys(s.shape);
+  return entries.flatMap(([k, x]) =>
+    Object.hasOwn(s.shape, k)
+      ? unknownKeys(x, s.shape[k], [...at, k])
+      : at.length === 0 && (k.startsWith("x-") || k === "<<")
+        ? []
+        : [{ at, key: k, known }],
+  );
+}
+
+/** Every key the file schema names at any level: one of them at the wrong level is misplaced. */
+function schemaKeys(s: unknown = RawFile, out = new Set<string>()): Set<string> {
+  if (s instanceof z.ZodOptional) s = s.unwrap();
+  if (s instanceof z.ZodArray) schemaKeys(s.element, out);
+  else if (s instanceof z.ZodRecord) schemaKeys(s.valueType, out);
+  else if (s instanceof z.ZodObject)
+    for (const [k, v] of Object.entries(s.shape))
+      if (!out.has(k)) {
+        out.add(k);
+        schemaKeys(v, out);
+      }
+  return out;
+}
+
+/** An agent-level key that reads as a restriction: ignoring it would silently lift a limit. */
+const RESTRICTION_KEY = /tool|scope|hook|allow|deny|permission|model|effort|count/i;
+
+/**
+ * Whether an unknown key inside a role could be meant as one of its restrictions: it names one
+ * (`tool`, `scope`, `hook`, `allow`, `deny`, `permission`, `model`, `effort`, `count`) or is
+ * within two edits of such a known key (`scp` for `scope`), whatever its length. Returns the
+ * closest such known key, or "" when the key only looks like a restriction.
+ */
+function restrictionLike(key: string, known: readonly string[]): string | undefined {
+  let best: { k: string; d: number } | undefined;
+  for (const k of known) {
+    if (!RESTRICTION_KEY.test(k)) continue;
+    const d = editDistance(key.toLowerCase(), k.toLowerCase(), 2);
+    if (d <= 2 && key.length >= 3 && (!best || d < best.d)) best = { k, d };
+  }
+  if (best) return best.k;
+  return RESTRICTION_KEY.test(key) ? "" : undefined;
+}
+
+/**
+ * The known key an unknown one is a typo of: equal but for case, or one edit away (two for
+ * keys of 7+ characters, as search's typo correction counts them). `disallowedTools`,
+ * `max_agent` and `enforced` are typos; `permission_mode` is not.
+ */
+function typoOf(key: string, known: readonly string[]): string | undefined {
+  const max = key.length >= 7 ? 2 : 1;
+  let best: { k: string; d: number } | undefined;
+  for (const k of known) {
+    const d = editDistance(key.toLowerCase(), k.toLowerCase(), max);
+    if (d <= max && (!best || d < best.d)) best = { k, d };
+  }
+  return best?.k;
+}
 
 /**
  * A role's model range: its own `model_range`, else `defaults.model_range` (taken whole, never
@@ -441,6 +517,38 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
           checkName(["swarms", name, "agents", role], role, "agent");
     }
 
+  // A key this version does not know is ignored with a note, so a file written for a newer
+  // eminiar still loads (and still enforces) here. A typo of a known key stays an error:
+  // ignoring it would silently drop the setting the author meant.
+  // A key the schema knows at another level (`disallowed_tools` under defaults) is misplaced,
+  // not new: ignoring it would drop the setting, so it stays an error.
+  const ignoredKeys: ConfigIssue[] = [];
+  const allKeys = schemaKeys();
+  for (const u of unknownKeys(js)) {
+    const near = typoOf(u.key, u.known);
+    const found = { path: u.at.join("."), line: lineOf([...u.at, u.key]) };
+    if (allKeys.has(u.key))
+      issues.push({ ...found, message: `unknown key "${u.key}": not allowed here` });
+    else if (near)
+      issues.push({ ...found, message: `unknown key "${u.key}" (did you mean "${near}"?)` });
+    else if (
+      u.at.length === 4 &&
+      u.at[0] === "swarms" &&
+      u.at[2] === "agents" &&
+      restrictionLike(u.key, u.known) !== undefined
+    ) {
+      const like = restrictionLike(u.key, u.known);
+      issues.push({
+        ...found,
+        message: `unknown key "${u.key}" looks like a restriction${like ? ` (did you mean "${like}"?)` : ""}: ignoring it would silently drop a limit`,
+      });
+    } else
+      ignoredKeys.push({
+        ...found,
+        message: `unknown key "${u.key}" ignored: not a setting in this eminiar version`,
+      });
+  }
+
   const parsed = RawFile.safeParse(js);
   if (!parsed.success) {
     return {
@@ -459,15 +567,9 @@ export function parseSwarmYaml(text: string, file: string, rel: string): LoadRes
     };
   }
 
-  for (const k of Object.keys(js as Record<string, unknown>))
-    if (!TOP_KEYS.has(k) && !k.startsWith("x-") && k !== "<<")
-      issue(
-        [k],
-        `unknown key "${k}" (top-level keys: ${[...TOP_KEYS].join(", ")}; x-* keys may hold YAML anchors)`,
-      );
   const config = resolve(parsed.data, file, rel, issue);
   if (issues.length) return { state: "invalid", file, rel, enforce, issues };
-  return { state: "ok", config };
+  return { state: "ok", config: { ...config, ignoredKeys } };
 }
 
 function resolve(
@@ -475,7 +577,7 @@ function resolve(
   file: string,
   rel: string,
   issue: (path: string[], message: string) => void,
-): SwarmConfig {
+): Omit<SwarmConfig, "ignoredKeys"> {
   const swarms: SwarmSpec[] = [];
   const seenAgent = new Map<string, string>();
   const reported = new Set<string>();
@@ -506,6 +608,13 @@ function resolve(
           `agent name "${agentType}" is also produced by ${other}; rename one of them`,
         );
       seenAgent.set(agentType, `swarms.${name}.agents.${role}`);
+      if (a.tools_profile === "readonly")
+        for (const t of a.tools ?? [])
+          if (!READONLY_BUILTINS.includes(t))
+            issue(
+              ["swarms", name, "agents", role, "tools"],
+              `tools_profile: readonly allows only ${READONLY_BUILTINS.join(", ")} (and the read-only em_* tools); "${t}" can write or run code. Remove it, or drop tools_profile`,
+            );
       return {
         swarm: name,
         role,
@@ -515,6 +624,7 @@ function resolve(
         model: a.model ?? raw.defaults?.model,
         range: roleRange(raw.defaults, a, ["swarms", name, "agents", role], once),
         tools: a.tools ? uniq(a.tools) : undefined,
+        toolsProfile: a.tools_profile,
         disallowedTools: a.disallowed_tools ? uniq(a.disallowed_tools) : undefined,
         skills: uniq([...(raw.defaults?.skills ?? []), ...(a.skills ?? [])]),
         hooks: a.hooks,
@@ -656,7 +766,7 @@ swarms:
   feature:
     description: Plan, build, test and review a change to the codebase.
     topology: hierarchical   # hierarchical | mesh | pipeline
-    max_agents: 4            # workers running at once in one run
+    max_agents: 4            # workers running at once across all runs of the swarm
     instructions: |
       Break the goal into tasks one worker can finish in one go, each naming the files it touches.
       Let the architect design first, fan the coding tasks out, then test, then review.

@@ -267,11 +267,14 @@ how much is spent. Security review #31 showed the old rule (strip only `remoteCo
 project file set `openai.baseUrl` and send the user's Groq key and prompts to any host, or name
 `keyEnv: "AWS_SECRET_ACCESS_KEY"` and send that.
 
-- `PROJECT_ADJUDICATOR_KEYS` in `src/config.ts` is the allowlist: `enabled`, `mode`, `surfaces`,
-  `promptMode`, `minPromptChars`, `tiers`, `weights`, `apply`, `advice`, `embedding`,
-  `learning`, `cache`. These turn the feature on and tune how verdicts are scored and used. None
-  changes the host, the key or the caps: `surfaces.tools` only adds a local hint, and
-  `promptMode` only changes when the consented provider is called.
+- `PROJECT_ADJUDICATOR_KEYS` in `src/config.ts` is the allowlist: `enabled`, `surfaces`,
+  `promptMode`, `minPromptChars`, `weights`, `advice`, `embedding`, `learning`, `cache`, plus
+  `mode` when it is `"advise"` (`projectKeeps`). These turn the feature on and tune how verdicts
+  are scored and used. `mode: "apply"`, `apply` and `tiers` decide which model every subagent
+  runs on (review #109: a clone could put every dispatch on haiku, or floor them at fable), so
+  they are personal like the egress keys. None of the allowed keys changes the host, the key or
+  the caps: `surfaces.tools` only adds a local hint, and `promptMode` only changes when the
+  consented provider is called.
 - Everything else (`provider`, `typesafe`, `openai` with its preset, baseUrl, model and price,
   `keyEnv`, `remoteConsent`, `privacy`, `budget`, `timeouts`, `breaker`) comes only from
   `~/.eminiar/config.json` and `EMINIAR_*` env. `projectLayer()` drops it before the merge.

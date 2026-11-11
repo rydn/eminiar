@@ -5,9 +5,10 @@ import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * bin/_resolve.sh: the shims run their own dist/ when dependencies resolve next to
- * them, and otherwise fall back to the stable copy pinned in $EMINIAR_HOME/root-path
- * (Claude Code's plugin cache has dist/ but no node_modules/).
+ * bin/_resolve.sh: the shims run their own dist/ when it is built and dependencies resolve
+ * next to them, and otherwise fall back to the stable copy pinned in $EMINIAR_HOME/root-path
+ * (Claude Code's plugin cache has dist/ but no node_modules/, or, copied from a git
+ * marketplace, node_modules/ but no dist/).
  */
 const binSrc = join(process.cwd(), "bin");
 
@@ -74,6 +75,25 @@ describe("bin shims", () => {
     expect(r.stdout.trim()).toBe("SELF server - -");
   });
 
+  it("fall back when dependencies are installed but dist/ is not (a git marketplace copy)", () => {
+    // Claude Code installs the dependencies of a copy cloned from GitHub; dist/ is gitignored.
+    const stable = pkg("STABLE", { deps: true, dist: true });
+    const cache = pkg("CACHE", { deps: true, dist: false });
+    const h = home({ root: stable });
+    for (const [shim, entry] of [
+      ["em-server", "server"],
+      ["em-hook", "hook"],
+      ["eminiar", "cli"],
+    ] as const) {
+      const r = sh(cache, shim, h);
+      expect(r.status, r.stderr).toBe(0);
+      const [tag, ran, pluginRoot, launchRoot] = r.stdout.trim().split(" ");
+      expect([tag, ran]).toEqual(["STABLE", entry]);
+      expect(basename(pluginRoot!)).toBe(basename(stable));
+      expect(basename(launchRoot!)).toBe(basename(cache));
+    }
+  });
+
   it("treat a sibling node_modules (the stable copy layout) as runnable", () => {
     // ~/.eminiar/plugin/node_modules/eminiar has its deps in the parent directory.
     const nm = mkdtempSync(join(tmpdir(), "em-shim-nm-"));
@@ -121,10 +141,14 @@ describe("bin shims", () => {
   });
 
   it("ignore a pinned root that is not runnable", () => {
-    const broken = pkg("BROKEN", { deps: false, dist: true });
     const cache = pkg("CACHE", { deps: false, dist: true });
-    const r = sh(cache, "em-server", home({ root: broken }));
-    expect(r.status).toBe(1);
-    expect(r.stderr).toContain("npx eminiar install");
+    for (const broken of [
+      pkg("BROKEN", { deps: false, dist: true }),
+      pkg("BROKEN", { deps: true, dist: false }),
+    ]) {
+      const r = sh(cache, "em-server", home({ root: broken }));
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain("npx eminiar install");
+    }
   });
 });

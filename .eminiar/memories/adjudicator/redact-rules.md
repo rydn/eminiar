@@ -2,7 +2,7 @@
 name: adjudicator/redact-rules
 kind: decision
 tags: []
-related: [file:src/adjudicator/redact.ts, file:tests/unit/adjudicator-redact.test.ts]
+related: [file:src/adjudicator/redact.ts, file:tests/unit/adjudicator-redact.test.ts, mem:security/stored-data-privacy]
 created: 2026-11-04T11:55:22.686Z
 updated: 2026-11-09T23:44:02.527Z
 ---

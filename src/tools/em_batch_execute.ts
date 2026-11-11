@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { describeRun, execute } from "../sandbox/execute.js";
-import { processOutput } from "../sandbox/output.js";
+import { boundStderr, cleanStderr, joinOutput, processOutput } from "../sandbox/output.js";
 import { formatResults } from "../search/format.js";
 import { type SearchResponse, search } from "../search/pipeline.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, text } from "./types.js";
+import { defineTool, RUNS_CODE, text } from "./types.js";
 
 /** Per-output inline cap when `queries`/`intent` are given: the query hits carry the content. */
 const INLINE_LIMIT_WITH_QUERIES = 1024;
@@ -34,6 +34,7 @@ export function chooseInline(lengths: number[], perOutputCap: number, budgetChar
 
 export const emBatchExecute = defineTool({
   name: "em_batch_execute",
+  annotations: RUNS_CODE,
   description:
     "Run several labelled commands in parallel, index every output under its label, and answer `queries` against all of them in the same round trip. Ideal for research: git status + recent commits + test output + dependency list in one call. Without `queries`/`intent`, each output up to the index threshold (5 KB) is returned inline, within `max_tokens` overall; with them, only outputs up to 1 KB are inlined and the query hits carry the rest. Every output is indexed; an elided one is fetched with em_search {document_ids: [N]}.",
   schema: {
@@ -61,8 +62,9 @@ export const emBatchExecute = defineTool({
       label: string;
       header: string;
       stdout?: string | undefined;
-      docId?: number | undefined;
+      docIds?: number[] | undefined;
       stderr?: string | undefined;
+      stdoutLen?: number | undefined;
     }> = [];
     let rawChars = 0;
     const queries = [...(args.queries ?? [])];
@@ -81,18 +83,22 @@ export const emBatchExecute = defineTool({
             timeoutMs: args.timeout_ms,
           });
           rawChars += r.stdout.length + r.stderr.length;
+          // Cleaned once: the output, the stderr document, the header and the tail all use it.
+          const stderr = cleanStderr(r.stderr);
           const p = await processOutput(db, ctx, {
             stdout: r.stdout,
+            stderr,
             title: cmd.label,
             source: "batch",
             forceIndex: true,
           });
           results.push({
             label: cmd.label,
-            header: describeRun(r),
-            stdout: r.stdout,
-            docId: p.documentId,
-            stderr: r.exitCode !== 0 ? r.stderr.trim().slice(-800) : undefined,
+            header: describeRun({ ...r, stderr }),
+            stdout: joinOutput(r.stdout, boundStderr(stderr)),
+            stdoutLen: r.stdout.length,
+            docIds: p.documentIds,
+            stderr: r.exitCode !== 0 ? stderr.slice(-800) : undefined,
           });
         } catch (err) {
           results.push({ label: cmd.label, header: `failed: ${(err as Error).message}` });
@@ -109,24 +115,31 @@ export const emBatchExecute = defineTool({
     const perOutputCap = queries.length
       ? INLINE_LIMIT_WITH_QUERIES
       : ctx.config.sandbox.indexThreshold;
+    // The cap is about stdout alone: a noisy stderr must not hide a short stdout ("added 812
+    // packages"). The budget counts what is shown, which holds at most a bounded stderr tail.
     const inline = chooseInline(
-      results.map((r) => r.stdout?.length ?? Number.POSITIVE_INFINITY),
-      perOutputCap,
+      results.map((r) =>
+        r.stdoutLen !== undefined && r.stdoutLen <= perOutputCap
+          ? (r.stdout?.length ?? 0)
+          : Number.POSITIVE_INFINITY,
+      ),
+      Number.MAX_SAFE_INTEGER, // already filtered on stdout above
       maxTokens * 4,
     );
 
     const lines: string[] = [];
     results.forEach((r, i) => {
       const shown = inline.has(i) && r.stdout !== undefined;
-      const hint =
-        r.docId && !shown ? ` · em_search {document_ids: [${r.docId}]} for the output` : "";
-      lines.push(`## ${r.label} — ${r.header}${r.docId ? ` · doc ${r.docId}` : ""}${hint}`);
+      const ids = r.docIds?.join(", ");
+      const docs = ids ? ` · doc${r.docIds!.length > 1 ? "s" : ""} ${ids}` : "";
+      const hint = ids && !shown ? ` · em_search {document_ids: [${ids}]} for the output` : "";
+      lines.push(`## ${r.label} — ${r.header}${docs}${hint}`);
       if (shown) lines.push(r.stdout!.trimEnd());
-      if (r.stderr) lines.push(`stderr: ${r.stderr}`);
+      if (r.stderr && !shown) lines.push(`stderr: ${r.stderr}`);
       lines.push("");
     });
 
-    const docIds = results.map((r) => r.docId).filter((d): d is number => d !== undefined);
+    const docIds = results.flatMap((r) => r.docIds ?? []);
     if (queries.length && docIds.length) {
       const responses: SearchResponse[] = [];
       for (const q of queries) {

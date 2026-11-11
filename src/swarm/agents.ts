@@ -30,7 +30,10 @@ export function modelRangeText(r: ModelRange): string {
   return `${r.floor}..${r.ceiling}`;
 }
 
-/** eminiar tools a worker always keeps, whatever its `tools` allowlist says. */
+/**
+ * eminiar tools a worker keeps whatever its `tools` allowlist says, except the command runners
+ * (EXEC_TOOLS): those only when the role keeps Bash.
+ */
 export const WORKER_EM_TOOLS = [
   "em_swarm",
   "em_recall",
@@ -59,8 +62,118 @@ function yaml(): typeof import("yaml") {
   return yamlLib;
 }
 
+/**
+ * eminiar's command runners. Each runs arbitrary code, so a role without Bash (a `tools` list
+ * that leaves it out, or Bash in `disallowed_tools`) must not get them back this way.
+ */
+export const EXEC_TOOLS: ReadonlySet<string> = new Set([
+  "em_execute",
+  "em_execute_file",
+  "em_batch_execute",
+]);
+
+/**
+ * `tools_profile: readonly`: the built-in tools the agent file allowlists. Bash is never among
+ * them, because a shell can write files; a reviewer that needs to run a command does not use
+ * the profile. ToolSearch is how a worker loads its deferred em_* tools.
+ */
+export const READONLY_BUILTINS: readonly string[] = [
+  "Read",
+  "Grep",
+  "Glob",
+  "WebFetch",
+  "WebSearch",
+  "ToolSearch",
+];
+
+/**
+ * The em_* tools a readonly profile allows: those whose ToolDef.annotations are READ_ONLY
+ * (tests/unit/swarm-tools-profile.test.ts checks this list against the registry), plus em_swarm,
+ * which every worker needs to claim and close tasks. em_remember, em_memory, em_docs and the
+ * command runners write or run code and are left out.
+ */
+export const READONLY_EM_TOOLS = [
+  "em_swarm",
+  "em_recall",
+  "em_search",
+  "em_symbols",
+  "em_history",
+  "em_graph_impact",
+  "em_graph_query",
+  "em_architecture",
+] as const;
+
+/** Tools a readonly role is told never to use, also written to `disallowedTools`. */
+const READONLY_DENY = ["Edit", "Write", "NotebookEdit"] as const;
+
+/**
+ * The allowlist of a readonly role: the built-ins (its own `tools` when set, even an empty list,
+ * which narrows to ToolSearch) and read-only em_*.
+ */
+export function readonlyTools(role: Pick<RoleSpec, "tools">): string[] {
+  const builtins = role.tools ?? READONLY_BUILTINS;
+  const out = builtins.includes("ToolSearch") ? [...builtins] : [...builtins, "ToolSearch"];
+  for (const prefix of EM_MCP_PREFIXES) for (const t of READONLY_EM_TOOLS) out.push(prefix + t);
+  return out;
+}
+
+/**
+ * Does the role keep Bash? An unset `tools` means every tool; `disallowed_tools` wins. A
+ * readonly profile never has Bash (its allowlist is READONLY_BUILTINS or a subset).
+ */
+export function roleHasShell(
+  role: Pick<RoleSpec, "tools" | "disallowedTools"> & Partial<Pick<RoleSpec, "toolsProfile">>,
+): boolean {
+  if (role.toolsProfile === "readonly") return false;
+  return (role.tools?.includes("Bash") ?? true) && !role.disallowedTools?.includes("Bash");
+}
+
+/**
+ * Does the role's generated agent file give it the em_* tool `tool` (a bare name such as
+ * em_execute_file)? Mirrors frontmatter(): a readonly profile gets READONLY_EM_TOOLS, a `tools`
+ * list gets WORKER_EM_TOOLS, an unset `tools` inherits every tool; the command runners need
+ * Bash, and `disallowed_tools` removes the tool only when it names it under both MCP name forms
+ * (disallowsEmTool): frontmatter() writes the list verbatim, and Claude Code ignores a bare
+ * name or another server's tool.
+ */
+export function roleHasEmTool(
+  role: Pick<RoleSpec, "tools" | "disallowedTools"> & Partial<Pick<RoleSpec, "toolsProfile">>,
+  tool: string,
+): boolean {
+  if (role.disallowedTools && disallowsEmTool(role.disallowedTools, tool)) return false;
+  if (EXEC_TOOLS.has(tool) && !roleHasShell(role)) return false;
+  if (role.toolsProfile === "readonly")
+    return (READONLY_EM_TOOLS as readonly string[]).includes(tool);
+  if (role.tools) return (WORKER_EM_TOOLS as readonly string[]).includes(tool);
+  return true;
+}
+
 /** MCP tool name prefixes: plugin install and `install --method settings`. */
 export const EM_MCP_PREFIXES = ["mcp__plugin_eminiar_eminiar__", "mcp__eminiar__"] as const;
+
+/**
+ * Is `entry` a server-wide tool-list entry (`mcp__<server>` or `mcp__<server>__*`) for the
+ * eminiar server behind the MCP name prefix `prefix` (one of EM_MCP_PREFIXES)?
+ */
+export function isEmServerEntry(entry: string, prefix: string): boolean {
+  return entry === prefix.slice(0, -2) || entry === `${prefix}*`;
+}
+
+/**
+ * Does the tool list name the em_* tool `tool` under the MCP name prefix `prefix`, by its full
+ * name or a server-wide entry? A bare name or another server's tool does not count.
+ */
+export function namesEmTool(list: readonly string[], prefix: string, tool: string): boolean {
+  return list.some((t) => t === prefix + tool || isEmServerEntry(t, prefix));
+}
+
+/**
+ * Does a `disallowedTools` list remove the em_* tool `tool` under every MCP name form? The
+ * agent may reach eminiar under either install, so naming one form leaves the other.
+ */
+export function disallowsEmTool(disallowed: readonly string[], tool: string): boolean {
+  return EM_MCP_PREFIXES.every((p) => namesEmTool(disallowed, p, tool));
+}
 
 export const AGENTS_REL = ".claude/agents";
 
@@ -80,14 +193,22 @@ const TOPOLOGY_RULE: Record<Topology, string> = {
     "work moves in stages. You can claim a task only once every task of the earlier stages is done.",
 };
 
-/** The role's tool allowlist with the eminiar tools added under both MCP name forms. */
-export function workerTools(tools: string[]): string[] {
+/**
+ * The role's tool allowlist with the eminiar tools added under both MCP name forms; the
+ * command runners only when `shell` (the role keeps Bash).
+ */
+export function workerTools(tools: string[], shell = tools.includes("Bash")): string[] {
   // ToolSearch loads deferred MCP tools; without it an allowlisted worker may not reach em_*.
   const out = tools.includes("ToolSearch") ? [...tools] : [...tools, "ToolSearch"];
   for (const prefix of EM_MCP_PREFIXES)
-    for (const t of WORKER_EM_TOOLS) if (!out.includes(prefix + t)) out.push(prefix + t);
+    for (const t of WORKER_EM_TOOLS)
+      if ((shell || !EXEC_TOOLS.has(t)) && !out.includes(prefix + t)) out.push(prefix + t);
   return out;
 }
+
+/** The command runners under both MCP name forms, for a role that disallows Bash. */
+const execToolNames = (): string[] =>
+  EM_MCP_PREFIXES.flatMap((prefix) => [...EXEC_TOOLS].map((t) => prefix + t));
 
 function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> {
   const fm: Record<string, unknown> = {
@@ -95,11 +216,23 @@ function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> 
     description: `Worker "${role.role}" of the eminiar swarm "${swarm.name}": ${role.description} Spawn it for a task of this swarm and name the task as "task #N" in the prompt; the em-swarm skill coordinates runs.`,
   };
   if (role.model) fm.model = role.model;
-  if (role.tools) fm.tools = workerTools(role.tools).join(", ");
+  const readonly = role.toolsProfile === "readonly";
+  if (readonly) fm.tools = readonlyTools(role).join(", ");
+  else if (role.tools) fm.tools = workerTools(role.tools, roleHasShell(role)).join(", ");
   // Workers are leaves: Claude Code lets subagents spawn subagents unless Agent is disallowed.
   // A role that lists Agent or Task in its own `tools` opted out of that.
   const spawns = role.tools?.some((t) => t === "Agent" || t === "Task");
-  const disallowed = [...new Set([...(role.disallowedTools ?? []), ...(spawns ? [] : ["Agent"])])];
+  // Without a `tools` list the worker inherits every MCP tool, so disallowing Bash has to
+  // disallow the command runners too.
+  const noShell = role.disallowedTools?.includes("Bash") ? execToolNames() : [];
+  const disallowed = [
+    ...new Set([
+      ...(role.disallowedTools ?? []),
+      ...(spawns ? [] : ["Agent"]),
+      ...noShell,
+      ...(readonly ? READONLY_DENY : []),
+    ]),
+  ];
   if (disallowed.length) fm.disallowedTools = disallowed.join(", ");
   if (role.skills.length) fm.skills = role.skills;
   if (role.hooks) {
@@ -126,6 +259,15 @@ const hashOf = (fm: string, rest: string, range?: string) =>
     .digest("hex")
     .slice(0, 12);
 
+/**
+ * A worker without `isolation: worktree` shares the session's working tree with the other
+ * workers' uncommitted edits. Workers have stashed and popped files there while coders were
+ * active, and nothing was lost only by luck of timing, so the protocol says it once for every
+ * worker that has a shell, rather than each spawn prompt.
+ */
+const SHARED_TREE_RULE =
+  "Other workers may be editing this working tree at the same time, and their changes are not committed. Never run `git stash`, `git checkout`, `git switch`, `git reset`, `git restore` or `git clean`, not even on one path: they hide or wipe another worker's work. If you commit, add only the files you changed: `git add -A` or `git commit -a` takes their unfinished work with yours. To test without your change (a mutation check), copy the files into a scratch directory outside the tree and run the tests there.";
+
 /** The full agent file for one role. Deterministic, so sync can compare by content. */
 export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: RoleSpec): string {
   const fm = yaml().stringify(frontmatter(swarm, role), { lineWidth: 0 }).trimEnd();
@@ -145,12 +287,21 @@ export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: Rol
     ...(role.prompt ? [role.prompt, ""] : []),
     "## Swarm protocol",
     "",
-    '1. eminiar starts you with a swarm brief: the run goal, the open tasks, the shared notes and what the project knows (memories, history, structure). First claim the task your prompt names with `em_swarm {action:"claim", task:N}` (or the next open one with `em_swarm {action:"claim"}`); if the brief says you already hold a task, continue it.',
-    '2. Ask eminiar before acting: `em_recall {query}` for decisions and constraints, `em_history {action:"file", path}` before editing a file, `em_graph_impact {node}` before changing a symbol, `em_symbols` / `em_search` instead of grepping.',
-    '3. Share what other workers need with `em_swarm {action:"post", key, value}` and read theirs with `em_swarm {action:"read"}`.',
-    '4. Close every task with `em_swarm {action:"update", task, status, result}`: status `done`, `failed` or `blocked`; the result says what changed and how you verified it.',
-    "5. Record durable decisions with `em_remember` so later sessions know them.",
-    "6. Your final message goes back to the coordinator: lead with the outcome, then the files you changed and anything left open.",
+    ...[
+      'eminiar starts you with a swarm brief: the run goal, the open tasks, the shared notes and what the project knows (memories, history, structure). First claim the task your prompt names with `em_swarm {action:"claim", task:N}` (or the next open one with `em_swarm {action:"claim"}`); if the brief says you already hold a task, continue it.',
+      'Ask eminiar before acting: `em_recall {query}` for decisions and constraints, `em_history {action:"file", path}` before editing a file, `em_graph_impact {node}` before changing a symbol, `em_symbols` / `em_search` instead of grepping.',
+      ...(!role.isolation && roleHasShell(role) && role.toolsProfile !== "readonly"
+        ? [SHARED_TREE_RULE]
+        : []),
+      'Share what other workers need with `em_swarm {action:"post", key, value}` and read theirs with `em_swarm {action:"read"}`.',
+      'Close every task with `em_swarm {action:"update", task, status, result}`: status `done`, `failed` or `blocked`; the result says what changed and how you verified it.',
+      ...(role.toolsProfile === "readonly"
+        ? [
+            "You are read-only: you cannot edit files or run commands. Put findings in your update and report.",
+          ]
+        : ["Record durable decisions with `em_remember` so later sessions know them."]),
+      "Your final message goes back to the coordinator: lead with the outcome, then the files you changed and anything left open.",
+    ].map((step, i) => `${i + 1}. ${step}`),
     "",
   ].join("\n");
   const range = role.range ? modelRangeText(role.range) : undefined;
@@ -220,6 +371,8 @@ export interface SyncAction {
   path: string;
   action: SyncActionKind;
   reason?: string | undefined;
+  /** An update held back because the role's part of the swarm file has keys this version does not know. */
+  held?: true | undefined;
 }
 
 export interface SyncResult {
@@ -292,6 +445,97 @@ function existingGenerated(dir: string): Map<string, Entry & { kind: "file" }> {
     if (e.kind === "file" && e.state !== "foreign") out.set(n.slice(0, -3), e);
   }
   return out;
+}
+
+/** The ignored keys that bear on one agent file: the role's own, its swarm's, defaults and top level. */
+function ignoredWhere(
+  ignored: readonly { path: string; message: string }[],
+  config: SwarmConfig,
+  agentType: string,
+): string[] {
+  const hit = config.swarms.flatMap((swarm) =>
+    swarm.roles.filter((r) => r.agentType === agentType).map((r) => ({ swarm, role: r })),
+  )[0];
+  if (!hit) return [];
+  const out: string[] = [];
+  for (const i of ignored) {
+    const seg = i.path === "" ? [] : i.path.split(".");
+    const name = /"(.+?)"/.exec(i.message)?.[1] ?? "?";
+    const mine =
+      seg[0] !== "swarms" ||
+      seg.length < 2 ||
+      (seg[1] === hit.swarm.name &&
+        (seg.length < 4 || seg[2] !== "agents" || seg[3] === hit.role.role));
+    if (mine) out.push(name);
+  }
+  return out;
+}
+
+const list = (v: unknown): string[] =>
+  typeof v === "string"
+    ? v
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+    : [];
+
+function frontmatterOf(raw: string): Record<string, unknown> | undefined {
+  const content = raw.replace(/\r\n/g, "\n");
+  const end = content.indexOf("\n---\n", 3);
+  if (!content.startsWith("---\n") || end === -1) return undefined;
+  try {
+    const v = yaml().parse(content.slice(4, end)) as unknown;
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Keys that carry no restriction: dropping or changing them never widens an agent. */
+const NEUTRAL_KEYS = new Set(["name", "description", "skills", "color", "model", "effort"]);
+
+/**
+ * Whether the new agent file is strictly more restrictive than the old and widens nothing:
+ * a subset of the old tools, a superset of the old disallowed tools and hooks, no more turns,
+ * and no old key (one this version may not know) dropped. Unparseable files never tighten.
+ */
+export function tightens(oldRaw: string, newRaw: string): boolean {
+  const o = frontmatterOf(oldRaw);
+  const n = frontmatterOf(newRaw);
+  if (!o || !n) return false;
+  let tighter = false;
+  for (const k of Object.keys(o)) {
+    if (NEUTRAL_KEYS.has(k)) continue;
+    if (!(k in n)) return false;
+    const a = o[k];
+    const b = n[k];
+    if (JSON.stringify(a) === JSON.stringify(b)) continue;
+    if (k === "tools") {
+      const ob = new Set(list(a));
+      const nb = list(b);
+      if (!nb.every((t) => ob.has(t))) return false;
+      tighter = true;
+    } else if (k === "disallowedTools") {
+      const nb = new Set(list(b));
+      if (!list(a).every((t) => nb.has(t))) return false;
+      tighter = true;
+    } else if (k === "hooks") {
+      const oh = (a ?? {}) as Record<string, unknown>;
+      const nh = (b ?? {}) as Record<string, unknown>;
+      for (const [ev, entries] of Object.entries(oh)) {
+        const have = new Set(((nh[ev] as unknown[]) ?? []).map((e) => JSON.stringify(e)));
+        if (!Array.isArray(entries) || !entries.every((e) => have.has(JSON.stringify(e))))
+          return false;
+      }
+      tighter = true;
+    } else if (k === "maxTurns") {
+      if (typeof a !== "number" || typeof b !== "number" || b > a) return false;
+      tighter = true;
+    } else return false;
+  }
+  // Settings only the new file has (a first tools allowlist, a turn cap, more hooks) restrict.
+  for (const k of Object.keys(n)) if (!(k in o) && !NEUTRAL_KEYS.has(k)) tighter = true;
+  return tighter;
 }
 
 /**
@@ -374,6 +618,31 @@ export function planAgentSync(
               reason: config?.enabled ? "no longer in the swarm file" : "swarms are disabled",
             },
       );
+  // A role whose settings (or its swarm's, or the defaults') carry keys this version does not
+  // know may have been generated by a newer eminiar, whose agent file carries those settings (a
+  // hook, a limit): rewriting it here would drop them, so that role's update is held as a
+  // conflict, with the reason in the sync output. Never held: a create (nothing to drop), a
+  // delete (removing an agent only restricts), an update that strictly tightens the file
+  // (fewer tools, more disallowed tools, more hooks, fewer turns) and anything for a role
+  // without such keys. --force writes everything.
+  const ignored = config?.ignoredKeys ?? [];
+  if (ignored.length && !opts.force) {
+    const holds = (agentType: string): string[] => ignoredWhere(ignored, config!, agentType);
+    return actions.map((a) => {
+      if (a.action !== "update") return a;
+      const where = holds(a.agentType);
+      if (!where.length) return a;
+      const old = generated.get(a.agentType);
+      if (old && tightens(old.content, a.content ?? "")) return a;
+      return {
+        agentType: a.agentType,
+        path: a.path,
+        action: "conflict" as const,
+        held: true as const,
+        reason: `kept: ${config!.rel} has keys this eminiar version does not know (${where.slice(0, 3).join(", ")}${where.length > 3 ? ", ..." : ""}), and a newer one may have generated this file with them; update eminiar, or sync with --force`,
+      };
+    });
+  }
   return actions;
 }
 

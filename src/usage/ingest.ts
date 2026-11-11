@@ -6,9 +6,9 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import type { ProjectContext } from "../context.js";
+import { claudeConfigDir } from "../paths.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { ApiCallInput, ContextEventInput, TranscriptFileRow } from "../storage/types.js";
 import { costOfCall, type PricingOverrides, resolvePrice } from "./pricing.js";
@@ -44,9 +44,12 @@ export function isValidSessionId(id: string): boolean {
   return SESSION_ID_RE.test(id);
 }
 
-/** The Claude Code data dir; EMINIAR_CLAUDE_DIR overrides ~/.claude (tests, unusual installs). */
+/**
+ * The Claude Code data dir: EMINIAR_CLAUDE_DIR (tests, unusual installs), else Claude Code's
+ * config dir (CLAUDE_CONFIG_DIR, else ~/.claude).
+ */
 export function claudeDir(): string {
-  return process.env.EMINIAR_CLAUDE_DIR || join(homedir(), ".claude");
+  return process.env.EMINIAR_CLAUDE_DIR || claudeConfigDir();
 }
 
 /** True when `path` (resolved) is `dir` or lives below it. */

@@ -723,6 +723,7 @@ function tryItStore(store: AdjudicatorStore): AdjudicatorStore {
     latestForSession: (s, surface) => store.latestForSession(s, surface),
     byToolUseId: (id, f) => store.byToolUseId(id, f),
     forTask: (run, task) => store.forTask(run, task),
+    forRun: (run) => store.forRun(run),
     nonFinal: (limit, olderThan) => store.nonFinal(limit, olderThan),
     cacheGet: () => undefined,
     cachePut: () => undefined,

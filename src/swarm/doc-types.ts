@@ -30,6 +30,7 @@ export interface SwarmDocRole {
   model?: string | undefined;
   model_range?: SwarmDocModelRange | undefined;
   tools?: string[] | undefined;
+  tools_profile?: "readonly" | undefined;
   disallowed_tools?: string[] | undefined;
   skills?: string[] | undefined;
   /** Read-only in the dashboard: shown, never edited (edit it in the YAML). */
@@ -89,7 +90,8 @@ export type SwarmDocWarningKind =
   | "active-run"
   | "enforce"
   | "disable"
-  | "prompt";
+  | "prompt"
+  | "ignored-key";
 
 /** A non-blocking note about a draft; `path` is a dotted path like an issue's. */
 export interface SwarmDocWarning {

@@ -1,6 +1,6 @@
 import { existsSync, rmSync } from "node:fs";
 import { paths } from "../paths.js";
-import { readInstallRecord } from "./claude-config.js";
+import { claudeJsonPath, readInstallRecord, settingsPath } from "./claude-config.js";
 import { unregisterCursor } from "./cursor.js";
 import { clearStatusline, unregisterPlugin, unregisterSettings } from "./register.js";
 import { confirm, log } from "./shell.js";
@@ -13,7 +13,7 @@ export async function uninstall(opts: { purgeData?: boolean; yes?: boolean }): P
       ? "claude plugin uninstall eminiar@eminiar + marketplace remove"
       : "",
     rec?.method === "settings"
-      ? "remove eminiar hook entries from ~/.claude/settings.json, mcpServers.eminiar from ~/.claude.json, em-* skills"
+      ? `remove eminiar hook entries from ${settingsPath()}, mcpServers.eminiar from ${claudeJsonPath()}, em-* skills`
       : "",
     rec?.wrote.cursor
       ? "remove eminiar hook entries from ~/.cursor/hooks.json, mcpServers.eminiar from ~/.cursor/mcp.json, em-* skills from ~/.cursor/skills"

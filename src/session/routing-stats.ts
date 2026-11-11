@@ -14,7 +14,7 @@ export interface RoutingEvent {
   target?: string | undefined;
   /** Which rule produced the suggestion (heavy, pipe, big-read, history, …). */
   rule?: string | undefined;
-  /** Why a suggestion did not become a denial (no-server, mode, annotate-only). */
+  /** Why a suggestion did not become a denial (no-server, no-shell, mode, annotate-only). */
   why?: string | undefined;
   /** The first characters of the command, path or pattern, for `eminiar routing --log`. */
   head?: string | undefined;

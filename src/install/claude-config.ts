@@ -6,15 +6,14 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { paths } from "../paths.js";
+import { claudeConfigDir, claudeJsonFile, claudePluginsDir, paths } from "../paths.js";
 
-export const claudeDir = (): string => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+export const claudeDir = (): string => claudeConfigDir();
 export const settingsPath = (): string => join(claudeDir(), "settings.json");
-/** User-scope MCP servers live in ~/.claude.json, not settings.json. */
-export const claudeJsonPath = (): string => join(homedir(), ".claude.json");
-export const pluginsDir = (): string => join(claudeDir(), "plugins");
+/** User-scope MCP servers live in .claude.json (see claudeJsonFile), not settings.json. */
+export const claudeJsonPath = (): string => claudeJsonFile();
+export const pluginsDir = (): string => claudePluginsDir();
 
 export type Json = Record<string, unknown>;
 
@@ -42,6 +41,8 @@ export interface InstallRecord {
   stableRoot: string;
   fromSpec: string;
   installedAt: string;
+  /** Set when `install --no-model` skipped the embedding model; upgrade keeps that choice. Absent in older records. */
+  noModel?: boolean;
   /** Exact things we wrote so uninstall can remove only those. */
   wrote: {
     hookEvents?: string[];

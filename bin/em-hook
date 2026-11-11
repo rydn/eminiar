@@ -1,6 +1,7 @@
 #!/bin/sh
 # Hook entry shim. Node and package-root resolution live in _resolve.sh.
 # A hook must never block Claude: if nothing can run, print an empty JSON object.
+EM_ENTRY=hook
 . "$(dirname "$0")/_resolve.sh"
 # Swarm enforcement fails closed: when nothing can run, an Agent/Task call in a project whose
 # .eminiar/swarm.yaml says `enforce: true` is denied. Reads stdin only here; every other call
@@ -80,7 +81,7 @@ if [ ! -x "$NODE" ]; then
   exit 0
 fi
 if [ -z "$RUN" ]; then
-  echo "eminiar hook: $DIR has no node_modules and no stable copy is pinned (run: npx eminiar install)" >&2
+  echo "eminiar hook: $DIR cannot run (no dist/hook.js or node_modules) and no stable copy is pinned (run: npx eminiar install)" >&2
   [ -n "$EM_GATE" ] && exit 1
   swarm_gate "$@" && echo '{}'
   exit 0

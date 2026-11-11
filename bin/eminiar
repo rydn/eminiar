@@ -10,13 +10,14 @@ while [ -L "$EM_SELF" ]; do
     *) EM_SELF="$(dirname "$EM_SELF")/$EM_LINK" ;;
   esac
 done
+EM_ENTRY=cli
 . "$(dirname "$EM_SELF")/_resolve.sh"
 if [ ! -x "$NODE" ]; then
   echo "eminiar: node >= 22.12 is required" >&2
   exit 1
 fi
 if [ -z "$RUN" ]; then
-  echo "eminiar: $DIR has no node_modules and no stable copy is pinned in $EM_HOME/root-path (run: npx eminiar install)" >&2
+  echo "eminiar: $DIR cannot run (no dist/cli.js or node_modules) and no stable copy is pinned in $EM_HOME/root-path (run: npx eminiar install)" >&2
   exit 1
 fi
 exec "$NODE" "$RUN/dist/cli.js" "$@"

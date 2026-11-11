@@ -3,10 +3,11 @@ import { detectChanges } from "../graph/changes.js";
 import { formatHits } from "../graph/format.js";
 import { fileBytes, recordStat } from "../stats/record.js";
 import { ensureGraph } from "./em_graph.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, READ_ONLY, text } from "./types.js";
 
 export const emGraphChanges = defineTool({
   name: "em_graph_changes",
+  annotations: READ_ONLY,
   description:
     "Map the current git diff (working tree + untracked files, or against a ref/range) to the symbols it touches, rate each by exposure (route handlers, fan-in, exports) and list the files the change can reach through imports, calls and co-change history. Run before committing or when asked what a change affects, instead of reading dependents by hand.",
   schema: {

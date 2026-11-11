@@ -1,12 +1,13 @@
 #!/bin/sh
 # MCP server shim (stdio). Node and package-root resolution live in _resolve.sh.
+EM_ENTRY=server
 . "$(dirname "$0")/_resolve.sh"
 if [ ! -x "$NODE" ]; then
   echo "eminiar: no node binary found (run: npx eminiar install)" >&2
   exit 1
 fi
 if [ -z "$RUN" ]; then
-  echo "eminiar: $DIR has no node_modules and no stable copy is pinned in $EM_HOME/root-path (run: npx eminiar install)" >&2
+  echo "eminiar: $DIR cannot run (no dist/server.js or node_modules) and no stable copy is pinned in $EM_HOME/root-path (run: npx eminiar install)" >&2
   exit 1
 fi
 exec "$NODE" "$RUN/dist/server.js" "$@"

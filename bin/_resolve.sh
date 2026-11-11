@@ -7,7 +7,7 @@
 # but no node_modules/, so dist/*.js cannot import better-sqlite3 and friends. The
 # installer pins the stable copy (~/.eminiar/plugin/node_modules/eminiar, with its
 # dependencies beside it) in $EMINIAR_HOME/root-path; when the directory this shim
-# lives in cannot resolve its dependencies, we run the pinned copy's dist/ instead.
+# lives in cannot run (see em_runnable), we run the pinned copy's dist/ instead.
 EM_HOME="${EMINIAR_HOME:-$HOME/.eminiar}"
 # EM_SELF: the shim's real path when it was reached through a symlink (bin/eminiar).
 DIR="$(cd "$(dirname "${EM_SELF:-$0}")/.." && pwd)"
@@ -28,9 +28,12 @@ if [ ! -x "$NODE" ]; then
   NODE="$(command -v node 2>/dev/null)"
 fi
 
-# A package root is runnable when its dependencies resolve: node_modules/ inside it
-# (dev checkout, npm -g) or beside it (stable copy inside ~/.eminiar/plugin/node_modules).
+# A package root is runnable when the dist/ entry this shim runs (EM_ENTRY) is built and its
+# dependencies resolve: node_modules/ inside it (dev checkout, npm -g) or beside it (stable copy
+# inside ~/.eminiar/plugin/node_modules). A copy Claude Code makes from a git marketplace has
+# node_modules/ (Claude Code installs the dependencies) but no dist/, which is gitignored.
 em_runnable() {
+  [ -f "$1/dist/${EM_ENTRY:-server}.js" ] || return 1
   [ -e "$1/node_modules/better-sqlite3/package.json" ] || [ -e "$1/../better-sqlite3/package.json" ]
 }
 
@@ -39,7 +42,7 @@ if ! em_runnable "$DIR"; then
   RUN=""
   if [ -f "$EM_HOME/root-path" ]; then
     ALT="$(cat "$EM_HOME/root-path" 2>/dev/null)"
-    if [ -n "$ALT" ] && [ -f "$ALT/dist/server.js" ] && em_runnable "$ALT"; then
+    if [ -n "$ALT" ] && em_runnable "$ALT"; then
       RUN="$ALT"
       # Point version/grammar lookups at the code that actually runs; keep the
       # launch directory for diagnostics (em_doctor shows "launched from").

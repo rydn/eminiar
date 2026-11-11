@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, resolve } from "node:path";
 import { URL } from "node:url";
+import { paths } from "../paths.js";
 import { pluginRoot } from "../version.js";
 import { adjudicatorRoute } from "./adjudicator-api.js";
 import {
@@ -118,14 +119,21 @@ const FALLBACK_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8
 <body><h1>eminiar dashboard</h1><p>The frontend bundle is missing. Run <code>npm run build</code> in the eminiar checkout (or reinstall the package) and reload.</p>
 <p>The JSON API is available under <code>/api/*</code>.</p></body></html>`;
 
-/** Only the loopback origins may call the API: blocks DNS-rebinding and cross-site POSTs. */
-function originAllowed(req: IncomingMessage, port: number): boolean {
+/**
+ * Only the loopback origins may call the API: blocks DNS rebinding (Host) and cross-site
+ * requests. Pages can be opened from anywhere, but every /api/ call, GET included, must come
+ * from the dashboard itself: some GETs do work (`?root=` opens a project database,
+ * `/api/changes` runs git), and any web page can send a GET with an <img> or a no-cors fetch.
+ * Browsers mark those `Sec-Fetch-Site: cross-site`; curl and tests send none.
+ */
+function originAllowed(req: IncomingMessage, port: number, api: boolean): boolean {
   const host = req.headers.host ?? "";
   const ok = (h: string) =>
     h === `127.0.0.1:${port}` || h === `localhost:${port}` || h === `[::1]:${port}`;
   if (!ok(host)) return false;
   const method = req.method ?? "GET";
-  if (method === "GET" || method === "HEAD") return true;
+  const read = method === "GET" || method === "HEAD";
+  if (read && !api) return true;
   const origin = req.headers.origin;
   if (origin) {
     try {
@@ -136,6 +144,7 @@ function originAllowed(req: IncomingMessage, port: number): boolean {
   }
   const site = req.headers["sec-fetch-site"];
   if (site && site !== "same-origin" && site !== "none") return false;
+  if (read) return true;
   const type = String(req.headers["content-type"] ?? "");
   return type.startsWith("application/json");
 }
@@ -169,19 +178,63 @@ function serveStatic(res: ServerResponse, p: string): boolean {
 }
 
 /**
+ * The project root a request may act on: the dashboard's own root or a project it
+ * lists. Any other `?root=` is ignored, so a request can never open a database,
+ * load config or run git in an arbitrary folder.
+ */
+export function requestRoot(asked: string | null, defaultRoot?: string): string | undefined {
+  if (!asked || (defaultRoot && resolve(asked) === resolve(defaultRoot))) return defaultRoot;
+  const want = resolve(asked);
+  try {
+    for (const p of listedProjects()) if (p.root && resolve(p.root) === want) return p.root;
+  } catch {
+    // unreadable project list: fall through to the default
+  }
+  return defaultRoot;
+}
+
+// listProjects() opens and migrates every project database, far too slow to run on each API
+// request. The list only changes when a project folder appears or a project's latest root
+// changes, so keep it for a few seconds, keyed on the projects folder's mtime.
+const PROJECT_LIST_TTL_MS = 5000;
+let projectList: { at: number; mtime: number; list: ReturnType<typeof listProjects> } | undefined;
+
+function listedProjects(): ReturnType<typeof listProjects> {
+  let mtime = -1;
+  try {
+    mtime = statSync(paths().projects).mtimeMs;
+  } catch {
+    // no projects folder yet: listProjects decides
+  }
+  const now = Date.now();
+  if (projectList && projectList.mtime === mtime && now - projectList.at < PROJECT_LIST_TTL_MS)
+    return projectList.list;
+  const list = listProjects(); // a throw is not cached
+  projectList = { at: now, mtime, list };
+  return list;
+}
+
+/** Test hook: forget the cached project list. */
+export function resetProjectListCache(): void {
+  projectList = undefined;
+}
+
+/**
  * Local dashboard: binds 127.0.0.1 only. Reads are GET; memory writes and system
- * actions use other methods with a JSON content type and a loopback Origin, so
- * neither a stray link nor a cross-site form can trigger them.
+ * actions use other methods with a JSON content type and a loopback Origin, and no API
+ * call is served to another site, so neither a stray link, an <img> nor a cross-site form
+ * can trigger them.
  */
 export async function serve(opts: { port: number; open: boolean; root?: string }): Promise<void> {
   const defaultRoot = opts.root;
   const server = createServer(async (req, res) => {
     try {
-      if (!originAllowed(req, opts.port)) return json(res, 403, { error: "forbidden origin" });
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const p = url.pathname;
+      if (!originAllowed(req, opts.port, p.startsWith("/api/")))
+        return json(res, 403, { error: "forbidden origin" });
       const q = url.searchParams;
-      const root = q.get("root") ?? defaultRoot ?? undefined;
+      const root = requestRoot(q.get("root"), defaultRoot);
       const ctx = () => ctxFor(root);
       const num = (k: string, d: number) => Number(q.get(k) ?? d) || d;
       const str = (k: string) => q.get(k)?.trim() || undefined;
@@ -272,13 +325,22 @@ export async function serve(opts: { port: number; open: boolean; root?: string }
             return json(res, 400, { error: (err as Error).message });
           }
         }
+        // An invalid name is the caller's error (400), like PUT and PATCH, not a server one.
         if (method === "DELETE") {
-          const removed = deleteMemory(ctx(), name || num("id", 0));
-          return json(res, 200, { ok: removed });
+          try {
+            const removed = deleteMemory(ctx(), name || num("id", 0));
+            return json(res, 200, { ok: removed });
+          } catch (err) {
+            return json(res, 400, { error: (err as Error).message });
+          }
         }
         if (name) {
-          const m = memoryBody(ctx(), name);
-          return m ? json(res, 200, m) : json(res, 404, { error: "not found" });
+          try {
+            const m = memoryBody(ctx(), name);
+            return m ? json(res, 200, m) : json(res, 404, { error: "not found" });
+          } catch (err) {
+            return json(res, 400, { error: (err as Error).message });
+          }
         }
         return json(
           res,
@@ -589,7 +651,11 @@ export async function serve(opts: { port: number; open: boolean; root?: string }
             categories: strList(q.get("category")),
           }),
         );
-      if (p === "/api/doctor") return json(res, 200, await doctorPayload(q.get("fix") === "1"));
+      if (p === "/api/doctor") {
+        // --fix rewrites the install, so it is a write: POST with a JSON body, never a GET.
+        const fix = method === "POST" && (await readJson<{ fix?: unknown }>(req)).fix === true;
+        return json(res, 200, await doctorPayload(fix));
+      }
       if (p === "/api/actions") {
         if (method !== "POST") return json(res, 405, { error: "POST only" });
         const body = await readJson<ActionInput & { glob?: unknown; paths?: unknown }>(req);

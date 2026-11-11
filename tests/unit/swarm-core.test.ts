@@ -6,7 +6,13 @@ import { parse as parseYaml } from "yaml";
 import { getContext, resetContextCache } from "../../src/context.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
-import { planAgentSync, renderAgentFile, syncAgents, workerTools } from "../../src/swarm/agents.js";
+import {
+  generatedState,
+  planAgentSync,
+  renderAgentFile,
+  syncAgents,
+  workerTools,
+} from "../../src/swarm/agents.js";
 import { coordinatorBrief, taskBrief, workerBrief } from "../../src/swarm/brief.js";
 import {
   activeSwarmConfig,
@@ -178,7 +184,7 @@ swarms:
     agents:
       a:
         description: x
-        hooks: { SessionStart: [] }
+        hooks: { PostToolUse: [{ hooks: [] }] }
 `).state,
     ).toBe("invalid");
     expect(
@@ -194,6 +200,201 @@ swarms:
     if (syn.state === "invalid") expect(syn.issues[0]!.line).toBe(1);
     expect(parse("").state).toBe("invalid");
     expect(parse("swarms: {}").state).toBe("invalid");
+  });
+});
+
+describe("swarm config written for a newer eminiar", () => {
+  const FUTURE = `version: 1
+background_default: true
+defaults:
+  model: sonnet
+  later_default: 1
+swarms:
+  s:
+    description: d
+    retries: 2
+    agents:
+      a:
+        description: x
+        count: 2
+        retry_policy: plan
+        context: { docs: 1, rerank: true }
+        hooks:
+          SubagentStop: [{ hooks: [{ type: command, command: "echo" }] }]
+          PostToolUse: [{ hooks: [{ type: command, command: "echo", async: true }] }]
+`;
+
+  const KNOWN = `version: 1
+defaults:
+  model: sonnet
+swarms:
+  s:
+    description: d
+    agents:
+      a:
+        description: x
+        count: 2
+        context: { docs: 1 }
+        hooks:
+          PostToolUse: [{ hooks: [{ type: command, command: "echo" }] }]
+`;
+
+  it("ignores unknown keys, one note per key in file order, and keeps every known setting", () => {
+    const c = ok(FUTURE);
+    expect(c.ignoredKeys.map((w) => [w.path, w.message.match(/"(.+?)"/)?.[1], w.line])).toEqual([
+      ["", "background_default", 2],
+      ["defaults", "later_default", 5],
+      ["swarms.s", "retries", 9],
+      ["swarms.s.agents.a", "retry_policy", 14],
+      ["swarms.s.agents.a.context", "rerank", 15],
+      ["swarms.s.agents.a.hooks", "SubagentStop", 17],
+      ["swarms.s.agents.a.hooks.PostToolUse.0.hooks.0", "async", 18],
+    ]);
+    expect(c.ignoredKeys[1]!.message).toBe(
+      'unknown key "later_default" ignored: not a setting in this eminiar version',
+    );
+    const role = c.swarms[0]!.roles[0]!;
+    expect(role).toMatchObject({ model: "sonnet", count: 2 });
+    expect(role.context).toMatchObject({ docs: 1 });
+    expect(role.hooks).toEqual({
+      PostToolUse: [{ hooks: [{ type: "command", command: "echo" }] }],
+    });
+    // the agent file is the one the same file without those keys gives
+    const k = ok(KNOWN);
+    expect(renderAgentFile(c, c.swarms[0]!, role)).toBe(
+      renderAgentFile(k, k.swarms[0]!, k.swarms[0]!.roles[0]!),
+    );
+    expect(k.ignoredKeys).toEqual([]);
+  });
+
+  it("keeps a typo of a known key an error, with the key it is close to", () => {
+    for (const [line, near] of [
+      ["        disallowedTools: [Bash]", "disallowed_tools"],
+      ["        Tools: [Read]", "tools"],
+      ["        MAX_TURNS: 5", "max_turns"],
+      ["        max_turn: 5", "max_turns"],
+      ["        isolaton: worktree", "isolation"],
+      // two edits, allowed for a key of 7+ characters
+      ["        disalowed_tool: [Bash]", "disallowed_tools"],
+      // the known limit: a new key this close to an existing one reads as a typo too
+      ["        min_turns: 5", "max_turns"],
+    ] as const) {
+      const r = parse(
+        `swarms:\n  s:\n    description: d\n    agents:\n      a:\n        description: x\n${line}\n`,
+      );
+      expect(r.state, line).toBe("invalid");
+      if (r.state !== "invalid") continue;
+      expect(r.issues).toEqual([
+        {
+          path: "swarms.s.agents.a",
+          message: expect.stringContaining(`did you mean "${near}"?`),
+          line: 7,
+        },
+      ]);
+    }
+    const top = parse(
+      `enforced: true\nswarms:\n  s: { description: d, agents: { a: { description: x } } }\n`,
+    );
+    expect(top.state === "invalid" && top.issues[0]!.message).toBe(
+      'unknown key "enforced" (did you mean "enforce"?)',
+    );
+  });
+
+  it("still runs the refinements of an object that has an unknown key", () => {
+    const r = parse(`swarms:
+  s:
+    description: d
+    agents:
+      a: { description: x, model: sonnet, model_range: { floor: opus, ceiling: haiku, step: 1 } }
+`);
+    expect(r.state).toBe("invalid");
+    if (r.state === "invalid")
+      expect(r.issues.map((i) => i.message)).toEqual([
+        expect.stringMatching(/floor must not be above ceiling/),
+      ]);
+  });
+
+  it("reads an object a YAML alias shares between two places", () => {
+    const c = ok(`defaults: &d { future_knob: 1 }
+swarms:
+  s:
+    description: d
+    agents:
+      a: { description: x, context: *d }
+`);
+    expect(c.ignoredKeys.map((w) => w.path).sort()).toEqual([
+      "defaults",
+      "swarms.s.agents.a.context",
+    ]);
+  });
+
+  it("keeps a known key at the wrong level an error, not an ignored key", () => {
+    const agent = "agents:\n      a: { description: x }\n";
+    for (const [yaml, path] of [
+      [
+        `swarms:\n  s:\n    description: d\n    ${agent}defaults: { disallowed_tools: [Bash] }\n`,
+        "defaults",
+      ],
+      [`swarms:\n  s:\n    description: d\n    tools: [Read]\n    ${agent}`, "swarms.s"],
+      [`defaults: { enforce: true }\nswarms:\n  s:\n    description: d\n    ${agent}`, "defaults"],
+    ] as const) {
+      const r = parse(yaml);
+      expect(r.state, yaml).toBe("invalid");
+      if (r.state === "invalid")
+        expect(r.issues).toEqual([
+          { path, message: expect.stringContaining("not allowed here"), line: expect.any(Number) },
+        ]);
+    }
+  });
+
+  it("reports a typo and a bad value together, and no ignored key while the file is invalid", () => {
+    const r = parse(
+      "swarms:\n  s:\n    description: d\n    retries: 2\n    max_agent: 3\n    agents:\n      a: { description: x, count: 0 }\n",
+    );
+    expect(r.state).toBe("invalid");
+    if (r.state === "invalid")
+      expect(r.issues.map((i) => i.path)).toEqual(["swarms.s", "swarms.s.agents.a.count"]);
+  });
+});
+
+describe("agent files under a swarm file with ignored keys", () => {
+  it("keeps the files a newer eminiar generated unless forced, and still creates missing ones", () => {
+    const root = mkdtempSync(join(tmpdir(), "em-held-"));
+    // what the newer eminiar wrote: a generated file this version would render differently
+    const newer = ok(
+      "swarms:\n  s:\n    description: d\n    agents:\n      a: { description: newer }\n",
+    );
+    syncAgents(root, newer);
+    const file = join(root, ".claude", "agents", "swarm-s-a.md");
+    const before = readFileSync(file, "utf8");
+    const c = ok(
+      "swarms:\n  s:\n    description: d\n    agents:\n      a: { description: x, retry_policy: plan }\n      b: { description: y }\n",
+    );
+    const r = syncAgents(root, c);
+    // a create has no newer file to lose; an update would rewrite one
+    expect(r.changed).toBe(1);
+    expect(r.actions.map((a) => [a.agentType, a.action, a.held])).toEqual([
+      ["swarm-s-a", "conflict", true],
+      ["swarm-s-b", "create", undefined],
+    ]);
+    expect(r.actions[0]!.reason).toMatch(
+      /^kept: .*keys this eminiar version does not know.*--force/,
+    );
+    expect(readFileSync(file, "utf8")).toBe(before);
+    // created in full: a valid generated file
+    expect(
+      generatedState(readFileSync(join(root, ".claude", "agents", "swarm-s-b.md"), "utf8")),
+    ).toBe("generated");
+    // a delete is never held: removing an agent only restricts
+    const fewer = ok(
+      "swarms:\n  s:\n    description: d\n    agents:\n      a: { description: newer, retry_policy: plan }\n",
+    );
+    expect(syncAgents(root, fewer).actions.find((a) => a.agentType === "swarm-s-b")).toMatchObject({
+      action: "delete",
+    });
+    // --force writes anyway
+    expect(syncAgents(root, c, { force: true }).changed).toBe(2);
+    expect(readFileSync(file, "utf8")).not.toBe(before);
   });
 });
 
@@ -271,6 +472,74 @@ swarms:
     };
     expect(dis(0)).toBe("Write, Agent");
     expect(dis(1)).toBe("Agent");
+  });
+
+  it("gives the em_execute tools only to a role that keeps Bash", () => {
+    const c = ok(`
+swarms:
+  s:
+    description: d
+    agents:
+      reader: { description: x, tools: [Read, Grep] }
+      shell: { description: x, tools: [Read, Bash] }
+      shell-off: { description: x, tools: [Read, Bash], disallowed_tools: [Bash] }
+      inherits: { description: x }
+      inherits-off: { description: x, disallowed_tools: [Bash] }
+`);
+    const s = c.swarms[0]!;
+    const fm = (role: string) => {
+      const text = renderAgentFile(c, s, s.roles.find((r) => r.role === role)!);
+      const m = /^---\n([\s\S]*?)\n---\n/.exec(text);
+      const f = parseYaml(m![1]!) as Record<string, string | undefined>;
+      const list = (v: string | undefined) => (v ? v.split(", ") : []);
+      return { tools: list(f.tools), disallowed: list(f.disallowedTools) };
+    };
+    const exec = [
+      "mcp__plugin_eminiar_eminiar__em_execute",
+      "mcp__plugin_eminiar_eminiar__em_execute_file",
+      "mcp__plugin_eminiar_eminiar__em_batch_execute",
+      "mcp__eminiar__em_execute",
+      "mcp__eminiar__em_execute_file",
+      "mcp__eminiar__em_batch_execute",
+    ];
+    const reader = fm("reader");
+    expect(reader.tools).toContain("mcp__eminiar__em_search");
+    for (const t of exec) expect(reader.tools).not.toContain(t);
+    expect(fm("shell").tools).toEqual(expect.arrayContaining(exec));
+    for (const t of exec) expect(fm("shell-off").tools).not.toContain(t);
+    // without a tools list the worker inherits every MCP tool: Bash off takes them off too
+    expect(fm("inherits").disallowed).toEqual(["Agent"]);
+    expect(fm("inherits-off").disallowed).toEqual(["Bash", "Agent", ...exec]);
+    expect(fm("shell-off").disallowed).toEqual(["Bash", "Agent", ...exec]);
+    expect(workerTools(["Read"]).some((t) => t.includes("em_execute"))).toBe(false);
+    expect(workerTools(["Bash"]).filter((t) => t.includes("em_execute"))).toHaveLength(4);
+  });
+
+  it("tells shared-tree workers with a shell to leave git state alone; others are not told", () => {
+    const c = ok(`
+swarms:
+  s:
+    description: d
+    agents:
+      shared: { description: x }
+      isolated: { description: x, isolation: worktree }
+      listed: { description: x, tools: [Read, Bash] }
+      no-shell: { description: x, tools: [Read, Edit] }
+      bash-off: { description: x, disallowed_tools: [Bash] }
+`);
+    const s = c.swarms[0]!;
+    const body = (i: number) => renderAgentFile(c, s, s.roles[i]!);
+    for (const i of [0, 2]) {
+      expect(body(i)).toMatch(/^3\. Other workers may be editing this working tree/m);
+      expect(body(i)).toContain("Never run `git stash`, `git checkout`");
+      expect(body(i)).toContain("`git add -A` or `git commit -a`");
+      expect(body(i)).toMatch(/^7\. Your final message goes back/m);
+    }
+    // a worktree has no other workers in it, and a role without a shell cannot run git
+    for (const i of [1, 3, 4]) {
+      expect(body(i)).not.toContain("git stash");
+      expect(body(i)).toMatch(/^6\. Your final message goes back/m);
+    }
   });
 
   it("respects a role that lists Agent or Task in its own tools", () => {
@@ -906,5 +1175,110 @@ swarms:
     } finally {
       closeAllStorage();
     }
+  });
+});
+
+describe("hold scope and tightening (task #66)", () => {
+  const setup = (older: string) => {
+    const root = mkdtempSync(join(tmpdir(), "em-hold-"));
+    syncAgents(root, ok(older));
+    return root;
+  };
+  const AGENTS = (a: string, b: string) =>
+    `swarms:\n  s:\n    description: d\n    agents:\n      a: { description: x${a} }\n      b: { description: y${b} }\n`;
+
+  it("holds only the role whose own settings carry an ignored key", () => {
+    const root = setup(AGENTS("", ""));
+    const c = ok(AGENTS(", retries: 3, tools: [Read]", ", tools: [Read]"));
+    const r = syncAgents(root, c, { dryRun: true });
+    const a = r.actions.find((x) => x.agentType === "swarm-s-a")!;
+    const b = r.actions.find((x) => x.agentType === "swarm-s-b")!;
+    // a's update tightens (a first allowlist), so it applies even with the key
+    expect(a.action).toBe("update");
+    expect(b.action).toBe("update");
+    // a widening update is held for a, not for b
+    const root2 = setup(AGENTS(", tools: [Read]", ", tools: [Read]"));
+    const c2 = ok(AGENTS(", retries: 3, tools: [Read, Bash]", ", tools: [Read, Bash]"));
+    const r2 = syncAgents(root2, c2, { dryRun: true });
+    expect(r2.actions.find((x) => x.agentType === "swarm-s-a")).toMatchObject({
+      action: "conflict",
+      held: true,
+    });
+    expect(r2.actions.find((x) => x.agentType === "swarm-s-b")!.action).toBe("update");
+    expect(r2.actions.find((x) => x.agentType === "swarm-s-a")!.reason).toContain("retries");
+  });
+
+  it("never holds an update that only tightens: fewer tools, more disallowed tools, more hooks", () => {
+    const root = setup(AGENTS(", tools: [Read, Bash], disallowed_tools: [Edit]", ""));
+    const c = ok(AGENTS(", retries: 3, tools: [Read], disallowed_tools: [Edit, Write]", ""));
+    expect(
+      syncAgents(root, c, { dryRun: true }).actions.find((x) => x.agentType === "swarm-s-a")!
+        .action,
+    ).toBe("update");
+    // dropping a restriction (disallowed_tools) is a widening: held
+    const wide = ok(AGENTS(", retries: 3, tools: [Read]", ""));
+    expect(
+      syncAgents(root, wide, { dryRun: true }).actions.find((x) => x.agentType === "swarm-s-a"),
+    ).toMatchObject({ action: "conflict", held: true });
+  });
+
+  it("deletes a removed role and cleans up under enabled: false despite ignored keys", () => {
+    const root = setup(AGENTS("", ""));
+    const off = ok(`${AGENTS("", ", retries: 3")}enabled: false\n`);
+    const r = syncAgents(root, off, { dryRun: true });
+    expect(r.actions.map((x) => x.action)).toEqual(["delete", "delete"]);
+  });
+});
+
+describe("restriction-like unknown keys in a role are errors", () => {
+  const role = (line: string) =>
+    parseSwarmYaml(
+      `swarms:\n  s:\n    description: d\n    agents:\n      a:\n        description: x\n        ${line}\n`,
+      "/x/swarm.yaml",
+      "swarm.yaml",
+    );
+  it("rejects scp and other short typos, and any key naming a restriction", () => {
+    for (const k of [
+      "scp: [src]",
+      "scpe: [src]",
+      "toolz: [Read]",
+      "allowed_tools: [Read]",
+      "deny_paths: [a]",
+      "toolzz: 1",
+      "permission_mode: plan",
+      "hook: 1",
+      "models: 1",
+      "max_count: 1",
+    ])
+      expect(role(k).state, k).toBe("invalid");
+  });
+  it("still ignores a genuinely new unrelated key, with a note", () => {
+    const r = role("retries: 3");
+    expect(r.state).toBe("ok");
+    if (r.state === "ok") expect(r.config.ignoredKeys).toHaveLength(1);
+  });
+  it("outside agents a new key is still ignored", () => {
+    const r = parseSwarmYaml(
+      "swarms:\n  s:\n    description: d\n    permission_mode: plan\n    agents:\n      a: { description: x }\n",
+      "/x/swarm.yaml",
+      "swarm.yaml",
+    );
+    expect(r.state).toBe("ok");
+  });
+});
+
+describe("typo length boundary for a non-restriction key (task #66)", () => {
+  const agent = (line: string) =>
+    parseSwarmYaml(
+      `swarms:\n  s:\n    description: d\n    agents:\n      a:\n        description: x\n        ${line}\n`,
+      "/x/swarm.yaml",
+      "swarm.yaml",
+    );
+  it("6 characters, two edits from color is a new key; 7 is a typo", () => {
+    expect(agent("zolorz: 1").state).toBe("ok");
+    expect(agent("colorzz: 1").state).toBe("invalid");
+  });
+  it("a key the schema knows at another level is misplaced, not new", () => {
+    expect(agent("defaults: 1").state).toBe("invalid");
   });
 });

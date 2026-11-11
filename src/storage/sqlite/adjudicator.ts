@@ -373,6 +373,14 @@ export class SqliteAdjudicatorStore implements AdjudicatorStore {
     ).map(toRow);
   }
 
+  forRun(runId: string): AdjudicationRow[] {
+    return (
+      this.prep(
+        "SELECT * FROM adjudications WHERE run_id = ? AND task_id IS NOT NULL ORDER BY ts, id",
+      ).all(runId) as Row[]
+    ).map(toRow);
+  }
+
   nonFinal(limit: number, olderThan?: number): AdjudicationRow[] {
     const n = Math.max(1, Math.min(limit, 10_000));
     const rows =

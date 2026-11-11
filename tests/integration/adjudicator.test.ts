@@ -173,8 +173,9 @@ function projectConfig(s: Scenario, cfg: Record<string, unknown>): void {
 
 /**
  * Merge `patch` into the scenario's own ~/.eminiar/config.json. A committed project file may set
- * only the adjudicator's behaviour knobs; timeouts, breaker, budget, provider and endpoints are the
- * user's, so tests that tune them must write here, not to projectConfig().
+ * only the adjudicator's behaviour knobs; timeouts, breaker, budget, provider, endpoints, apply
+ * mode, apply.* and tiers are the user's, so tests that tune them must write here, not to
+ * projectConfig().
  */
 function globalConfig(s: Scenario, patch: Record<string, unknown>): void {
   const file = join(s.home, "config.json");
@@ -517,9 +518,10 @@ describe("off by default and the kill switch", () => {
     const s = scenario();
     const stub = await newStub();
     await enableJev(s, stub, "SENTINEL-killswitch-0000000000", { mode: "apply" });
+    globalConfig(s, { adjudicator: { apply: { scope: "all", minConfidence: 0 } } });
     projectConfig(s, {
       routing: { mode: "enforce", deferToContextMode: false },
-      adjudicator: { promptMode: "blocking", apply: { scope: "all", minConfidence: 0 } },
+      adjudicator: { promptMode: "blocking" },
     });
     const off = { EMINIAR_ADJUDICATOR: "0" };
     const p = await hook(
@@ -596,10 +598,8 @@ if (process.argv.includes("--adjudicate")) {
 await import(${JSON.stringify(join(DIST, "hook.js"))});
 `,
     );
-    projectConfig(s, {
-      routing: { mode: "enforce", deferToContextMode: false },
-      adjudicator: { apply: { scope: "all", minConfidence: 0 } },
-    });
+    globalConfig(s, { adjudicator: { apply: { scope: "all", minConfidence: 0 } } });
+    projectConfig(s, { routing: { mode: "enforce", deferToContextMode: false } });
     (s as Scenario & { wrapper: string }).wrapper = wrapper;
   });
 
@@ -642,7 +642,7 @@ await import(${JSON.stringify(join(DIST, "hook.js"))});
     it(`apply mode keeps every Agent field through the real dispatch (routing ${routing})`, async () => {
       projectConfig(s, {
         routing: { mode: routing, deferToContextMode: false },
-        adjudicator: { apply: { scope: "all", minConfidence: 0 }, promptMode: "blocking" },
+        adjudicator: { promptMode: "blocking" },
       });
       const session = sid();
       const before = stub.scoring.length;
@@ -671,10 +671,7 @@ await import(${JSON.stringify(join(DIST, "hook.js"))});
   }
 
   it("respects an explicit model", async () => {
-    projectConfig(s, {
-      routing: { mode: "enforce", deferToContextMode: false },
-      adjudicator: { apply: { scope: "all", minConfidence: 0 } },
-    });
+    projectConfig(s, { routing: { mode: "enforce", deferToContextMode: false } });
     const withModel = agentPayload(s, sid());
     (withModel.tool_input as Record<string, unknown>).model = "opus";
     const r = await hook(s, withModel);
@@ -690,7 +687,7 @@ await import(${JSON.stringify(join(DIST, "hook.js"))});
     stub.mode = "http500";
     projectConfig(s, {
       routing: { mode: "enforce", deferToContextMode: false },
-      adjudicator: { promptMode: "blocking", apply: { scope: "all", minConfidence: 0 } },
+      adjudicator: { promptMode: "blocking" },
     });
     const r = await hook(
       s,

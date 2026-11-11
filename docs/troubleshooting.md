@@ -15,10 +15,11 @@ eminiar doctor --fix    # repairs pinned paths and clears cached launch failures
 Claude Code desktop app, while the terminal works.
 
 **Cause:** Claude Code starts plugins from a copy under
-`~/.claude/plugins/cache/eminiar/eminiar/<version>`. That copy has `dist/` but no
-`node_modules/`. The `bin/` shims handle this: when their own directory cannot load the
-dependencies, they run the stable copy pinned in `~/.eminiar/root-path`. Installs before 0.1.1
-did not write this pin.
+`~/.claude/plugins/cache/eminiar/eminiar/<version>` (under `CLAUDE_CONFIG_DIR` when that is
+set). That copy has `dist/` but no `node_modules/`, or, when it came from the GitHub
+marketplace, `node_modules/` but no `dist/`. The `bin/` shims handle this: when their own
+directory has no built `dist/` or cannot load the dependencies, they run the stable copy pinned
+in `~/.eminiar/root-path`. Installs before 0.1.1 did not write this pin.
 
 **Fix:**
 
@@ -29,6 +30,10 @@ eminiar doctor --fix     # re-pins and clears Claude Code's cached launch failur
 
 Then restart Claude Code. `eminiar doctor` tests every cached copy with `bin/em-server --probe`.
 It also reports a cached failure and the time it expires.
+
+**Installed with `--method settings` while `CLAUDE_CONFIG_DIR` was set?** Earlier versions wrote
+the MCP server to `~/.claude.json`; it now registers in `$CLAUDE_CONFIG_DIR/.claude.json`, where
+Claude Code reads it. Remove the stale `mcpServers.eminiar` from `~/.claude.json` by hand.
 
 ## Claude keeps getting "Retry with em_execute"
 

@@ -366,15 +366,13 @@ describe("project layer trust boundary (#32)", () => {
   });
 
   it("keeps the allowed keys and lets them override the personal layer", () => {
-    personal({ enabled: false, mode: "advise", provider: "heuristic" });
+    personal({ enabled: false, mode: "apply", provider: "heuristic" });
     project({
       enabled: true,
-      mode: "apply",
+      mode: "advise",
       surfaces: { tools: true },
       promptMode: "heuristic",
       minPromptChars: 40,
-      tiers: ["haiku", "opus"],
-      apply: { scope: "all" },
       advice: { mainSession: "off" },
       weights: { providerMax: 0.5 },
       learning: { enabled: false },
@@ -384,12 +382,10 @@ describe("project layer trust boundary (#32)", () => {
     const c = loadConfig(root).adjudicator;
     expect(c).toMatchObject({
       enabled: true,
-      mode: "apply",
+      mode: "advise", // a project may keep it advise-only
       surfaces: { tools: true, prompt: true },
       promptMode: "heuristic",
       minPromptChars: 40,
-      tiers: ["haiku", "opus"],
-      apply: { scope: "all" },
       advice: { mainSession: "off" },
       weights: { providerMax: 0.5 },
       learning: { enabled: false },
@@ -399,7 +395,38 @@ describe("project layer trust boundary (#32)", () => {
     expect(projectAdjudicatorWarning(root)).toBeUndefined();
   });
 
-  it("the allowlist names no key that can change egress, keys or spend", () => {
+  it("(F) a project cannot turn on apply mode, set apply.* or change the tiers", () => {
+    // Review #109: a cloned repo could force every subagent onto haiku, or floor them at fable.
+    project({
+      enabled: true,
+      mode: "apply",
+      tiers: ["haiku"],
+      apply: { scope: "all", floor: "fable", ceiling: "haiku", minConfidence: 0 },
+    });
+    const d = adjudicatorDefaults();
+    let c = loadConfig(root).adjudicator;
+    expect([c.enabled, c.mode, c.tiers, c.apply]).toEqual([true, "advise", d.tiers, d.apply]);
+    // The user's own apply settings stay theirs.
+    personal({
+      mode: "apply",
+      tiers: ["haiku", "sonnet", "opus", "fable"],
+      apply: { floor: "sonnet" },
+    });
+    c = loadConfig(root).adjudicator;
+    expect([c.mode, c.tiers, c.apply.floor, c.apply.scope]).toEqual([
+      "apply",
+      ["haiku", "sonnet", "opus", "fable"],
+      "sonnet",
+      "swarm",
+    ]);
+    expect(projectAdjudicatorWarning(root)).toBe(
+      "eminiar.config.json sets adjudicator.apply, adjudicator.mode, adjudicator.tiers: ignored, only ~/.eminiar/config.json may set them",
+    );
+    expect(droppedProjectAdjudicatorKeys({ adjudicator: { mode: "advise" } })).toEqual([]);
+    expect(droppedProjectAdjudicatorKeys({ adjudicator: { mode: "apply" } })).toEqual(["mode"]);
+  });
+
+  it("the allowlist names no key that can change egress, keys, spend, apply mode or the tiers", () => {
     for (const k of [
       "provider",
       "typesafe",
@@ -410,6 +437,10 @@ describe("project layer trust boundary (#32)", () => {
       "budget",
       "timeouts",
       "breaker",
+      // ...or the model every subagent runs on (review #109)
+      "mode",
+      "apply",
+      "tiers",
     ])
       expect(PROJECT_ADJUDICATOR_KEYS).not.toContain(k);
     // Every allowed key is a real field of the section.
@@ -962,7 +993,7 @@ describe("the personal config's trust anchor (#54)", () => {
     expect(personalConfigTrusted(root)).toBe(false);
     const a = loadConfig(root).adjudicator;
     expect(a.enabled).toBe(true); // what the project layer may set still applies
-    expect(a.tiers).toEqual(["haiku", "opus"]);
+    expect(a.tiers).toEqual(adjudicatorDefaults().tiers); // tiers are personal-only (#109)
     expect(a.provider).toBe("heuristic");
     expect([a.remoteConsent, a.remoteConsentOrigins, a.keyEnv]).toEqual([
       false,
@@ -975,7 +1006,7 @@ describe("the personal config's trust anchor (#54)", () => {
     expect(w).toMatch(
       /^adjudicator\.budget, adjudicator\.keyEnv, .* ignored: .*inside this project/,
     );
-    expect(w).not.toMatch(/adjudicator\.tiers/);
+    expect(w).toMatch(/adjudicator\.tiers, /);
     expect(w).not.toMatch(/\n/);
   });
 
@@ -1039,20 +1070,31 @@ describe("the personal config's trust anchor (#54)", () => {
 });
 
 describe("lists sent to providers are bounded (#56)", () => {
-  it("tiers: at most one of each tier, in every layer; a long project ladder is refused", () => {
+  it("tiers: at most one of each tier, in every layer; a long ladder is refused", () => {
     expect(adj({ tiers: ["haiku", "opus", "fable"] }).tiers).toEqual(["haiku", "opus", "fable"]);
     expect(AdjudicatorConfigSchema.safeParse({ tiers: ["haiku", "haiku"] }).success).toBe(false);
     const long = Array.from({ length: 1000 }, (_, i) => TIERS[i % TIERS.length]);
     expect(AdjudicatorConfigSchema.safeParse({ tiers: long }).success).toBe(false);
-    // From the committed project file: the config is invalid, so the defaults (adjudicator off) apply.
+    // From the personal file: the config is invalid, so the defaults (adjudicator off) apply.
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ adjudicator: { enabled: true, tiers: long } }),
+    );
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    let a = loadConfig(root).adjudicator;
+    expect(stderr).toHaveBeenCalled();
+    expect([a.enabled, a.tiers]).toEqual([false, ["haiku", "sonnet", "opus"]]);
+    // From the committed project file it never reaches the schema: tiers are personal-only (#109).
+    writeFileSync(join(home, "config.json"), "{}");
+    stderr.mockClear();
     writeFileSync(
       join(root, "eminiar.config.json"),
       JSON.stringify({ adjudicator: { enabled: true, tiers: long } }),
     );
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    const a = loadConfig(root).adjudicator;
-    expect(stderr).toHaveBeenCalled();
-    expect([a.enabled, a.tiers]).toEqual([false, ["haiku", "sonnet", "opus"]]);
+    a = loadConfig(root).adjudicator;
+    expect(stderr).not.toHaveBeenCalled();
+    expect([a.enabled, a.tiers]).toEqual([true, ["haiku", "sonnet", "opus"]]);
+    expect(projectAdjudicatorWarning(root)).toMatch(/sets adjudicator\.tiers: ignored/);
   });
 
   it("weight records are bounded too", () => {

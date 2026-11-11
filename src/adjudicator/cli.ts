@@ -4,12 +4,13 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import {
   type AdjudicatorConfig,
@@ -329,6 +330,24 @@ export function valueLooksLikeKey(value: string | undefined): boolean {
 }
 
 /**
+ * valueLooksLikeKey for a path flag (--fixture). The folders of an existing file are not checked,
+ * since the user did not type a key there: macOS puts temp files under
+ * /var/folders/xx/<30 letters and digits>/T/, which the segment rule would refuse. Its file name
+ * still is (key prefix and segment rule), and a value that is not an existing file (a pasted
+ * key) gets the full check.
+ */
+function pathLooksLikeKey(value: string): boolean {
+  const v = value.trim();
+  let isFile = false;
+  try {
+    isFile = statSync(v).isFile();
+  } catch {
+    // missing or unreadable: check the whole value
+  }
+  return valueLooksLikeKey(isFile ? basename(v) : v);
+}
+
+/**
  * Why a --base-url is refused, or undefined when it may be stored (task #57). It must be a plain
  * http(s) URL: no user name or password, no fragment, no query parameter named like a secret or
  * holding a key-shaped value, no key-shaped path segment. The message never repeats the URL.
@@ -365,7 +384,8 @@ export function baseUrlProblem(raw: string): string | undefined {
 function argvKeyProblem(values: Record<string, unknown>): string | undefined {
   for (const flag of ["model", "since", "fixture", "repeat", "providers"]) {
     const v = values[flag];
-    if (typeof v === "string" && valueLooksLikeKey(v)) return KEY_NOT_FROM_ARGV;
+    if (typeof v !== "string") continue;
+    if (flag === "fixture" ? pathLooksLikeKey(v) : valueLooksLikeKey(v)) return KEY_NOT_FROM_ARGV;
   }
   const url = values["base-url"];
   if (typeof url === "string" && url) return baseUrlProblem(url);

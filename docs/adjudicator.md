@@ -87,7 +87,7 @@ You can turn it on in any of these ways:
   `eminiar upgrade`, and once `~/.eminiar/config.json` already says on or off.
   `eminiar install --adjudicator[=heuristic|embedding|typesafe|groq|cerebras|ollama|lmstudio|llamacpp]`
   turns it on without asking.
-- **During onboarding.** `/em-onboard` asks the same question. It never takes a key in chat. It
+- **During onboarding.** `/eminiar:em-onboard` asks the same question. It never takes a key in chat. It
   tells you to run `eminiar adjudicator key set` in your own terminal.
 - **From the CLI**, at any time:
 
@@ -108,18 +108,20 @@ server starts, so run **`/mcp reconnect`** (or restart Claude Code) after enabli
 `~/.eminiar/config.json` and `~/.eminiar/adjudicator.key`.
 
 A project file comes with every clone of the repo, so eminiar trusts it only for settings that
-cannot send your text or keys anywhere. In `eminiar.config.json` the adjudicator section may set
-`enabled`, `mode`, `surfaces`, `promptMode`, `minPromptChars`, `tiers`, `weights`, `apply`,
-`advice`, `embedding`, `learning` and `cache`. Everything else is ignored there: `provider`,
-`typesafe`, `openai` (preset, base URL, model, price), `keyEnv`, `remoteConsent`,
-`remoteConsentOrigins`, `privacy`, `budget`, `timeouts` and `breaker` are read only from
-`~/.eminiar/config.json` and the `EMINIAR_ADJUDICATOR*` variables. `eminiar doctor` (check
-"adjudicator project config"), `adjudicator status` (a `warning:` line, `projectIgnored` in
-`--json`) and the dashboard overview name any key a project file sets that was ignored, even
-while the adjudicator is off. A repo that turns the adjudicator on for someone with no personal
-setup gets the heuristic, which never leaves the machine. Keys named `__proto__`,
-`constructor` or `prototype` are dropped from every config file at any depth, so they cannot
-smuggle settings past this list.
+cannot send your text or keys anywhere, turn on apply mode, or change the apply settings or the
+tier ladder. In `eminiar.config.json` the adjudicator section may set `enabled`, `surfaces`,
+`promptMode`, `minPromptChars`, `weights`, `advice`, `embedding`, `learning` and `cache`, and
+`mode` only as `"advise"` (a project can keep the adjudicator advise-only, never switch it to
+apply). Everything else is ignored there:
+`provider`, `typesafe`, `openai` (preset, base URL, model, price), `keyEnv`, `remoteConsent`,
+`remoteConsentOrigins`, `privacy`, `budget`, `timeouts`, `breaker`, `mode: "apply"`, `apply` and
+`tiers` are read only from `~/.eminiar/config.json` and the `EMINIAR_ADJUDICATOR*` variables.
+`eminiar doctor` (check "adjudicator project config"), `adjudicator status` (a `warning:` line,
+`projectIgnored` in `--json`) and the dashboard overview name any key a project file sets that
+was ignored, even while the adjudicator is off. A repo that turns the adjudicator on for someone
+with no personal setup gets the heuristic, which never leaves the machine. Keys named
+`__proto__`, `constructor` or `prototype` are dropped from every config file at any depth, so
+they cannot smuggle settings past this list.
 
 The same `.claude/settings.json` `env` block could also move `EMINIAR_HOME` (or `HOME`) into the
 repo, so that a `config.json` the repo ships is read as your personal one. eminiar anchors the
@@ -743,7 +745,7 @@ provider, the one that actually runs, and why they differ.
 | "… sends redacted prompt text to …: run `eminiar adjudicator enable --accept-remote`" | Consent is missing. Consent in a project file is ignored on purpose |
 | "… which you have not agreed to (consent is per origin)" | You agreed to another host. Consent covers only the origins in `remoteConsentOrigins`; no environment variable grants it. Run `enable --accept-remote` to agree to this one |
 | "redirect to … refused" | The provider answered with a 3xx. eminiar never follows redirects; set the base URL to the final endpoint |
-| "eminiar.config.json sets adjudicator.… : ignored" | The project file set a provider, URL, key, cap or timeout. Those are personal: move them to `~/.eminiar/config.json` (`eminiar adjudicator provider …`) |
+| "eminiar.config.json sets adjudicator.… : ignored" | The project file set a provider, URL, key, cap, timeout, apply mode, `apply.*` or the tier ladder. Those are personal: move them to `~/.eminiar/config.json` (`eminiar adjudicator provider …`; for apply mode, `eminiar adjudicator enable --mode apply`) |
 | "the key file is readable by others and was ignored" | `chmod 600 ~/.eminiar/adjudicator.key` |
 | "API key rejected (HTTP 401)" | The key is wrong or revoked. Store a new one with `key set`; the lockout lifts as soon as the key changes |
 | "the custom preset needs openai.baseUrl and openai.model" | Set both: `eminiar adjudicator provider openai-compatible --preset custom --base-url … --model …` |

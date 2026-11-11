@@ -25,7 +25,7 @@ You can opt in three ways:
 
 - run `eminiar swarm init`. It writes a starter file with two swarms (`feature` and `review`)
   and generates their agent files;
-- click "Create starter swarm.yaml" on the Swarms tab of the dashboard (`eminiar ui`);
+- click "Create from the starter" on the Swarms tab of the dashboard (`eminiar ui`);
 - write the file yourself, using the reference below.
 
 Commit `.eminiar/swarm.yaml` so your team shares the swarms. The generated agent files in
@@ -104,7 +104,8 @@ swarms:
             - matcher: "Edit|Write"
               hooks:
                 - type: command
-                  command: "npx biome check --write --no-errors-on-unmatched ."
+                  # formats only the edited file; copy the script first, see Role hooks
+                  command: "node \"$CLAUDE_PROJECT_DIR/.eminiar/hooks/format-edited.mjs\""
         prompt: Implement the claimed task. Keep the diff minimal.
       reviewer:
         description: Adversarial reviewer that tries to break the change.
@@ -112,10 +113,24 @@ swarms:
         prompt: Find correctness bugs, each with a concrete failing input.
 ```
 
-Unknown keys are errors, so a typo is reported instead of ignored. Each error names its YAML
-path and line, for example `.eminiar/swarm.yaml:23 swarms.feature.agents.coder.count`. Check the
-file with `eminiar swarm validate`. While the file is invalid, swarms stay off and sync changes
-nothing.
+Each error names its YAML path and line, for example
+`.eminiar/swarm.yaml:23 swarms.feature.agents.coder.count`. Check the file with
+`eminiar swarm validate`. While the file is invalid, swarms stay off and sync changes nothing.
+
+**Keys from a newer eminiar.** A key this version does not know is ignored, not an error, so a
+file a teammate wrote for a newer eminiar keeps working here, and `enforce: true` keeps enforcing
+instead of denying every subagent. `eminiar swarm validate` and `eminiar swarm list` name each
+ignored key, and session start and the dashboard show them too. While a file has ignored keys,
+sync creates missing agent files but neither rewrites nor deletes existing generated ones: the
+newer eminiar may have generated them with those settings, and rewriting them would drop the
+settings. `eminiar swarm sync --force` writes them anyway (it also overwrites generated files
+that were edited by hand). An ignored key has no effect here: if a newer eminiar uses it to
+restrict a worker, the agent files this version creates do not carry that restriction.
+
+A typo is still an error: an unknown key that differs from a key known at that place only in
+case, or by one edit (two for keys of 7 or more characters), such as `max_agent`,
+`disallowedTools` or `enforced`, is reported with the key it is close to. A known key with a
+wrong value is always an error.
 
 ### Top level
 
@@ -156,8 +171,9 @@ across all swarms.
 | `prompt` | `""` | The role's instructions, written into the agent file body |
 | `model` | `defaults.model` | `inherit`, `sonnet`, `opus`, `haiku`, `fable` or a full model id. When nothing sets a model, the agent file has no `model` line and Claude Code uses its default for subagents. With a `model_range`, this is the fallback |
 | `model_range` | `defaults.model_range` | `{ floor, ceiling }`: the tiers (`haiku`, `sonnet`, `opus`, `fable`) the adjudicator may move this worker's model between. See [Model ranges](#model-ranges) |
-| `tools` | unset | Tool allowlist. When set, eminiar adds its own `em_*` tools under both MCP name forms so routing never leaves the worker without them. Unset: the worker gets every tool |
-| `disallowed_tools` | unset | Tools the worker cannot use, such as `[Edit, Write, NotebookEdit]` for a read-only reviewer |
+| `tools` | unset | Tool allowlist. When set, eminiar adds its own `em_*` tools under both MCP name forms so routing never leaves the worker without them. `em_execute`, `em_execute_file` and `em_batch_execute` run code, so they are added only when the list has `Bash`. Unset: the worker gets every tool |
+| `tools_profile` | unset | `readonly` writes the agent file's `tools` allowlist as `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch` and `ToolSearch` plus the read-only `em_*` tools (`em_recall`, `em_search`, `em_symbols`, `em_history`, `em_graph_impact`, `em_graph_query`, `em_architecture`) and `em_swarm`, and disallows `Edit`, `Write` and `NotebookEdit`. `Bash` is never allowed, because a shell can write files, so `em_execute`, `em_execute_file`, `em_batch_execute`, `em_remember`, `em_memory` and `em_docs` are left out too. A `tools` list narrows the built-ins; naming a tool outside the profile in it is an error. Unset: the role is only as read-only as its prompt and `disallowed_tools` make it |
+| `disallowed_tools` | unset | Tools the worker cannot use, such as `[Edit, Write, NotebookEdit]` for a reviewer that must not edit files. `Bash` here also disallows `em_execute`, `em_execute_file` and `em_batch_execute` |
 | `skills` | `[]` | Skills preloaded into the worker, after `defaults.skills` |
 | `hooks` | unset | Hooks scoped to this worker. See [Role hooks](#role-hooks) |
 | `scope` | `[]` | Project-relative path globs the role works on (`src/**`, `docs/*.md`). Briefs focus history and hot files on them. No absolute paths or `..` |
@@ -214,7 +230,7 @@ swarm or a role; the most specific value wins.
 | `history` | `true` | Bug-prone files among the task's files (or in the role's scope), each with its fix count and last fix, plus the project's history lesson |
 | `structure` | `true` | The project brief |
 | `insights` | `true` | Hot files (fan-in × churn) among the task's files or in the role's scope |
-| `max_chars` | `4000` | Size budget of the brief, 500 to 20000 characters |
+| `max_chars` | `4000` | Size budget of the brief, 500 to 9000 characters |
 
 ### Role hooks
 
@@ -234,6 +250,15 @@ hooks:
 They are copied into the role's agent file. Claude Code runs them only while that worker is
 active. Read [Security](#security) before you add one.
 
+Workers without `isolation: worktree` share one working tree, so a hook that rewrites files must
+touch only the file the tool just edited. A whole-tree formatter (`biome check --write .`,
+`prettier --write .`) rewrites the files other workers are editing: their next `Edit` fails, or
+lands on text they never read. The hook gets the tool call as JSON on stdin, and
+`tool_input.file_path` names the file. The example above runs
+[`.eminiar/hooks/format-edited.mjs`](../.eminiar/hooks/format-edited.mjs) from this repository:
+copy it to the same path in your project (it runs Biome on the one file; change the command for
+your formatter).
+
 ### Generated agent files
 
 Sync writes `.claude/agents/swarm-<swarm>-<role>.md` for every role. Each file starts with an
@@ -249,6 +274,22 @@ coordinator, the main session, starts workers. The ledger cannot see nested spaw
 not be tracked or capped. A role that lists `Agent` (or `Task`) in its own `tools` keeps it, and
 `Agent` is not added to its `disallowedTools`; with `enforce: true` such a nested call is still
 denied unless its type is in `allowed_agents`.
+
+**Shell tools follow Bash.** A role without `Bash` (left out of its `tools`, or listed in
+`disallowed_tools`) gets no `em_execute`, `em_execute_file` or `em_batch_execute` either, because
+each of them runs code. Only the exact name `Bash` counts: `Bash(rm:*)` in `disallowed_tools` leaves
+them in. Routing does not deny such a worker's native call toward one of them
+(a big `Read`, a content `Grep`); the call goes ahead instead, and its spawn prompt does not
+mention them. This covers eminiar's tools only: a role without a `tools` list inherits every
+MCP tool, including other servers' command runners, so a role that must have no shell needs a
+`tools` allowlist. `disallowed_tools: [Edit, Write, NotebookEdit]` keeps `Bash`, so a reviewer
+with it can still change files through the shell.
+
+**The shared working tree.** The protocol of every worker that has a shell and no
+`isolation: worktree` says that other workers may be editing the same tree with uncommitted
+changes. So it must never run `git stash`, `checkout`, `switch`, `reset`, `restore` or `clean`,
+even on one path, must not sweep their work into a commit with `git add -A` or `git commit -a`,
+and must make mutation checks in a copy outside the tree.
 
 Edit the YAML, not the generated files: the next sync overwrites them. Claude Code reads agent
 files when a session starts. If a new worker type is missing from the Agent tool, open
@@ -396,12 +437,13 @@ it. Projects without `enforce: true` are never affected.
 | No swarm file, `enforce` off, or `enabled: false` | Not enforced |
 | Valid file with `enforce: true` | Enforced |
 | Invalid file that sets `enforce: true` (including YAML that does not parse) | Every subagent is denied until the file is fixed |
+| Valid file with `enforce: true` and keys this version does not know | Enforced; the keys are ignored |
 | Swarm file unreadable | Not enforced (no evidence of opt-in); session start warns |
 | Loading the config throws | Denied if the raw file says `enforce: true`, otherwise allowed |
 | Database error while checking a swarm worker | Denied (a busy database gets a retry message) |
 | The hook throws elsewhere | Denied if the raw file says `enforce: true` |
 | No Node.js or no installed copy (`bin/em-hook` shim) | Denied if the raw file says `enforce: true` |
-| Hook timeout (5 s) or a crash while loading | **Not covered: the spawn goes ahead** |
+| Hook timeout (5 s for the plugin's hook, 10 s for the entry `eminiar install` writes into settings) or a crash while loading | **Not covered: the spawn goes ahead** |
 
 The last row is an open gap. Claude Code treats a hook that times out or cannot start as a
 non-blocking error. For a hard guarantee, add your own entry to the project's

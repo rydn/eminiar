@@ -1082,6 +1082,7 @@ describe("flag values never echo or store a key (#57)", () => {
     ["stats", "--since", K],
     ["stats", "--since", "nonsense-value"],
     ["eval", "--fixture", `${RAW}.json`],
+    ["eval", "--fixture", K],
     ["eval", "--repeat", K],
   ];
   it.each(cases)("refuses %s %s … without echoing or writing it", async (...args) => {
@@ -1119,5 +1120,30 @@ describe("flag values never echo or store a key (#57)", () => {
     expect(await run(["stats", "--since", "2026-10-01T00:00:00Z"], t.io)).toBe(0);
     t = fakeIo();
     expect(await run(["stats", "--since", "7d"], t.io)).toBe(0);
+  });
+
+  it("--fixture reads a file under a long folder name (macOS $TMPDIR), not a key-named file", async () => {
+    // /var/folders/xx/<30 letters and digits>/T/ on macOS: only the file name is checked.
+    const dir = join(root, "q7xk2m9v4b8n1c6z3l5j0h7g2f9d4s", "T");
+    mkdirSync(dir, { recursive: true });
+    const item = {
+      text: "rename a variable",
+      tool: "Edit",
+      tier: "haiku",
+      role: "coder",
+      complexity: 0,
+    };
+    const ok = join(dir, "fx.json");
+    writeFileSync(ok, JSON.stringify([item]));
+    expect(await run(["eval", "--fixture", ok], fakeIo().io)).toBe(0);
+    // An existing file whose name is key-shaped is still refused, without echoing it.
+    const keyed = join(dir, `${RAW}.json`);
+    writeFileSync(keyed, JSON.stringify([item]));
+    const t = fakeIo();
+    expect(await run(["eval", "--fixture", keyed], t.io)).toBe(2);
+    expect(t.text()).not.toContain(RAW);
+    const prefixed = join(dir, "sk-live7.json"); // a short key with a known prefix
+    writeFileSync(prefixed, JSON.stringify([item]));
+    expect(await run(["eval", "--fixture", prefixed], fakeIo().io)).toBe(2);
   });
 });

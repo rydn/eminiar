@@ -5,7 +5,7 @@
  *   1 managed     <managed settings dir>/.claude/agents/
  *   2 --agents    session JSON: invisible to a hook (see `unknown` below)
  *   3 project     every .claude/agents/ from the cwd up to the repository root, closest first
- *   4 user        ~/.claude/agents/
+ *   4 user        ~/.claude/agents/ (CLAUDE_CONFIG_DIR/agents/ when set)
  *   5 plugin      the plugin's agents/ (or its manifest `agents` paths), only by scoped name
  *   built-ins     general-purpose, Explore, Plan (no pin), statusline-setup, claude-code-guide
  *   fork          `fork` (Agent(fork)) is no definition: it runs on the main session's model
@@ -25,6 +25,7 @@
 import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { claudeConfigDir, claudePluginsDir } from "../paths.js";
 import { agentFileRange } from "../swarm/agents.js";
 import type { ModelRange } from "../swarm/types.js";
 import { isPinned, tierOf, tierRank } from "./savings.js";
@@ -288,7 +289,7 @@ function projectDirs(root: string, cwd: string | undefined): string[] {
 /** The installed copies of `plugin`: installed_plugins.json, plus CLAUDE_CODE_PLUGIN_DIRS. */
 function pluginDirs(plugin: string, env: NodeJS.ProcessEnv, home: string): string[] {
   const out = new Set<string>();
-  const pluginsRoot = env.CLAUDE_CODE_PLUGIN_CACHE_DIR?.trim() || join(home, ".claude", "plugins");
+  const pluginsRoot = claudePluginsDir(env, home);
   try {
     const j = JSON.parse(readFileSync(join(pluginsRoot, "installed_plugins.json"), "utf8")) as {
       plugins?: Record<string, unknown>;
@@ -403,7 +404,7 @@ export function resolveAgentPin(agentType: string, q: PinLookup): AgentPin {
     const scopes: Array<[PinSource, string]> = [];
     if (managed) scopes.push(["managed", join(managed, ".claude", "agents")]);
     for (const d of projectDirs(q.root, q.cwd)) scopes.push(["project", d]);
-    scopes.push(["user", join(home, ".claude", "agents")]);
+    scopes.push(["user", join(claudeConfigDir(env, home), "agents")]);
 
     let truncated = false;
     for (const [source, dir] of scopes) {

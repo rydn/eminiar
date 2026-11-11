@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import { matchBash, matchRead, type PermissionRules, parseRule, type Rule } from "./rules.js";
+import { claudeConfigDir } from "../paths.js";
+import { matchBash, type PermissionRules, parseRule, type Rule, readMatcher } from "./rules.js";
 import { splitCommand } from "./split.js";
 
 interface SettingsFile {
@@ -39,16 +39,17 @@ const cache = new Map<string, { stamps: number[]; rules: PermissionRules }>();
  */
 export function loadPermissionRules(root: string, extraDeny: string[] = []): PermissionRules {
   const files = [
-    join(homedir(), ".claude", "settings.json"),
+    join(claudeConfigDir(), "settings.json"),
     join(root, ".claude", "settings.json"),
     join(root, ".claude", "settings.local.json"),
   ];
-  const key = `${root}\0${extraDeny.join("\0")}`;
+  // The user file moves with CLAUDE_CONFIG_DIR, so it is part of the key.
+  const key = [...files, ...extraDeny].join("\0");
   const stamps = files.map(stamp);
   const hit = cache.get(key);
   if (hit?.stamps.every((s, i) => s === stamps[i])) return hit.rules;
 
-  const out: PermissionRules = { allow: [], deny: [], ask: [] };
+  const out: PermissionRules = { allow: [], deny: [], ask: [], root };
   const push = (list: Rule[], raws: string[] | undefined) => {
     for (const raw of raws ?? []) {
       const r = parseRule(raw);
@@ -90,24 +91,34 @@ export function checkCommand(rules: PermissionRules, command: string): CommandCh
 export type ReadCheck = Omit<CommandCheck, "segment">;
 
 /**
- * Claude Code's `Read` rules for absolute paths. Deny wins, over allow rules too; `ask`
- * is treated as deny because the sandbox has no way to prompt.
+ * Claude Code's `Read` rules for absolute paths; relative patterns resolve against
+ * `rules.root` (see matchRead). Deny wins, over allow rules too; `ask` is treated as deny
+ * because the sandbox has no way to prompt. Each list is compiled once into one regex, so a
+ * path that no rule matches costs one test per list however many rules there are.
  */
 export function checkRead(rules: PermissionRules, absPaths: string[]): ReadCheck {
   for (const kind of ["deny", "ask"] as const) {
-    for (const r of rules[kind]) {
-      if (absPaths.some((p) => matchRead(r, p))) return { allowed: false, rule: r.raw, kind };
+    const m = readMatcher(rules[kind], rules.root);
+    for (const p of absPaths) {
+      const r = m.which(p);
+      if (r) return { allowed: false, rule: r.raw, kind };
     }
   }
   return { allowed: true };
 }
 
 /**
- * `checkRead` for an existing file: the path as given, its symlink target and its on-disk
- * letter case. `realpathSync` keeps the requested case, so on macOS `.ENV` would miss
- * `Read(**\/.env)` without `realpathSync.native`. Shared by em_execute_file and routing, so
- * routing never redirects a Read that em_execute_file refuses. Throws when it does not exist.
+ * `checkRead` for an existing file: the path as given, then, only when that passes and they
+ * differ from it, its symlink target and its on-disk letter case. `realpathSync` keeps the
+ * requested case, so on macOS `.ENV` would miss `Read(**\/.env)` without
+ * `realpathSync.native`. Shared by em_execute_file, routing and the indexers, so routing never
+ * redirects a Read that em_execute_file refuses. Throws when it does not exist.
  */
 export function checkReadPath(rules: PermissionRules, abs: string): ReadCheck {
-  return checkRead(rules, [...new Set([abs, realpathSync(abs), realpathSync.native(abs)])]);
+  const asWritten = checkRead(rules, [abs]);
+  if (!asWritten.allowed) return asWritten;
+  const real = realpathSync(abs);
+  const native = realpathSync.native(abs);
+  const more = [real, native].filter((p, i, a) => p !== abs && a.indexOf(p) === i);
+  return more.length ? checkRead(rules, more) : asWritten;
 }
