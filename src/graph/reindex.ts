@@ -1,9 +1,11 @@
 import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import fg from "fast-glob";
+import micromatch from "micromatch";
 import { hashText } from "../chunker/index.js";
 import { chunkBySymbols, type SymbolSpan } from "../chunker/symbols.js";
 import { getCodeBackend } from "../code/backend.js";
+import type { Config } from "../config.js";
 import type { ProjectContext } from "../context.js";
 import { indexContent } from "../index/indexer.js";
 import type { StorageAdapter } from "../storage/adapter.js";
@@ -39,14 +41,59 @@ export const MAX_CODE_BYTES = 1_500_000;
  */
 const CODE_INDEX_VERSION = "3";
 
-function listCodeFiles(ctx: ProjectContext): string[] {
+/** fast-glob's settings for the code index; codeFileFilter mirrors them for single paths. */
+const CODE_GLOB = { onlyFiles: true, dot: false, followSymbolicLinks: false } as const;
+const MATCH: micromatch.Options = { dot: false, posix: true, strictSlashes: false };
+
+export function listCodeFiles(ctx: ProjectContext): string[] {
   return fg.sync(ctx.config.graph.include, {
+    ...CODE_GLOB,
     cwd: ctx.root,
     ignore: ctx.config.graph.exclude,
-    onlyFiles: true,
-    dot: false,
-    followSymbolicLinks: false,
   });
+}
+
+/**
+ * Would listCodeFiles list this project-relative path? The same rules fast-glob applies, from
+ * its own task patterns (braces expanded, `!` includes turned into ignores, a `!` on an ignore
+ * dropped): a positive pattern matches (`**` does not cross a dot folder), no ignore pattern
+ * matches (dot files included), and no folder on the way is one an ignore pattern prunes
+ * (`dist`, `src/legacy`, `**\/generated/**`). The reindex queue holds what the hooks saw
+ * edited, and a session's hooks record into its root's project: an edit made in a git worktree
+ * under `.claude/worktrees/` must not put a second copy of the code into the graph.
+ */
+export function codeFileFilter(graph: Config["graph"]): (rel: string) => boolean {
+  // Compiled once per config object: the server drains the queue on every request.
+  const cached = FILTERS.get(graph);
+  if (cached) return cached;
+  const f = compileCodeFilter(graph);
+  FILTERS.set(graph, f);
+  return f;
+}
+
+const FILTERS = new WeakMap<Config["graph"], (rel: string) => boolean>();
+
+function compileCodeFilter(graph: Config["graph"]): (rel: string) => boolean {
+  const tasks = fg.generateTasks(graph.include, { ignore: graph.exclude });
+  const re = (patterns: string[], opts: micromatch.Options) =>
+    patterns.map((p) => micromatch.makeRe(p, opts));
+  const any = (res: RegExp[], s: string) => res.some((r) => r.test(s));
+  const positive = re(
+    tasks.flatMap((t) => t.positive),
+    MATCH,
+  );
+  const ignore = tasks[0]?.negative ?? [];
+  const ignored = re(ignore, { ...MATCH, dot: true });
+  const pruned = re(
+    ignore.filter((p) => p.endsWith("/**") || !fg.isDynamicPattern(basename(p))),
+    MATCH,
+  );
+  return (rel) => {
+    if (isAbsolute(rel) || rel.startsWith("../") || !any(positive, rel) || any(ignored, rel))
+      return false;
+    const dirs = rel.split("/").slice(0, -1);
+    return !dirs.some((_, i) => any(pruned, dirs.slice(0, i + 1).join("/")));
+  };
 }
 
 type FileResult = "parsed" | "unchanged" | "skipped" | "partial";
@@ -290,7 +337,7 @@ let draining = false;
 /** Parse files queued by the PostToolUse hook (Edit/Write). Cheap when the queue is empty. */
 export async function drainReindexQueue(ctx: ProjectContext, db: StorageAdapter): Promise<number> {
   if (draining) return 0;
-  const paths = db.reindexQueueDrain();
+  const paths = db.reindexQueueDrain().filter(codeFileFilter(ctx.config.graph));
   if (!paths.length) return 0;
   draining = true;
   try {

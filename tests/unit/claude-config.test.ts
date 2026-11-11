@@ -103,6 +103,15 @@ describe("call sites under CLAUDE_CONFIG_DIR", () => {
     const stable = tmp("em-cfg-stable-");
     mkdirSync(join(stable, "skills", "em-x"), { recursive: true });
     writeFileSync(join(stable, "skills", "em-x", "SKILL.md"), "x");
+    mkdirSync(join(stable, "hooks"));
+    writeFileSync(
+      join(stable, "hooks", "hooks.json"),
+      JSON.stringify({
+        hooks: {
+          Stop: [{ hooks: [{ type: "command", command: `"\${CLAUDE_PLUGIN_ROOT}/bin/em-hook"` }] }],
+        },
+      }),
+    );
     process.env.CLAUDE_CONFIG_DIR = config;
     registerSettings(stable);
     const cj = JSON.parse(readFileSync(join(config, ".claude.json"), "utf8"));

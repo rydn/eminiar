@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   claudeJsonPath,
@@ -13,19 +21,6 @@ import {
   writeJsonWithBackup,
 } from "./claude-config.js";
 import { claudeCli, log, run } from "./shell.js";
-
-const HOOK_EVENTS = [
-  "SessionStart",
-  "UserPromptSubmit",
-  "PreToolUse",
-  "PostToolUse",
-  "PostToolUseFailure",
-  "SubagentStart",
-  "SubagentStop",
-  "PreCompact",
-  "Stop",
-  "SessionEnd",
-];
 
 /** Files whose content must match between the stable copy and Claude Code's cached copy. */
 const CACHE_FINGERPRINT = [
@@ -137,35 +132,126 @@ export function unregisterPlugin(): void {
 }
 
 /** Does a hook/server command string point at an eminiar binary (stable copy or `stable`)? */
-export function isOurs(cmd: unknown, stable: string): boolean {
+export function isOurs(cmd: unknown, stable: string): cmd is string {
   return typeof cmd === "string" && (cmd.includes("/.eminiar/plugin/") || cmd.includes(stable));
+}
+
+/**
+ * Is this hook command exactly what install writes: the hook binary alone, quoted or not, with no
+ * arguments? A user's own `em-hook --gate` entry (the fail-closed swarm gate) and other eminiar
+ * commands they hook up stay.
+ */
+function isOurHook(cmd: unknown, stable: string): boolean {
+  if (typeof cmd !== "string") return false;
+  const bin = cmd.trim().replace(/^"(.*)"$/, "$1");
+  // The stable copy, the legacy plugin path, and the npm-installed layout of any install root.
+  return (
+    bin === join(stable, "bin", "em-hook") ||
+    bin.endsWith("/.eminiar/plugin/bin/em-hook") ||
+    /\/\.eminiar\/plugin\/node_modules\/eminiar\/bin\/em-hook$/.test(bin)
+  );
+}
+
+/**
+ * Take eminiar's hooks out of every event, one hook at a time as `eminiar replace` does: a user's
+ * hook that shares an entry with ours stays, and only an entry left with no hooks goes. Every
+ * event, not only the ones hooks.json lists now, so an event it drops later is cleaned up too.
+ */
+function removeOurHooks(hooks: Record<string, unknown>, stable: string): void {
+  for (const [ev, list] of Object.entries(hooks)) {
+    if (!Array.isArray(list)) continue;
+    const kept = (list as Json[]).flatMap((entry) => {
+      // A malformed entry or hooks list is the user's; leave it alone rather than throw.
+      if (!entry || typeof entry !== "object" || !Array.isArray(entry.hooks)) return [entry];
+      const all = entry.hooks as Json[];
+      const rest = all.filter((h) => !(h && isOurHook(h.command, stable)));
+      if (rest.length === all.length) return [entry];
+      return rest.length ? [{ ...entry, hooks: rest }] : [];
+    });
+    if (kept.length) hooks[ev] = kept;
+    else if (list.length) delete hooks[ev];
+  }
+}
+
+const PLUGIN_ROOT = `\${CLAUDE_PLUGIN_ROOT}`;
+
+/**
+ * The plugin's own hook table, hooks/hooks.json in the stable copy, with the plugin root filled
+ * in. The settings method writes exactly this, so the two registrations cannot drift apart: a
+ * hand-kept copy once lacked Edit, MultiEdit, Write and WebSearch, and settings installs never
+ * got the before-edit recall.
+ */
+function settingsHooks(stable: string): Record<string, Json[]> {
+  const file = join(stable, "hooks", "hooks.json");
+  if (!existsSync(file)) throw new Error(`${file} is missing`);
+  const table = readJson(file).hooks as Record<string, Json[]> | undefined;
+  if (!table) throw new Error(`${file} has no hooks`);
+  const fill = (h: Json): Json => {
+    if (typeof h.command !== "string") return h;
+    // Settings hooks get no plugin variables, so one left unfilled would run a broken path.
+    if (h.command.replaceAll(PLUGIN_ROOT, "").includes(`\${CLAUDE_PLUGIN_`))
+      throw new Error(`${file}: the settings method cannot fill the variable in ${h.command}`);
+    // A function, so a `$&` or `$$` in the path is not read as a replacement pattern.
+    return { ...h, command: h.command.replaceAll(PLUGIN_ROOT, () => stable) };
+  };
+  const out: Record<string, Json[]> = {};
+  for (const [ev, entries] of Object.entries(table)) {
+    out[ev] = entries.map((entry) => ({
+      ...entry,
+      hooks: ((entry.hooks as Json[] | undefined) ?? []).map(fill),
+    }));
+  }
+  return out;
+}
+
+/**
+ * Merge our hook table into settings.hooks and write settings.json. Returns the events written,
+ * or none when settings.hooks is not an object (an array would silently drop what we add): that
+ * value is the user's, so it is left alone with a warning and the install record claims no hooks.
+ */
+function registerSettingsHooks(
+  settings: Json,
+  ours: Record<string, Json[]>,
+  stable: string,
+): string[] {
+  const current = settings.hooks;
+  if (
+    current !== undefined &&
+    current !== null &&
+    (typeof current !== "object" || Array.isArray(current))
+  ) {
+    log.warn(
+      "settings.json `hooks` is not an object; leaving it alone, so eminiar's hooks are not registered (fix it and re-run install)",
+    );
+    return [];
+  }
+  const hooks = (current as Record<string, unknown> | undefined | null) ?? {};
+  // A re-install or upgrade replaces the previous registration whole.
+  removeOurHooks(hooks, stable);
+  const odd: string[] = [];
+  for (const [ev, entries] of Object.entries(ours)) {
+    const list = hooks[ev];
+    if (list !== undefined && list !== null && !Array.isArray(list)) odd.push(ev);
+    hooks[ev] = [...(Array.isArray(list) ? list : []), ...entries];
+  }
+  if (odd.length) {
+    // Not the shared .eminiar.bak: a later write (statusline) would overwrite that one.
+    const file = settingsPath();
+    if (existsSync(file)) copyFileSync(file, `${file}.eminiar.malformed.bak`);
+    log.warn(
+      `settings.json hooks for ${odd.join(", ")} were not lists and were replaced; the original is kept in ${file}.eminiar.malformed.bak`,
+    );
+  }
+  settings.hooks = hooks;
+  writeJsonWithBackup(settingsPath(), settings);
+  return Object.keys(ours);
 }
 
 /** Fallback: write hooks + MCP server directly, context-mode style. */
 export function registerSettings(stable: string): InstallRecord["wrote"] {
   const settings = readJson(settingsPath());
-  const hooks = (settings.hooks as Record<string, unknown[]> | undefined) ?? {};
-  const hookCmd = `"${join(stable, "bin", "em-hook")}"`;
-  for (const ev of HOOK_EVENTS) {
-    const list = (hooks[ev] as Json[] | undefined) ?? [];
-    const filtered = list.filter(
-      (entry) =>
-        !((entry.hooks as Json[] | undefined) ?? []).some((h) => isOurs(h.command, stable)),
-    );
-    const entry: Json = {
-      hooks: [{ type: "command", command: hookCmd, timeout: ev === "PreCompact" ? 15 : 10 }],
-    };
-    if (ev === "PreToolUse")
-      entry.matcher = "^(Bash|Read|Grep|Glob|WebFetch|Agent|Task|mcp__.*__em_swarm)$";
-    // Only generated swarm workers need SubagentStart; other subagents skip the hook process.
-    if (ev === "SubagentStart") entry.matcher = "^swarm-";
-    if (ev === "PostToolUse" || ev === "PostToolUseFailure")
-      (entry.hooks as Json[])[0]!.async = true;
-    filtered.push(entry);
-    hooks[ev] = filtered;
-  }
-  settings.hooks = hooks;
-  writeJsonWithBackup(settingsPath(), settings);
+  const ours = settingsHooks(stable);
+  const hookEvents = registerSettingsHooks(settings, ours, stable);
 
   const cj = readJson(claudeJsonPath());
   const servers = (cj.mcpServers as Json | undefined) ?? {};
@@ -185,23 +271,14 @@ export function registerSettings(stable: string): InstallRecord["wrote"] {
     cpSync(join(stable, "skills", name), join(skillsDir, name), { recursive: true });
     skills.push(name);
   }
-  return { hookEvents: HOOK_EVENTS, mcpServer: true, skills };
+  return { hookEvents, mcpServer: true, skills };
 }
 
 export function unregisterSettings(stable: string, wrote: InstallRecord["wrote"]): void {
   if (wrote.hookEvents?.length) {
     const settings = readJson(settingsPath());
-    const hooks = (settings.hooks as Record<string, Json[]> | undefined) ?? {};
-    for (const ev of wrote.hookEvents) {
-      const list = hooks[ev];
-      if (!list) continue;
-      const kept = list.filter(
-        (entry) =>
-          !((entry.hooks as Json[] | undefined) ?? []).some((h) => isOurs(h.command, stable)),
-      );
-      if (kept.length) hooks[ev] = kept;
-      else delete hooks[ev];
-    }
+    const hooks = (settings.hooks as Record<string, unknown> | undefined) ?? {};
+    removeOurHooks(hooks, stable);
     if (Object.keys(hooks).length) settings.hooks = hooks;
     else delete settings.hooks;
     writeJsonWithBackup(settingsPath(), settings);

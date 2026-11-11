@@ -21,7 +21,7 @@ const shared: Options = {
   // and fast-glob were resolved file by file from node_modules at start-up (~500
   // module loads, two thirds of the server's boot time). Bundling the pure-JS ones
   // leaves a handful of files to read; turndown stays external and is required lazily.
-  noExternal: ["zod", "@modelcontextprotocol/sdk", "fast-glob", "ignore"],
+  noExternal: ["zod", "@modelcontextprotocol/sdk", "fast-glob", "ignore", "micromatch"],
   external: [
     "better-sqlite3",
     "sqlite-vec",

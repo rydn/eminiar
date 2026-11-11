@@ -6,7 +6,9 @@
  * only the tasks changed since the client's last snapshot, so a big run stays cheap to poll.
  * Spec: docs/design/agent-swarms.md ("Dashboard: Swarms tab").
  */
+import { createHash } from "node:crypto";
 import { z } from "zod";
+import { decisionOf, swarmDecisions } from "../adjudicator/swarm-decisions.js";
 import { TIERS } from "../adjudicator/types.js";
 import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
@@ -25,6 +27,7 @@ import {
   checkSwarmText,
   docWarnings,
   hashText,
+  ignoredKeyWarnings,
   lineDiff,
   readSwarmDoc,
   renderSwarmDoc,
@@ -393,6 +396,16 @@ export interface RunDetailOpts {
   tasksSince?: number | undefined;
   /** false: leave out the snapshot's latest events (the client follows the event feed). */
   events?: boolean | undefined;
+  /**
+   * The `decisionsHash` of the decisions the client already holds: when the run's decisions hash
+   * the same, `decisions` is left out (`decisionsUnchanged`), so a poll does not re-send the map.
+   */
+  decisionsHash?: string | undefined;
+}
+
+/** A short content hash of the decisions map, comparable by the client as an opaque string. */
+export function hashDecisions(decisions: unknown): string {
+  return createHash("sha1").update(JSON.stringify(decisions)).digest("hex").slice(0, 16);
 }
 
 export function runDetail(ctx: ProjectContext, run: RunRow, opts: RunDetailOpts = {}) {
@@ -424,9 +437,19 @@ export function runDetail(ctx: ProjectContext, run: RunRow, opts: RunDetailOpts 
       ? snap.tasks
       : snap.tasks.filter((t) => t.updated_at >= since - TASKS_SINCE_OVERLAP_MS)
   ).map(clipTask);
+  const decisions = Object.fromEntries(swarmDecisions(db, run.id).map((d) => [d.taskId, d]));
+  const decisionsHash = hashDecisions(decisions);
+  const decisionsUnchanged = opts.decisionsHash === decisionsHash;
   return {
     ...snap,
     tasks,
+    /**
+     * The adjudicator's decision per task id (advice vs what ran), for every task of the run.
+     * Omitted (with `decisionsUnchanged`) when the client's `decisionsHash` still matches.
+     */
+    decisions: decisionsUnchanged ? undefined : decisions,
+    decisionsHash,
+    decisionsUnchanged,
     /** Every task of the run, whether or not `tasks` holds them all. */
     taskCount: snap.tasks.length,
     /** `tasks` holds only the tasks updated since `tasksSince`. */
@@ -613,7 +636,10 @@ export function swarmConfigDoc(ctx: ProjectContext) {
     hash: read.hash,
     doc: read.doc,
     issues: read.issues,
-    warnings: read.doc ? docWarnings(read.doc, activeRuns, read.doc) : [],
+    warnings: [
+      ...ignoredKeyWarnings(read.ignoredKeys),
+      ...(read.doc ? docWarnings(read.doc, activeRuns, read.doc) : []),
+    ],
     locked: read.locked,
     starter: read.state === "absent" ? starterDoc() : undefined,
     activeRuns,
@@ -685,6 +711,7 @@ async function prepareConfig(
   const meta = { file: read.file, rel: read.rel };
   let text: string;
   let issues: ConfigIssue[] = [];
+  let ignoredKeys: ConfigIssue[] = [];
   let draft: SwarmDoc | null = null;
   if (b.doc !== undefined) {
     draft = b.doc as unknown as SwarmDoc;
@@ -692,10 +719,12 @@ async function prepareConfig(
     if (!r.ok) return { reply: fail(422, r.error, { locked: r.locked ?? read.locked }) };
     text = r.text;
     if (r.result.state === "invalid") issues = r.result.issues;
+    else if (r.result.state === "ok") ignoredKeys = r.result.config.ignoredKeys;
   } else {
     text = b.text as string;
     const { result, enforceOk } = checkSwarmText(text, meta);
     if (result.state === "invalid") issues = result.issues;
+    else if (result.state === "ok") ignoredKeys = result.config.ignoredKeys;
     if (!enforceOk)
       issues = [
         ...issues,
@@ -712,8 +741,10 @@ async function prepareConfig(
     }
   }
   const diff = lineDiff(read.text ?? "", text);
-  const warnings =
-    draft && typeof draft === "object" ? docWarnings(draft, activeRunsOf(ctx), read.doc) : [];
+  const warnings = [
+    ...ignoredKeyWarnings(ignoredKeys),
+    ...(draft && typeof draft === "object" ? docWarnings(draft, activeRunsOf(ctx), read.doc) : []),
+  ];
   return {
     parsed: b,
     p: {
@@ -811,6 +842,7 @@ export async function swarmRoute(
       runDetail(ctx, run, {
         tasksSince: since === null ? undefined : Number(since),
         events: query.get("events") !== "0",
+        decisionsHash: query.get("decisionsHash") ?? undefined,
       }),
     );
   }
@@ -818,10 +850,11 @@ export async function swarmRoute(
     if (!isGet) return fail(405, "GET only");
     const raw = query.get("id") ?? "";
     if (!/^\d{1,15}$/.test(raw)) return fail(400, "id must be a task id");
-    const task = getStorage(ctx).swarm.taskGet(Number(raw));
+    const db = getStorage(ctx);
+    const task = db.swarm.taskGet(Number(raw));
     const runId = query.get("run");
     if (!task || (runId && task.run_id !== runId)) return fail(404, `task ${raw} not found`);
-    return ok({ task });
+    return ok({ task, decision: decisionOf(db, task.run_id, task) });
   }
   if (path === "/api/swarm/events") {
     if (!isGet) return fail(405, "GET only");

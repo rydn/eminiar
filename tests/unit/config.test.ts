@@ -1,8 +1,14 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadConfig, ownJson, PROJECT_RELATIVE_PATH_RE, parseJsonSafe } from "../../src/config.js";
+import {
+  ConfigSchema,
+  loadConfig,
+  ownJson,
+  PROJECT_RELATIVE_PATH_RE,
+  parseJsonSafe,
+} from "../../src/config.js";
 import { findProjectRoot, projectId } from "../../src/project.js";
 
 describe("config", () => {
@@ -99,6 +105,62 @@ describe("unsafe docs.manifest in a config layer (#152, #153)", () => {
       expect(PROJECT_RELATIVE_PATH_RE.test(m), JSON.stringify(m)).toBe(false);
     for (const m of [".eminiar/docs.json", "docs/..hidden/x.json", "a..b", "dir with space/m.json"])
       expect(PROJECT_RELATIVE_PATH_RE.test(m), m).toBe(true);
+  });
+});
+
+describe("memories.dir schema rule", () => {
+  it("accepts a project-relative directory and refuses one that leaves the project", () => {
+    const ok = (dir: string) => ConfigSchema.safeParse({ memories: { dir } }).success;
+    for (const dir of [".eminiar/memories", "notes/mem", "a..b"]) expect(ok(dir), dir).toBe(true);
+    for (const dir of ["/abs/mem", "../mem", "a/../../mem", "C:\\m", ""])
+      expect(ok(dir), dir).toBe(false);
+  });
+});
+
+describe("unsafe memories.dir in a config layer", () => {
+  let home: string;
+  let root: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "em-home-"));
+    root = mkdtempSync(join(tmpdir(), "em-root-"));
+    process.env.EMINIAR_HOME = home;
+  });
+  afterEach(() => {
+    delete process.env.EMINIAR_HOME;
+    vi.restoreAllMocks();
+    for (const d of [home, root]) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("drops only a project memories.dir that leaves the project, keeping the rest", () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    for (const dir of ["../../shared/memories", "/Users/shared/memories", "C:\\m", 5]) {
+      writeFileSync(
+        join(root, "eminiar.config.json"),
+        JSON.stringify({ memories: { dir }, recall: { maxMemories: 5 } }),
+      );
+      const c = loadConfig(root);
+      expect([c.memories.dir, c.recall.maxMemories], String(dir)).toEqual([".eminiar/memories", 5]);
+    }
+    const out = err.mock.calls.map((a) => String(a[0])).join("");
+    expect(out).toContain("ignoring memories.dir");
+    expect(out).not.toContain("invalid config");
+  });
+
+  it("keeps a valid personal memories.dir, which a bad project one falls back to", () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    writeFileSync(join(home, "config.json"), JSON.stringify({ memories: { dir: "notes/mem" } }));
+    expect(loadConfig(root).memories.dir).toBe("notes/mem");
+    writeFileSync(
+      join(root, "eminiar.config.json"),
+      JSON.stringify({ memories: { dir: "../elsewhere" } }),
+    );
+    expect(loadConfig(root).memories.dir).toBe("notes/mem");
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ routing: { mode: "enforce" }, memories: { dir: "/abs/mem" } }),
+    );
+    const c = loadConfig(root);
+    expect([c.routing.mode, c.memories.dir]).toEqual(["enforce", ".eminiar/memories"]);
   });
 });
 

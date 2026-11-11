@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
+import { redactSecrets } from "../adjudicator/redact.js";
 
 /** Project-relative path; tolerates symlinked roots (macOS /var → /private/var). */
 export function relPath(root: string, fp: string): string {
@@ -114,10 +115,33 @@ function responseText(r: unknown): string {
 function responseFailed(r: unknown): string | undefined {
   if (!r || typeof r !== "object") return undefined;
   const o = r as Record<string, unknown>;
-  if (o.is_error === true || o.isError === true) return clip(responseText(r), 400);
-  if (typeof o.exit_code === "number" && o.exit_code !== 0) return clip(responseText(r), 400);
+  if (o.is_error === true || o.isError === true) return responseText(r);
+  if (typeof o.exit_code === "number" && o.exit_code !== 0) return responseText(r);
   if (typeof o.interrupted === "boolean" && o.interrupted) return "interrupted";
   return undefined;
+}
+
+/**
+ * A failed call's output as the error event keeps it, which persist() also indexes for em_recall:
+ * its secrets masked before the cut (a cut token can be too short for its shape rule), and on the
+ * first 4 KB only, so a failing 2 MB output costs the hook nothing.
+ */
+function errorText(text: string): string {
+  return masked(text, 400);
+}
+
+/**
+ * Text kept in an event, at most n chars: masked first, then cut, because a token cut short no
+ * longer has its shape (`ghp_` + 12 chars) and a quoted value cut before its closing quote is
+ * not a value; and masked on the first 4 KB only, so a long input costs the hook nothing.
+ */
+function masked(text: string, n: number): string {
+  return clip(redactSecrets(text.slice(0, 4096)), n);
+}
+
+/** summarizeInput(), masked before it is cut to 160 chars. */
+function maskedSummary(toolName: string, input: Record<string, unknown>): string {
+  return masked(summarySource(toolName, input), 160);
 }
 
 /** Events for one completed (or failed) tool call. */
@@ -125,7 +149,8 @@ export function classifyToolCall(info: ToolCallInfo): Draft[] {
   const { toolName, toolInput, root } = info;
   const out: Draft[] = [];
   const key = callKey(toolName, toolInput);
-  out.push(ev("tool_call", { key, summary: summarizeInput(toolName, toolInput) }, toolName));
+  const summary = maskedSummary(toolName, toolInput);
+  out.push(ev("tool_call", { key, summary }, toolName));
 
   if (EDIT_TOOLS.has(toolName)) {
     const fp = String(toolInput.file_path ?? toolInput.notebook_path ?? "");
@@ -140,7 +165,7 @@ export function classifyToolCall(info: ToolCallInfo): Draft[] {
   }
   if (toolName === "Bash") {
     const cmd = String(toolInput.command ?? "");
-    if (GIT_OP.test(cmd)) out.push(ev("git", { command: clip(cmd, 200) }, toolName));
+    if (GIT_OP.test(cmd)) out.push(ev("git", { command: masked(cmd, 200) }, toolName));
   }
   if (toolName === "TodoWrite" && Array.isArray(toolInput.todos)) {
     const todos = toolInput.todos as Array<{ content?: string; status?: string }>;
@@ -171,24 +196,29 @@ export function classifyToolCall(info: ToolCallInfo): Draft[] {
   }
   if (toolName === "Skill") out.push(ev("skill", { skill: clip(toolInput.skill, 80) }, toolName));
   if (toolName === "WebFetch" || toolName === "WebSearch") {
-    out.push(ev("external_ref", { url: clip(toolInput.url ?? toolInput.query, 200) }, toolName));
-  }
-  if (toolName.startsWith("mcp__")) out.push(ev("mcp_tool", { tool: toolName }, toolName));
-  if (info.durationMs && info.durationMs > 5000) {
+    const ref = toolInput.url ?? toolInput.query;
     out.push(
       ev(
-        "latency",
-        { ms: info.durationMs, summary: summarizeInput(toolName, toolInput) },
+        "external_ref",
+        { url: masked(typeof ref === "string" ? ref : clip(ref, 4096), 200) },
         toolName,
       ),
     );
+  }
+  if (toolName.startsWith("mcp__")) out.push(ev("mcp_tool", { tool: toolName }, toolName));
+  if (info.durationMs && info.durationMs > 5000) {
+    out.push(ev("latency", { ms: info.durationMs, summary }, toolName));
   }
   const failure = info.error ?? responseFailed(info.toolResponse);
   if (failure)
     out.push(
       ev(
         "error",
-        { tool: toolName, summary: summarizeInput(toolName, toolInput), error: clip(failure, 400) },
+        {
+          tool: toolName,
+          summary,
+          error: errorText(failure),
+        },
         toolName,
       ),
     );
@@ -196,6 +226,11 @@ export function classifyToolCall(info: ToolCallInfo): Draft[] {
 }
 
 export function summarizeInput(toolName: string, input: Record<string, unknown>): string {
+  return clip(summarySource(toolName, input), 160);
+}
+
+/** The text a summary is cut from: the tool name and its main argument. */
+function summarySource(toolName: string, input: Record<string, unknown>): string {
   const pick =
     input.command ??
     input.file_path ??
@@ -205,7 +240,7 @@ export function summarizeInput(toolName: string, input: Record<string, unknown>)
     input.query ??
     input.description ??
     input.skill;
-  return clip(`${toolName} ${pick ?? ""}`.trim(), 160);
+  return `${toolName} ${pick ?? ""}`.trim();
 }
 
 /** Events from the assistant's final message of a turn. */

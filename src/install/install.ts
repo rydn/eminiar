@@ -24,6 +24,8 @@ import { pinNode, pinRoot } from "./node-resolve.js";
 import { registerPlugin, registerSettings, setStatusline } from "./register.js";
 import { claudeCli, confirm, log } from "./shell.js";
 
+const SCHEMA_URL = "https://raw.githubusercontent.com/rydn/eminiar/main/eminiar.config.schema.json";
+
 export interface InstallOptions {
   noModel?: boolean;
   method?: "plugin" | "settings" | undefined;
@@ -82,8 +84,7 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   log.step("data directory");
   const p = ensureDirs();
-  if (!existsSync(p.configFile))
-    writeFileSync(p.configFile, `${JSON.stringify(frozenDefaults(), null, 2)}\n`);
+  writeFreshUserConfig(p.configFile);
   globalDb();
   log.ok(p.home);
 
@@ -164,6 +165,7 @@ export async function install(opts: InstallOptions): Promise<number> {
     stableRoot: stable,
     fromSpec,
     installedAt: new Date().toISOString(),
+    noModel: !!opts.noModel,
     wrote,
   });
 
@@ -196,9 +198,19 @@ export async function install(opts: InstallOptions): Promise<number> {
 }
 
 /**
- * The defaults written to a fresh ~/.eminiar/config.json. The adjudicator section is left out
- * so later default changes reach users; it is written only when they turn the feature on.
+ * A fresh ~/.eminiar/config.json holds only what the user chose (nothing yet), so later default
+ * changes reach them. An existing file is never rewritten here; `eminiar doctor --fix` prunes it.
  */
+export function minimalUserConfig(): Record<string, unknown> {
+  return { $schema: SCHEMA_URL };
+}
+
+/** Create ~/.eminiar/config.json with only the minimal content; an existing file is left as is. */
+export function writeFreshUserConfig(file: string): void {
+  if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(minimalUserConfig(), null, 2)}\n`);
+}
+
+/** Every schema default, minus the adjudicator section. The reference `doctor --fix` prunes against. */
 export function frozenDefaults(): Record<string, unknown> {
   const { adjudicator: _off, ...rest } = ConfigSchema.parse({});
   return rest;
@@ -226,7 +238,7 @@ export function writeTeamFiles(
       cfg,
       `${JSON.stringify(
         {
-          $schema: "https://raw.githubusercontent.com/rydn/eminiar/main/eminiar.config.schema.json",
+          $schema: SCHEMA_URL,
           routing: { mode: "auto", deferToContextMode: true },
         },
         null,

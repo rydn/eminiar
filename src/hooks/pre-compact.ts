@@ -1,4 +1,4 @@
-import { getContext } from "../context.js";
+import { sessionContext } from "../context.js";
 import { renderGuide } from "../session/guide.js";
 import { getStorage } from "../storage/index.js";
 import type { HookHandler } from "./types.js";
@@ -10,7 +10,7 @@ export const SNAPSHOT_BUDGET = 2048;
  * SessionStart(source=compact) replays it as the Session Guide.
  */
 export const preCompact: HookHandler = (input) => {
-  const ctx = getContext(input.cwd);
+  const ctx = sessionContext(input.cwd);
   const db = getStorage(ctx, { vectors: false });
   const sessionId = input.session_id || "unknown";
   const body = renderGuide(db, sessionId, SNAPSHOT_BUDGET);

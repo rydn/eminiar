@@ -144,9 +144,14 @@ describe("swarm model_range: config", () => {
       const is = issuesOf(file({ a: `model: sonnet, model_range: { floor: ${bad} }` }));
       expect(is.map((i) => i.path)).toEqual(["swarms.s.agents.a.model_range.floor"]);
     }
-    const typo = issuesOf(file({ a: "model: sonnet, model_range: { floor: haiku, max: opus }" }));
+    const typo = issuesOf(
+      file({ a: "model: sonnet, model_range: { floor: haiku, ceilng: opus }" }),
+    );
     expect(
-      typo.some((i) => i.path === "swarms.s.agents.a.model_range" && /max/.test(i.message)),
+      typo.some(
+        (i) =>
+          i.path === "swarms.s.agents.a.model_range" && /did you mean "ceiling"/.test(i.message),
+      ),
     ).toBe(true);
   });
 

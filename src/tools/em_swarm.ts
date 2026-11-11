@@ -108,7 +108,9 @@ const schema = {
   force: z
     .boolean()
     .optional()
-    .describe("sync: also overwrite generated agent files that were edited by hand"),
+    .describe(
+      "sync: also overwrite generated agent files that were edited by hand, and write them while the swarm file has keys this eminiar does not know",
+    ),
   caller_kind: z.string().optional().describe(HOOK_FIELD),
   caller_agent_id: z.string().optional().describe(HOOK_FIELD),
   caller_agent_type: z.string().optional().describe(HOOK_FIELD),

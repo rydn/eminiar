@@ -113,10 +113,24 @@ swarms:
         prompt: Find correctness bugs, each with a concrete failing input.
 ```
 
-Unknown keys are errors, so a typo is reported instead of ignored. Each error names its YAML
-path and line, for example `.eminiar/swarm.yaml:23 swarms.feature.agents.coder.count`. Check the
-file with `eminiar swarm validate`. While the file is invalid, swarms stay off and sync changes
-nothing.
+Each error names its YAML path and line, for example
+`.eminiar/swarm.yaml:23 swarms.feature.agents.coder.count`. Check the file with
+`eminiar swarm validate`. While the file is invalid, swarms stay off and sync changes nothing.
+
+**Keys from a newer eminiar.** A key this version does not know is ignored, not an error, so a
+file a teammate wrote for a newer eminiar keeps working here, and `enforce: true` keeps enforcing
+instead of denying every subagent. `eminiar swarm validate` and `eminiar swarm list` name each
+ignored key, and session start and the dashboard show them too. While a file has ignored keys,
+sync creates missing agent files but neither rewrites nor deletes existing generated ones: the
+newer eminiar may have generated them with those settings, and rewriting them would drop the
+settings. `eminiar swarm sync --force` writes them anyway (it also overwrites generated files
+that were edited by hand). An ignored key has no effect here: if a newer eminiar uses it to
+restrict a worker, the agent files this version creates do not carry that restriction.
+
+A typo is still an error: an unknown key that differs from a key known at that place only in
+case, or by one edit (two for keys of 7 or more characters), such as `max_agent`,
+`disallowedTools` or `enforced`, is reported with the key it is close to. A known key with a
+wrong value is always an error.
 
 ### Top level
 
@@ -422,6 +436,7 @@ it. Projects without `enforce: true` are never affected.
 | No swarm file, `enforce` off, or `enabled: false` | Not enforced |
 | Valid file with `enforce: true` | Enforced |
 | Invalid file that sets `enforce: true` (including YAML that does not parse) | Every subagent is denied until the file is fixed |
+| Valid file with `enforce: true` and keys this version does not know | Enforced; the keys are ignored |
 | Swarm file unreadable | Not enforced (no evidence of opt-in); session start warns |
 | Loading the config throws | Denied if the raw file says `enforce: true`, otherwise allowed |
 | Database error while checking a swarm worker | Denied (a busy database gets a retry message) |

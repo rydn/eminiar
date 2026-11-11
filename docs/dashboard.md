@@ -198,6 +198,13 @@ invalid, disabled, agent files out of date, or enabled and in sync. The state is
   per kind. You can filter by role or kind (tool calls, tasks, blackboard, workers, run, errors).
 - **Blackboard.** The shared notes with key, author, version and age. Click a note to read its
   value.
+- **Adjudicator decisions.** Each task card and worker card shows a `model · effort` chip for what
+  actually ran, with a `≠` and an amber outline when it differs from the adjudicator's suggestion.
+  An effort of `default` means the agent file's own setting ran and the level is not known (older
+  rows, or no effort passed). The worker drawer has a **Decision** section: ran at, suggested
+  (model, effort, confidence), the outcome (followed, overrode, pinned, forced, fork or none) in a
+  sentence, and the top reasons. The run snapshot carries `decisions` keyed by task id. With the
+  adjudicator off, or before a task is dispatched, the chip is absent and the drawer says so.
 - **Left rail.** A **Swarms** card lists the configured swarms: topology, role count, slots
   against `max_agents`, and role chips in a colour per role. A badge shows how many agent files
   need a sync. Click a swarm, or the **Configure** link, to edit it. **Sync agent files**
@@ -220,8 +227,8 @@ API (JSON, loopback only):
 | Route | Returns |
 |---|---|
 | `GET /api/swarm` | state (`absent`, `invalid` or `ok`), swarms and roles with agent-file state, issues, recent runs with counts, the starter YAML when absent |
-| `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments. `tasksSince=<ms>` sends only the tasks updated since then, `events=0` leaves the events out. Long task text is cut |
-| `GET /api/swarm/task?id=&run=` | one whole task, with its full `detail` and `result`. `run` is optional and must match the task's run |
+| `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments, plus the adjudicator's `decisions` for the run's tasks. `tasksSince=<ms>` sends only the tasks updated since then, `events=0` leaves the events out. Long task text is cut |
+| `GET /api/swarm/task?id=&run=` | one whole task, with its full `detail` and `result` and the adjudicator's `decision` for it. `run` is optional and must match the task's run |
 | `GET /api/swarm/events?id=&after=` | up to 200 events after an event id, oldest first, with `last` and `more` for the next page |
 | `POST /api/swarm/init` | writes the starter file if none exists (409 otherwise) and syncs the agent files |
 | `POST /api/swarm/sync` | syncs the agent files with the swarm file |
@@ -457,10 +464,14 @@ http://127.0.0.1:7331/#/explore?file=src/server.ts
 ## Security
 
 - The server answers loopback hosts only (`127.0.0.1`, `localhost`, `[::1]`).
-- Every request that writes needs a JSON content type. An `Origin` header, when the request has
-  one, must be loopback, and a `Sec-Fetch-Site` header other than `same-origin` or `none` is
-  refused, so cross-site browser requests are blocked.
-- File reads are checked to stay inside the project root.
+- The API answers the dashboard itself only: a request another site or another local port
+  makes (a link, an `<img>`, a form or a fetch, which the browser marks `Sec-Fetch-Site:
+  cross-site` or `same-site`) gets a 403, GETs included. Browsers too old to send
+  `Sec-Fetch-Site` (Safari before 16.4) are covered for writes only.
+- `doctor --fix` from the System tab is a POST.
+- Every request that writes needs a JSON content type and a loopback `Origin`.
+- File reads are checked to stay inside the project root, and the file viewer refuses a file that
+  a Claude Code `Read` deny or `ask` rule matches, checked as `em_execute_file` does.
 
 `eminiar serve` is an older name for the same server. It does not open the browser unless you
 pass `--open`.
