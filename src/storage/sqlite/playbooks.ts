@@ -5,6 +5,7 @@ import type {
   PlaybookRow,
   PlaybookRunInput,
   PlaybookRunRow,
+  PlaybookRunStatus,
   PlaybookStore,
   PlaybookSuggestionInput,
   PlaybookSuggestionRow,
@@ -118,6 +119,14 @@ export class SqlitePlaybookStore implements PlaybookStore {
         r.status ?? "started",
         r.note ?? null,
       ).lastInsertRowid,
+    );
+  }
+
+  runSetStatus(id: number, status: PlaybookRunStatus, note?: string | null | undefined): boolean {
+    return (
+      this.prep(
+        "UPDATE playbook_runs SET status = ?, note = COALESCE(?, note) WHERE id = ? AND status = 'started'",
+      ).run(status, note ?? null, id).changes > 0
     );
   }
 

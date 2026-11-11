@@ -68,10 +68,46 @@ describe("em_playbook", () => {
       note: "3 reviewed",
     });
     expect(rep.err).toBe(false);
-    const latest = getStorage(ctx).playbooks.runs({ playbook: "pr-review" })[0];
-    expect(latest?.status).toBe("done");
-    expect(latest?.note).toContain("3 reviewed");
+    // the original row is closed in place: still one row, same id
+    const after = getStorage(ctx).playbooks.runs({ playbook: "pr-review" });
+    expect(after).toHaveLength(1);
+    expect(after[0]?.id).toBe(runs[0]?.id);
+    expect(after[0]?.status).toBe("done");
+    expect(after[0]?.note).toBe("3 reviewed");
     expect((await call({ action: "report", name: "pr-review" })).err).toBe(true);
+  });
+
+  it("report rejects unknown and already-closed runs, masks the note, defaults to the open run", async () => {
+    const id = Number(
+      /run (\d+)\./.exec((await call({ action: "run", name: "pr-review" })).text)?.[1],
+    );
+    const runsOf = () => getStorage(ctx).playbooks.runs({ playbook: "pr-review" });
+    const before = runsOf().length;
+    expect(
+      (await call({ action: "report", name: "pr-review", run_id: 99999, status: "done" })).err,
+    ).toBe(true);
+    expect((await call({ action: "report", name: "nope", run_id: id, status: "done" })).err).toBe(
+      true,
+    );
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    // no run_id: the newest started run is closed
+    const ok = await call({
+      action: "report",
+      name: "pr-review",
+      status: "failed",
+      note: `x ${secret}`,
+    });
+    expect(ok.err).toBe(false);
+    const row = runsOf().find((r) => r.id === id);
+    expect(row?.status).toBe("failed");
+    expect(row?.note).not.toContain(secret);
+    expect(runsOf()).toHaveLength(before);
+    // closed runs stay closed
+    const again = await call({ action: "report", name: "pr-review", run_id: id, status: "done" });
+    expect(again.err).toBe(true);
+    expect(runsOf().find((r) => r.id === id)?.status).toBe("failed");
+    // nothing left to close without an id
+    expect((await call({ action: "report", name: "pr-review", status: "done" })).err).toBe(true);
   });
 
   it("schedule returns an instruction, never schedules", async () => {

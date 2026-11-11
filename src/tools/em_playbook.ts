@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { serializePlaybookFile } from "../playbooks/frontmatter.js";
 import {
+  closeRun,
   fillPrompt,
   list,
   type PlaybookFile,
@@ -67,7 +68,11 @@ export const emPlaybook = defineTool({
     values: z.record(z.string(), z.string()).optional().describe("run/schedule: parameter values"),
     status: z.enum(PLAYBOOK_RUN_STATUSES).optional().describe("report: done|failed|skipped"),
     note: z.string().optional().describe("report: what happened"),
-    run_id: z.number().int().optional().describe("report: the id run returned"),
+    run_id: z
+      .number()
+      .int()
+      .optional()
+      .describe("report: the id run returned (omitted: the newest started run)"),
     tag: z.string().optional().describe("list: only this tag"),
     confirm: z.boolean().optional().describe("delete: must be true"),
   },
@@ -156,17 +161,13 @@ export const emPlaybook = defineTool({
           const name = need(args.name, "name");
           if (!args.status || args.status === "started")
             return errorResult("report needs `status`: done, failed or skipped");
-          const note = [args.run_id !== undefined ? `run ${args.run_id}` : "", args.note ?? ""]
-            .filter(Boolean)
-            .join(": ");
-          const { id } = recordRun(ctx, db, {
+          const { id } = closeRun(ctx, db, {
             playbook: name,
-            trigger: "mcp",
+            runId: args.run_id,
             status: args.status,
-            sessionId: getCurrentSession(ctx),
-            note: note || undefined,
+            note: args.note,
           });
-          return text(`recorded ${args.status} for ${name} (entry ${id})`);
+          return text(`closed run ${id} of ${name} as ${args.status}`);
         }
         case "schedule": {
           const f = read(ctx, db, need(args.name, "name"));
