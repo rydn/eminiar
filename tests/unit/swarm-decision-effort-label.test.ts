@@ -39,3 +39,15 @@ describe("effortLabel with the recorded effort", () => {
     expect(effortLabel(dec({ ran: ran({}) }))).toBe("default");
   });
 });
+
+describe("effortLabel with an applied effort", () => {
+  it("marks a level apply mode set, unless it was ignored", () => {
+    const r = ran({ effortSource: "applied", effortActual: "high" });
+    expect(effortLabel(dec({ ran: r }))).toBe("high (applied)");
+    expect(effortLabel(dec({ ran: r, effortFollow: "followed" }))).toBe("high (applied)");
+    expect(effortLabel(dec({ ran: r, effortFollow: "ignored" }))).toBe("high (ignored)");
+  });
+  it("falls back to applied when no level is known", () => {
+    expect(effortLabel(dec({ ran: ran({ effortSource: "applied" }) }))).toBe("applied");
+  });
+});

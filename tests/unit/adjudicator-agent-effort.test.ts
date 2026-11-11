@@ -1,7 +1,8 @@
 /**
  * The agent file's frontmatter `effort` at dispatch (#170 G3): agent-pin reads it (AgentPin.effort),
- * onPreAgent stores it as scores.agentEffort and words the effort note by it. The hook never
- * injects effort; dispatchRule and the plan text are unchanged.
+ * onPreAgent stores it as scores.agentEffort and words the effort note by it. Advise mode never
+ * injects effort (dispatchRule and the plan text are unchanged); apply mode sets the advised
+ * effort itself and it wins over the agent file and the call (last describe).
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -9,8 +10,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveAgentPin } from "../../src/adjudicator/agent-pin.js";
-import { AGENT_EFFORT_FIELD } from "../../src/adjudicator/effort.js";
+import { AGENT_EFFORT_FIELD, EFFORT_APPLIED_FIELD } from "../../src/adjudicator/effort.js";
 import { onPreAgent } from "../../src/adjudicator/hooks.js";
+import { EFFORTS } from "../../src/adjudicator/types.js";
 import { getContext, resetContextCache } from "../../src/context.js";
 import type { HookInput } from "../../src/hooks/types.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
@@ -159,6 +161,10 @@ async function dispatch(opts: {
   saturated?: boolean;
   env?: NodeJS.ProcessEnv;
   agentType?: string;
+  mode?: "advise" | "apply";
+  /** apply scope; default "swarm" (the dispatched worker is in scope either way). */
+  scope?: "swarm" | "all";
+  blocked?: boolean;
 }) {
   writeFileSync(
     join(root, "eminiar.config.json"),
@@ -166,7 +172,13 @@ async function dispatch(opts: {
   );
   writeFileSync(
     join(home, "config.json"),
-    JSON.stringify({ adjudicator: { enabled: true, mode: "advise" } }),
+    JSON.stringify({
+      adjudicator: {
+        enabled: true,
+        mode: opts.mode ?? "advise",
+        apply: { scope: opts.scope ?? "swarm", minConfidence: 0.5 },
+      },
+    }),
   );
   resetContextCache();
   const ctx = getContext(root);
@@ -220,6 +232,7 @@ async function dispatch(opts: {
     input,
     { kind: "worker", agentType: type, runId: run.id, taskId: task.id },
     opts.env ? { env: opts.env } : {},
+    opts.blocked,
   );
   const row = db.adjudicator.get(advice!.rowId!)!;
   return { advice: advice!, scores: JSON.parse(row.scores ?? "{}") as Record<string, unknown> };
@@ -301,8 +314,139 @@ describe("onPreAgent: the agent file's effort in the note and the row", () => {
     expect(scores[AGENT_EFFORT_FIELD]).toBeUndefined();
   });
 
-  it("the hook never injects effort: the advice carries no effort field", async () => {
+  it("advise mode never injects effort: the advice carries no effort field", async () => {
     const { advice } = await dispatch({ advised: "low", agentLines: ["effort: high"] });
     expect(Object.keys(advice).sort()).not.toContain("effort");
+  });
+});
+
+describe("onPreAgent in apply mode: the hook sets the advised effort", () => {
+  const apply = (o: Parameters<typeof dispatch>[0]) => dispatch({ ...o, mode: "apply" });
+
+  it("sets the advised effort and records it; the note says applied", async () => {
+    const { advice, scores } = await apply({ advised: "high", agentLines: [] });
+    expect(advice.effort).toBe("high");
+    expect(advice.note).toMatch(/effort high applied, role coder/);
+    expect(advice.note).not.toMatch(/pass effort|suggested effort/);
+    expect(scores[EFFORT_APPLIED_FIELD]).toBe("high");
+  });
+
+  it("every level of EFFORTS is passed through unchanged", async () => {
+    for (const level of EFFORTS) {
+      const { advice, scores } = await apply({ advised: level, agentLines: [] });
+      expect(advice.effort, level).toBe(level);
+      expect(scores[EFFORT_APPLIED_FIELD], level).toBe(level);
+    }
+  });
+
+  it("overrides the agent file's own effort, and records both", async () => {
+    const same = await apply({ advised: "high", agentLines: ["effort: high"] });
+    expect(same.advice.effort).toBe("high");
+    const diff = await apply({ advised: "low", agentLines: ["effort: high"] });
+    expect(diff.advice.effort).toBe("low");
+    expect(diff.advice.note).toMatch(/effort low applied/);
+    expect(diff.scores[AGENT_EFFORT_FIELD]).toBe("high");
+    expect(diff.scores[EFFORT_APPLIED_FIELD]).toBe("low");
+  });
+
+  it("overrides an effort the call passed, and records both", async () => {
+    const { advice, scores } = await apply({
+      advised: "low",
+      agentLines: [],
+      call: { effort: "max" },
+    });
+    expect(advice.effort).toBe("low");
+    expect(advice.note).toMatch(/effort low applied/);
+    expect(scores.passedEffort).toBe("max");
+    expect(scores[EFFORT_APPLIED_FIELD]).toBe("low");
+  });
+
+  it("sets it when the model is not applied: an explicit model, a respected pin, FORCE", async () => {
+    const own = await apply({ advised: "low", agentLines: [], call: { model: "opus" } });
+    expect(own.advice.model).toBeUndefined();
+    expect(own.advice.effort).toBe("low");
+    // (a fresh agent name: two files of one name that disagree on the model are an unknown pin)
+    const pinned = await apply({
+      advised: "low",
+      agentType: "swarm-feature-pinned",
+      agentLines: ["model: opus"],
+    });
+    expect(pinned.advice.model).toBeUndefined();
+    expect(pinned.advice.action).toBe("respected");
+    expect(pinned.advice.effort).toBe("low");
+    expect(pinned.scores[EFFORT_APPLIED_FIELD]).toBe("low");
+    const forced = await apply({
+      advised: "low",
+      agentLines: [],
+      env: { CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" },
+    });
+    expect(forced.advice.model).toBeUndefined();
+    expect(forced.advice.effort).toBe("low");
+  });
+
+  it("a saturated brief still gets the effort (apply mode sets it unconditionally)", async () => {
+    const { advice } = await apply({ advised: "max", agentLines: [], saturated: true });
+    expect(advice.effort).toBe("max");
+    expect(advice.note).toMatch(/effort max applied/);
+  });
+
+  it("CLAUDE_CODE_EFFORT_LEVEL outranks it: nothing is sent, the note says why", async () => {
+    for (const level of ["max", "auto"]) {
+      const { advice, scores } = await apply({
+        advised: "low",
+        agentLines: ["effort: high"],
+        env: { CLAUDE_CODE_EFFORT_LEVEL: level },
+      });
+      expect(advice.effort, level).toBeUndefined();
+      expect(advice.note, level).toContain(
+        "effort low not applied: CLAUDE_CODE_EFFORT_LEVEL is set and outranks it",
+      );
+      expect(scores[EFFORT_APPLIED_FIELD], level).toBeUndefined();
+      expect(scores.effortEnv, level).toBe(level === "auto" ? "other" : level);
+    }
+    // the model is still applied under the env var
+    const m = await apply({
+      advised: "low",
+      agentLines: [],
+      env: { CLAUDE_CODE_EFFORT_LEVEL: "max" },
+    });
+    expect(m.advice.model).toBeDefined();
+  });
+
+  it("never sends a level outside EFFORTS", async () => {
+    for (const bad of ["auto", "turbo", "", "none"]) {
+      const { advice, scores } = await apply({ advised: bad, agentLines: [] });
+      expect(advice.effort, JSON.stringify(bad)).toBeUndefined();
+      expect(scores[EFFORT_APPLIED_FIELD], JSON.stringify(bad)).toBeUndefined();
+      expect(advice.note, JSON.stringify(bad)).not.toMatch(/applied, role|effort \w+ applied/);
+    }
+  });
+
+  it("a fork gets no effort and the note says a fork takes none", async () => {
+    const { advice, scores } = await apply({ advised: "low", agentType: "fork", agentLines: [] });
+    expect(advice.effort).toBeUndefined();
+    expect(advice.note).toMatch(/^adjudicator: fork runs on the main session's model/);
+    expect(advice.note).toMatch(/effort not applied \(a fork takes none/);
+    expect(scores[EFFORT_APPLIED_FIELD]).toBeUndefined();
+  });
+
+  it("a blocked (denied or asked) call gets no effort and no applied record", async () => {
+    const { advice, scores } = await apply({ advised: "low", agentLines: [], blocked: true });
+    expect(advice.effort).toBeUndefined();
+    expect(advice.note).not.toMatch(/effort low applied/);
+    expect(scores[EFFORT_APPLIED_FIELD]).toBeUndefined();
+  });
+
+  it("advise mode sends none and records none, whatever the call or the file says", async () => {
+    for (const o of [
+      { agentLines: [] },
+      { agentLines: ["effort: high"] },
+      { agentLines: [], call: { effort: "medium" } },
+    ]) {
+      const { advice, scores } = await dispatch({ advised: "low", mode: "advise", ...o });
+      expect(advice.effort).toBeUndefined();
+      expect(advice.note).not.toMatch(/effort low applied/);
+      expect(scores[EFFORT_APPLIED_FIELD]).toBeUndefined();
+    }
   });
 });

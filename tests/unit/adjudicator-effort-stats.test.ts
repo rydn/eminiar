@@ -29,13 +29,13 @@ function agent(scores: Record<string, unknown> | string) {
 const effortLine = (out: string) => out.split("\n").find((l) => l.startsWith("effort followed"));
 
 describe("em_adjudicate stats: effort follow line (#170)", () => {
-  it("prints the rate and the counts, with passed-but-not-run when some were", () => {
+  it("prints the rate and the counts, with set-but-not-run when some were", () => {
     agent({ effortFollow: "followed", passedEffort: "high", actualEffort: "high" });
     agent({ effortFollow: "followed", passedEffort: "max", actualEffort: "high" });
     agent({ effortFollow: "ignored", actualEffort: "medium" });
     const out = formatStats(db, config);
     expect(effortLine(out)).toBe(
-      "effort followed 67% (2 followed, 1 ignored of 3) · passed but not run 1",
+      "effort followed 67% (2 followed, 1 ignored of 3) · set but not run 1",
     );
     // it sits right after the model-advice line
     const lines = out.split("\n");
@@ -43,7 +43,7 @@ describe("em_adjudicate stats: effort follow line (#170)", () => {
     expect(lines[at + 1]).toBe(effortLine(out));
   });
 
-  it("omits the passed-but-not-run suffix when nothing was passed and not run", () => {
+  it("omits the set-but-not-run suffix when nothing was set and not run", () => {
     agent({ effortFollow: "followed", passedEffort: "high", actualEffort: "high" });
     agent({ effortFollow: "followed", actualEffort: "low" });
     expect(effortLine(formatStats(db, config))).toBe(
@@ -58,7 +58,7 @@ describe("em_adjudicate stats: effort follow line (#170)", () => {
     const out = formatStats(db, config);
     expect(out).toContain("advice followed");
     expect(out).not.toContain("effort followed");
-    expect(out).not.toContain("passed but not run");
+    expect(out).not.toContain("set but not run");
   });
 
   it("keeps the model-advice line unchanged next to the effort line", () => {

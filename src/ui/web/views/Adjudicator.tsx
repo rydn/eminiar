@@ -1685,13 +1685,13 @@ export function Adjudicator({ params }: { params: Record<string, string> }): JSX
         `apply ${rate(s.rates.apply)} · respected ${rate(s.rates.respect)}`,
         `effort ${rate(s.rates.effortFollow)}`,
         s.effortChecked && s.effortIneffective
-          ? `effort passed but not run ${s.effortIneffective} of ${s.effortChecked}`
+          ? `effort set but not run ${s.effortIneffective} of ${s.effortChecked}`
           : "",
         keptModelLabel(s.keptModel),
       ]
         .filter(Boolean)
         .join(" · "),
-      "followed ÷ (advised + followed + ignored), leaving out advised dispatches whose advice named no model (a kept pin, CLAUDE_CODE_SUBAGENT_MODEL_FORCE, a fork); apply = applied ÷ (applied + respected); effort = followed ÷ (followed + ignored), where followed means the subagent ran at the advised effort or the effort set for the call was the advised level (the level passed, else the agent file's level), and ignored means anything else, read from the subagent's transcript as it is reconciled (a verdict can land before the row is final), leaving out forks, CLAUDE_CODE_EFFORT_LEVEL and saturated briefs, so it reads n/a until a dispatch has been reconciled; effort passed but not run counts calls that passed an effort while a different level ran",
+      "followed ÷ (advised + followed + ignored), leaving out advised dispatches whose advice named no model (a kept pin, CLAUDE_CODE_SUBAGENT_MODEL_FORCE, a fork); apply = applied ÷ (applied + respected); effort = followed ÷ (followed + ignored), where followed means: when apply mode set the effort, the subagent ran at the advised level (the level set is always the advised one, so only the level that ran counts); otherwise it ran at the advised level or the effort set for the call was the advised level (the level passed, else the agent file's level), and ignored means anything else, read from the subagent's transcript as it is reconciled (a verdict can land before the row is final), leaving out forks, CLAUDE_CODE_EFFORT_LEVEL and saturated briefs, so it reads n/a until a dispatch has been reconciled; effort set but not run counts calls whose set effort (the level apply mode set, else the level passed) differs from the level that ran",
     ],
     [
       "fallback rate",

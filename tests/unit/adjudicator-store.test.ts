@@ -686,6 +686,42 @@ describe("SqliteAdjudicatorStore", () => {
     expect(sum.effortIneffective).toBe(1);
   });
 
+  it("summary: effortApplied is the set level and beats passedEffort (checked/ineffective)", () => {
+    const s = a.adjudicator;
+    const sc = (o: unknown) => JSON.stringify(o);
+    // applied == actual, passed differs: effective (passed alone would count ineffective)
+    s.insert(
+      row({
+        ts: 1,
+        scores: sc({ effortApplied: "high", passedEffort: "low", actualEffort: "high" }),
+      }),
+    );
+    // applied != actual, passed == actual: ineffective (passed alone would count effective)
+    s.insert(
+      row({
+        ts: 2,
+        scores: sc({ effortApplied: "max", passedEffort: "high", actualEffort: "high" }),
+      }),
+    );
+    // applied only
+    s.insert(row({ ts: 3, scores: sc({ effortApplied: "medium", actualEffort: "low" }) }));
+    // passed only still counts (advise mode)
+    s.insert(row({ ts: 4, scores: sc({ passedEffort: "high", actualEffort: "high" }) }));
+    // an invalid applied falls back to passed
+    s.insert(
+      row({
+        ts: 5,
+        scores: sc({ effortApplied: "bogus", passedEffort: "low", actualEffort: "high" }),
+      }),
+    );
+    // applied without actual, and actual without any set level: not checked
+    s.insert(row({ ts: 6, scores: sc({ effortApplied: "high" }) }));
+    s.insert(row({ ts: 7, scores: sc({ actualEffort: "high" }) }));
+    const sum = s.summary();
+    expect(sum.effortChecked).toBe(5);
+    expect(sum.effortIneffective).toBe(3);
+  });
+
   it("the store counts every level in EFFORTS (its private copy must not drift)", () => {
     // The store mirrors EFFORTS in a private list (it cannot import src/adjudicator at boot);
     // a level added to EFFORTS but not there would silently drop out of effortChecked.
@@ -695,6 +731,17 @@ describe("SqliteAdjudicatorStore", () => {
           ts: i + 1,
           scores: JSON.stringify({ passedEffort: level, actualEffort: level }),
         }),
+      );
+    });
+    const sum = a.adjudicator.summary();
+    expect(sum.effortChecked).toBe(EFFORTS.length);
+    expect(sum.effortIneffective).toBe(0);
+  });
+
+  it("the store counts every level in EFFORTS when read from effortApplied", () => {
+    EFFORTS.forEach((level, i) => {
+      a.adjudicator.insert(
+        row({ ts: i + 1, scores: JSON.stringify({ effortApplied: level, actualEffort: level }) }),
       );
     });
     const sum = a.adjudicator.summary();

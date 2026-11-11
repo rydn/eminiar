@@ -8,10 +8,12 @@ import {
   ACTUAL_EFFORT_FIELD,
   AGENT_EFFORT_FIELD,
   dominantEffort,
+  EFFORT_APPLIED_FIELD,
   EFFORT_ENV_FIELD,
   EFFORT_ENV_OTHER,
   EFFORT_FOLLOW_FIELD,
   type EffortFacts,
+  effortFactsRecorded,
   effortFollowOf,
   effortLevel,
   PASSED_EFFORT_FIELD,
@@ -61,7 +63,7 @@ describe("dominantEffort", () => {
 });
 
 describe("effortFollowOf", () => {
-  const base: Required<Omit<EffortFacts, "passed" | "agent">> = {
+  const base: Required<Omit<EffortFacts, "passed" | "agent" | "applied">> = {
     advised: "high",
     ran: "high",
     env: false,
@@ -112,6 +114,42 @@ describe("effortFollowOf", () => {
     const { ran: _r, ...noRan } = f;
     expect(effortFollowOf(noRan)).toBeUndefined();
   });
+  describe("with an applied effort (the hook set it on the call)", () => {
+    it("followed iff the run level equals the advice", () => {
+      expect(effortFollowOf({ ...base, applied: "high", ran: "high" })).toBe("followed");
+      expect(effortFollowOf({ ...base, applied: "high", ran: "low" })).toBe("ignored");
+    });
+    it("beats the passed shortcut: passed == advice but the run differs is ignored", () => {
+      expect(effortFollowOf({ ...base, applied: "high", passed: "high", ran: "low" })).toBe(
+        "ignored",
+      );
+    });
+    it("beats the agent-file shortcut: agent == advice but the run differs is ignored", () => {
+      expect(
+        effortFollowOf({
+          ...base,
+          advised: "xhigh",
+          applied: "xhigh",
+          agent: "xhigh",
+          ran: "high",
+        }),
+      ).toBe("ignored");
+    });
+    it("is followed when the run matches even if passed/agent differ from the advice", () => {
+      expect(
+        effortFollowOf({ ...base, applied: "high", passed: "low", agent: "low", ran: "high" }),
+      ).toBe("followed");
+    });
+    it("the skips still win: fork, env, saturated, no run, no advice", () => {
+      const f = { ...base, applied: "high" as const };
+      expect(effortFollowOf({ ...f, fork: true })).toBeUndefined();
+      expect(effortFollowOf({ ...f, env: true })).toBeUndefined();
+      expect(effortFollowOf({ ...f, saturated: true })).toBeUndefined();
+      const { ran: _r, ...noRan } = f;
+      expect(effortFollowOf(noRan)).toBeUndefined();
+      expect(effortFollowOf({ ...f, advised: null })).toBeUndefined();
+    });
+  });
   it("is not counted without usable advice", () => {
     for (const advised of [null, "", "ultra", "   "]) {
       expect(effortFollowOf({ ...base, advised })).toBeUndefined();
@@ -144,6 +182,12 @@ describe("rowEffort", () => {
     const want = { passed: "high", env: "low", agent: "medium", actual: "max", follow: "ignored" };
     expect(rowEffort(JSON.stringify(full))).toEqual(want);
     expect(rowEffort(full)).toEqual(want);
+  });
+  it("reads effortApplied as a known level and drops anything else", () => {
+    expect(rowEffort({ [EFFORT_APPLIED_FIELD]: " HIGH " }).applied).toBe("high");
+    expect(rowEffort({ [EFFORT_APPLIED_FIELD]: "banana" }).applied).toBeUndefined();
+    expect(rowEffort({ [EFFORT_APPLIED_FIELD]: 3 }).applied).toBeUndefined();
+    expect(rowEffort({}).applied).toBeUndefined();
   });
   it("reads env as a known level or 'other'", () => {
     expect(rowEffort({ [EFFORT_ENV_FIELD]: "xhigh" }).env).toBe("xhigh");
@@ -231,6 +275,48 @@ describe("withEffortScores", () => {
     });
     const cleared = withEffortScores(out, {});
     expect(rowEffort(cleared)).toEqual({ passed: "medium", env: "other", actual: "high" });
+  });
+});
+
+describe("effortFactsRecorded", () => {
+  it("is false for a row with none of the dispatch-fact keys", () => {
+    expect(effortFactsRecorded({})).toBe(false);
+    expect(effortFactsRecorded(rowEffort(null))).toBe(false);
+    expect(effortFactsRecorded(rowEffort({ features: { intents: { implement: 1 } } }))).toBe(false);
+  });
+
+  it("actual and follow alone are not dispatch facts", () => {
+    expect(effortFactsRecorded({ actual: "low" })).toBe(false);
+    expect(
+      effortFactsRecorded(
+        rowEffort({ [ACTUAL_EFFORT_FIELD]: "low", [EFFORT_FOLLOW_FIELD]: "ignored" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("is true when any one of applied, agent, passed or env is recorded", () => {
+    expect(effortFactsRecorded({ applied: "high" })).toBe(true);
+    expect(effortFactsRecorded({ agent: "low" })).toBe(true);
+    expect(effortFactsRecorded({ passed: "medium" })).toBe(true);
+    expect(effortFactsRecorded({ env: "max" })).toBe(true);
+    expect(effortFactsRecorded({ env: EFFORT_ENV_OTHER })).toBe(true);
+  });
+
+  it("reads the scores keys through rowEffort", () => {
+    for (const [k, v] of [
+      [EFFORT_APPLIED_FIELD, "high"],
+      [AGENT_EFFORT_FIELD, "low"],
+      [PASSED_EFFORT_FIELD, "medium"],
+      [EFFORT_ENV_FIELD, "xhigh"],
+      [EFFORT_ENV_FIELD, EFFORT_ENV_OTHER],
+    ] as const) {
+      expect(effortFactsRecorded(rowEffort({ [k]: v, actualEffort: "low" }))).toBe(true);
+    }
+  });
+
+  it("an unknown level in a key does not count as recorded", () => {
+    expect(effortFactsRecorded(rowEffort({ [PASSED_EFFORT_FIELD]: "ultra" }))).toBe(false);
+    expect(effortFactsRecorded(rowEffort({ [EFFORT_APPLIED_FIELD]: "" }))).toBe(false);
   });
 });
 

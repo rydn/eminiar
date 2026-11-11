@@ -218,7 +218,7 @@ export function formatStats(
     ...(s.effortFollowed + s.effortIgnored
       ? [
           `effort followed ${pct(s.rates.effortFollow)} (${s.effortFollowed} followed, ${s.effortIgnored} ignored of ${s.effortFollowed + s.effortIgnored})${
-            s.effortIneffective ? ` · passed but not run ${s.effortIneffective}` : ""
+            s.effortIneffective ? ` · set but not run ${s.effortIneffective}` : ""
           }`,
         ]
       : []),

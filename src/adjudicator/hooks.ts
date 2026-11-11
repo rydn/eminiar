@@ -9,13 +9,22 @@
  *   onSessionStart  one line when enabled but degraded; the ollama keep-alive warm-up
  *   onSessionEnd    reconcile; drop the session's main-advice counter
  *
- * Rules that hold everywhere: never deny, never inject `effort` (the Agent call takes one since
- * Claude Code 2.1.292, but it stays advice for the coordinator to pass), respect
- * CLAUDE_CODE_SUBAGENT_MODEL_FORCE, an explicit `model` and a frontmatter pin (managed, project,
- * user or plugin agent; one that cannot be read is not overridden) in advise mode as in apply
- * mode (the advice then names the pin, never a model to pass), move a ranged swarm agent
- * (swarm.yaml `model_range`) only inside its range, skip the Cursor client, and never throw
- * (advice must not break a hook).
+ * Rules that hold everywhere: never deny, respect CLAUDE_CODE_SUBAGENT_MODEL_FORCE, an explicit
+ * `model` and a frontmatter pin (managed, project, user or plugin agent; one that cannot be read
+ * is not overridden) in advise mode as in apply mode (the advice then names the pin, never a model
+ * to pass), move a ranged swarm agent (swarm.yaml `model_range`) only inside its range, skip the
+ * Cursor client, and never throw (advice must not break a hook).
+ *
+ * Effort: advise mode never touches it (the Agent call takes `effort` since Claude Code 2.1.292,
+ * it stays advice for the coordinator to pass). Apply mode in scope ALWAYS sets the advised effort
+ * on the call, in the same updatedInput as `model` and even when no model is applied (a pinned
+ * agent, a ranged one that stays, FORCE) or the call or the agent file already sets an effort:
+ * measured on Claude Code 2.1.311, the hook's value wins over both. Never sent: a value outside
+ * EFFORTS (it fails the whole Agent call), for a fork (dropped silently), under
+ * CLAUDE_CODE_EFFORT_LEVEL (it outranks the hook), or on a denied or asked call. No Claude Code
+ * version gate: eminiar holds no version in memory or its DB, and the hook input carries none
+ * (only the transcript does, which the hot path does not read); a CLI below 2.1.292 is expected
+ * to drop the unknown key.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -33,7 +42,7 @@ import type { TaskRow } from "../swarm/types.js";
 import { type AgentPin, isFork, resolveAgentPin } from "./agent-pin.js";
 import { type AsyncJob, spawnAsyncJob } from "./async.js";
 import { resolveAdjudicator } from "./config.js";
-import { AGENT_EFFORT_FIELD } from "./effort.js";
+import { AGENT_EFFORT_FIELD, EFFORT_APPLIED_FIELD } from "./effort.js";
 import { adjudicateOne, cacheKeyFor, type EngineOptions } from "./engine.js";
 import { subagentModelForced } from "./env.js";
 import { extractFeatures, type FeatureHints } from "./features.js";
@@ -73,6 +82,7 @@ import {
   type AdjudicationRow,
   type AdjudicatorProvider,
   AGENT_EFFORT_SINCE,
+  type Effort,
   type Features,
   type Tier,
   type Verdict,
@@ -316,24 +326,32 @@ function mainSessionAdvice(
 // --- PreToolUse -----------------------------------------------------------------------
 
 /**
- * The model on an Agent call, merged into the ONE updatedInput routing returns: routing's own
- * updatedInput (enforce prefix) when there is one, else the full original input. A deny or ask
- * is never turned into an allow.
+ * The model and/or the effort on an Agent call, merged into the ONE updatedInput routing returns:
+ * routing's own updatedInput (enforce prefix) when there is one, else the full original input.
+ * The effort is sent only when it is a member of EFFORTS (any other value fails the whole call).
+ * A deny or ask is never turned into an allow.
  */
 export function withModel(
   out: HookOutput | undefined,
   input: Record<string, unknown>,
-  model: string,
+  model: string | undefined,
+  effort?: string,
 ): HookOutput | undefined {
   const h = out?.hookSpecificOutput;
   if (h?.permissionDecision === "deny" || h?.permissionDecision === "ask") return out;
+  const level = effortLevel(effort);
+  if (!model && !level) return out;
   return {
     ...out,
     hookSpecificOutput: {
       ...h,
       hookEventName: "PreToolUse",
       permissionDecision: "allow",
-      updatedInput: { ...(h?.updatedInput ?? input), model },
+      updatedInput: {
+        ...(h?.updatedInput ?? input),
+        ...(model ? { model } : {}),
+        ...(level ? { effort: level } : {}),
+      },
     },
   };
 }
@@ -370,9 +388,11 @@ export async function afterRouting(
   try {
     if (!active(ctx.config.adjudicator, input) || !input.tool_input) return out;
     if (AGENT_TOOLS.has(input.tool_name ?? "")) {
-      const a = await onPreAgent(ctx, input, spawn, deps);
+      // A denied or asked call is never rewritten: onPreAgent then applies no effort either.
+      const pd = out?.hookSpecificOutput?.permissionDecision;
+      const a = await onPreAgent(ctx, input, spawn, deps, pd === "deny" || pd === "ask");
       if (!a) return out;
-      const next = a.model ? withModel(out, input.tool_input, a.model) : out;
+      const next = a.model || a.effort ? withModel(out, input.tool_input, a.model, a.effort) : out;
       return withNote(next, a.note);
     }
     return withNote(out, onPreTool(ctx, input, out, deps));
@@ -385,6 +405,8 @@ export async function afterRouting(
 export interface AgentAdvice {
   /** Set only when apply mode applies a tier. */
   model?: Tier;
+  /** Set when apply mode puts the advised effort on the call (a member of EFFORTS). */
+  effort?: Effort;
   note?: string;
   action: AdjudicationAction;
   rowId?: number;
@@ -460,6 +482,8 @@ export async function onPreAgent(
   input: HookInput,
   spawn: SwarmSpawnCheck | undefined,
   deps: HookDeps = {},
+  /** Routing denied or asked: the call is not rewritten, so no effort is applied. */
+  blocked = false,
 ): Promise<AgentAdvice | undefined> {
   const cfg = ctx.config.adjudicator;
   if (!active(cfg, input) || !cfg.surfaces.agent) return undefined;
@@ -506,8 +530,9 @@ export async function onPreAgent(
   const pinUnknown = cfg.apply.respectFrontmatter && pin.status === "unknown";
   const isForced = subagentModelForced(env);
   const fork = isFork(agentType);
-  const effortSet = !!str(ti.effort) || effortForced(env);
-  // The agent file's own `effort` (a fork has no file); the hook only reads it, never sets it.
+  const effortEnv = effortForced(env);
+  const effortSet = !!str(ti.effort) || effortEnv;
+  // The agent file's own `effort` (a fork has no file); an applied effort overrides it.
   const agentEffort = fork ? undefined : pin.effort;
   // A ranged swarm agent (swarm.yaml model_range) runs on its fallback pin unless the adjudicator
   // picks another tier inside its range. A fork and FORCE come first, as in dispatchRule.
@@ -573,7 +598,12 @@ export async function onPreAgent(
   }
 
   const opts = engineOptions(db, cfg, deps);
-  opts.call = mayApply && !plan ? "inline" : "never";
+  // The provider is consulted when the verdict will be applied: the model (mayApply) or, on a
+  // pinned, explicit-model or FORCE dispatch, the effort alone, which overrides the call's and
+  // the agent file's own. Advise mode, a fork, a blocked call and CLAUDE_CODE_EFFORT_LEVEL
+  // (nothing to apply) stay call-free.
+  const willApplyEffort = applyMode && inScope && !blocked && !fork && !effortEnv;
+  opts.call = (mayApply || willApplyEffort) && !plan ? "inline" : "never";
   opts.row = row;
   const req: AdjudicationRequest = { key: "agent", surface: "agent", text };
   const hints: FeatureHints = {};
@@ -602,12 +632,18 @@ export async function onPreAgent(
   // it is not the fallback's tier (the bare tier would replace a pinned id or [1m] variant).
   const pick = ranged ? rangedTier(tier, ranged, cfg.apply.floor, cfg.apply.ceiling) : undefined;
   const moves = !!ranged && rangedPasses(pick, ranged.fallback);
+  // Apply mode in scope sets the advised effort whatever the call or the agent file says (the
+  // hook's value wins); only CLAUDE_CODE_EFFORT_LEVEL outranks it, so that alone is `effortSet`.
+  const effortApply = applyMode && inScope && !blocked && !!effortLevel(effort);
   const rule = dispatchRule({
     ...facts,
     ranged: moves,
     pin: facts.pin || (!!ranged && !moves),
     saturated,
+    effortApply,
+    effortSet: effortApply ? effortEnv : facts.effortSet,
   });
+  const effortSent = rule.effort === "applied" ? effortLevel(effort) : undefined;
 
   let action: AdjudicationAction;
   let model: Tier | undefined;
@@ -661,9 +697,10 @@ export async function onPreAgent(
         ...withPin(db, a.rowId, pin, kept, {
           ...(ranged ? { [RANGED_FLAG]: true, [FALLBACK_PIN_FIELD]: ranged.fallback } : {}),
           ...(advised ? { [ADVISED_PICK_FIELD]: advised } : {}),
-          // What the agent file sets, and what the call passed (never injected), for the swarm
-          // decision view and the follow check.
+          // What the agent file sets, what the call passed, and the effort the hook put on the
+          // call (it overrides both), for the swarm decision view and the follow check.
           ...(agentEffort ? { [AGENT_EFFORT_FIELD]: agentEffort } : {}),
+          ...(effortSent ? { [EFFORT_APPLIED_FIELD]: effortSent } : {}),
           ...(effortLevel(ti.effort) ? { [PASSED_EFFORT_FIELD]: effortLevel(ti.effort) } : {}),
           // A level outside EFFORTS (e.g. "auto") still outranks the call: stored as "other".
           ...(effortForced(env)
@@ -678,27 +715,37 @@ export async function onPreAgent(
 
   const why = `complexity ${c}, conf ${conf.toFixed(2)}`;
   if (rule.model === "fork") {
-    // A fork runs on the main session's model and takes no per-call effort: nothing to pass.
-    const note = `adjudicator: fork runs on the main session's model; no \`model\` or \`effort\` to pass (${why})`;
+    // A fork runs on the main session's model and takes no per-call effort: nothing to pass, and
+    // an effort the hook set would be dropped, so apply mode does not set one.
+    const note =
+      applyMode && inScope
+        ? `adjudicator: fork runs on the main session's model; no \`model\` to pass, effort not applied (a fork takes none; ${why})`
+        : `adjudicator: fork runs on the main session's model; no \`model\` or \`effort\` to pass (${why})`;
     const out: AgentAdvice = { action, note: clip(note, ADVICE_MAX) };
     if (a.rowId !== undefined) out.rowId = a.rowId;
     return out;
   }
-  // The Agent call takes `effort` (Claude Code 2.1.292+) unless CLAUDE_CODE_EFFORT_LEVEL outranks
-  // it, the call already passes one, or the brief is saturated; the hook never sets it.
-  // When the agent file sets one, the note says whether it already matches the advice.
+  // Apply mode sets `effort` itself (it wins over the call and the agent file) unless
+  // CLAUDE_CODE_EFFORT_LEVEL outranks it. Advise mode: the Agent call takes `effort` (Claude Code
+  // 2.1.292+) unless that env var outranks it, the call already passes one, or the brief is
+  // saturated, and the coordinator passes it; when the agent file sets one, the note says whether
+  // it already matches the advice.
   const effortHint =
-    rule.effort === "pass"
-      ? agentEffort === effort
-        ? `effort ${effort}: the agent file already sets it`
-        : `pass effort:'${effort}' (Claude Code ${AGENT_EFFORT_SINCE}+)${
-            agentEffort ? ` over the agent file's ${agentEffort}` : ""
-          }`
-      : saturated && !effortSet
-        ? `effort ${effort}: informational (brief saturated)${
-            agentEffort ? `; the agent file runs ${agentEffort}` : ""
-          }`
-        : `suggested effort ${effort}`;
+    rule.effort === "applied"
+      ? `effort ${effort} applied`
+      : applyMode && inScope && effortEnv && !blocked
+        ? `effort ${effort} not applied: CLAUDE_CODE_EFFORT_LEVEL is set and outranks it`
+        : rule.effort === "pass"
+          ? agentEffort === effort
+            ? `effort ${effort}: the agent file already sets it`
+            : `pass effort:'${effort}' (Claude Code ${AGENT_EFFORT_SINCE}+)${
+                agentEffort ? ` over the agent file's ${agentEffort}` : ""
+              }`
+          : saturated && !effortSet
+            ? `effort ${effort}: informational (brief saturated)${
+                agentEffort ? `; the agent file runs ${agentEffort}` : ""
+              }`
+            : `suggested effort ${effort}`;
   const extras = [effortHint];
   // A role is named only from a confident role table.
   if (role && role !== "none" && roleConf >= ROLE_NOTE_MIN) extras.push(`role ${role}`);
@@ -741,6 +788,7 @@ export async function onPreAgent(
   }
   const out: AgentAdvice = { action, note: clip(note, ADVICE_MAX) };
   if (model) out.model = model;
+  if (effortSent) out.effort = effortSent;
   if (a.rowId !== undefined) out.rowId = a.rowId;
   return out;
 }

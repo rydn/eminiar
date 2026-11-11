@@ -11,7 +11,8 @@
  * a fork names neither `model` nor `effort`; under CLAUDE_CODE_SUBAGENT_MODEL_FORCE the model is
  * informational; a ranged agent (swarm.yaml `model_range`) gets the pick inside its range; a
  * respected pin is kept (pass no `model`); CLAUDE_CODE_EFFORT_LEVEL, an `effort` already on the
- * call, or a saturated brief makes the effort informational.
+ * call, or a saturated brief makes the effort informational. In apply mode the hook sets the
+ * effort itself (`effort X (applied by the hook)`), so the coordinator passes none.
  *
  * Everything here is a no-op while the adjudicator is off or `surfaces.plan` is false, and it
  * never throws: the plan is already committed when this runs, so a scoring failure costs the
@@ -23,6 +24,7 @@ import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { ModelRange, RunRow, SwarmSpec, TaskRow } from "../swarm/types.js";
 import { type AgentPin, resolveAgentPin } from "./agent-pin.js";
+import { effortLevel } from "./effort.js";
 import { type Adjudication, adjudicate, type EngineOptions } from "./engine.js";
 import { subagentModelForced } from "./env.js";
 import { complexityBucket, topIntent } from "./heuristic.js";
@@ -78,14 +80,16 @@ export function modelForced(env: NodeJS.ProcessEnv = process.env): boolean {
  * A ranged agent whose pick is its fallback's tier, or whose range does not meet the apply
  * bounds, passes no `model`: it keeps its fallback pin, so it takes the `pin` row (passing the
  * bare tier would swap a pinned model id or [1m] variant for the alias).
- * Effort rule: CLAUDE_CODE_EFFORT_LEVEL set, `effort` already on the call (the env outranks the
- * call), or a saturated brief (units.ts) → informational; else pass `effort` (Claude Code
- * AGENT_EFFORT_SINCE+). A model other than `pass` or `ranged` is never credited with savings
- * (savings.ts KeptModel).
+ * Effort rule: in apply mode (effortApply) the hook sets the advised effort itself, whatever the
+ * call or the agent file says, so nothing is passed: `applied`, unless CLAUDE_CODE_EFFORT_LEVEL is
+ * set (it outranks the hook: informational). In advise mode: CLAUDE_CODE_EFFORT_LEVEL set, `effort`
+ * already on the call (the env outranks the call), or a saturated brief (units.ts) →
+ * informational; else pass `effort` (Claude Code AGENT_EFFORT_SINCE+). A model other than `pass`
+ * or `ranged` is never credited with savings (savings.ts KeptModel).
  */
 export interface DispatchRule {
   model: "pass" | "ranged" | "pin" | "forced" | "fork";
-  effort: "pass" | "informational" | "fork";
+  effort: "pass" | "applied" | "informational" | "fork";
 }
 
 export interface DispatchFacts {
@@ -99,17 +103,28 @@ export interface DispatchFacts {
   ranged?: boolean | undefined;
   /** The agent's pin (pinned or unknown) is respected under apply.respectFrontmatter. */
   pin?: boolean | undefined;
-  /** CLAUDE_CODE_EFFORT_LEVEL is set, or the call already passes `effort`. */
+  /**
+   * CLAUDE_CODE_EFFORT_LEVEL is set, or the call already passes `effort`. With `effortApply` only
+   * the env counts (the hook's effort wins over the call's), so the caller passes just that.
+   */
   effortSet: boolean;
   /** The brief sums past the 0..4 clamp (units.ts BriefUnits.saturated). */
   saturated?: boolean | undefined;
+  /** Apply mode in scope with a valid advised effort: the hook sets `effort` on the call. */
+  effortApply?: boolean | undefined;
 }
 
 export function dispatchRule(f: DispatchFacts): DispatchRule {
   if (f.fork) return { model: "fork", effort: "fork" };
   return {
     model: f.forced ? "forced" : f.ranged ? "ranged" : f.pin ? "pin" : "pass",
-    effort: f.effortSet || f.saturated ? "informational" : "pass",
+    effort: f.effortApply
+      ? f.effortSet
+        ? "informational"
+        : "applied"
+      : f.effortSet || f.saturated
+        ? "informational"
+        : "pass",
   };
 }
 
@@ -231,8 +246,14 @@ export interface PlanAdvice {
   /** The brief sums past the 0..4 clamp (units.ts): its effort is informational. */
   saturated?: boolean | undefined;
   /**
+   * Apply mode will set `effort` on this task's dispatch (the hook wins over the call and the
+   * agent file), so the coordinator passes none. Unset in advise mode and under
+   * CLAUDE_CODE_EFFORT_LEVEL.
+   */
+  effortApplied?: boolean | undefined;
+  /**
    * Every role of the swarm pins a model without a range (pins respected, FORCE off), so the
-   * adjudicator cannot change any worker: the same on every suggestion of one plan.
+   * adjudicator cannot change any worker's model: the same on every suggestion of one plan.
    */
   allRolesPinned?: boolean | undefined;
 }
@@ -324,6 +345,7 @@ function adviceFacts(a: PlanAdvice, forced: boolean, effortSet: boolean): Dispat
     pin: !!a.pin || (!!a.range && !ranged),
     effortSet,
     saturated: !!a.saturated,
+    effortApply: !!a.effortApplied,
   };
 }
 
@@ -401,6 +423,8 @@ export async function adjudicatePlan(
     // Under FORCE Claude Code ignores the agents' `model` too: no pin to name (dispatchRule).
     const forced = modelForced(env);
     const respect = cfg.apply.respectFrontmatter;
+    // onPreAgent returns early when surfaces.agent is off, so then the hook sets nothing.
+    const applyEffort = cfg.mode === "apply" && cfg.surfaces.agent !== false && !effortForced(env);
     // Every role keeps a plain pin: no suggestion can change a worker's model (the head says so).
     const allRolesPinned =
       !forced &&
@@ -424,6 +448,9 @@ export async function adjudicatePlan(
         }
       }
       if (allRolesPinned) advice.allRolesPinned = true;
+      // Apply mode: the hook sets the effort at dispatch, so the coordinator is told to pass none
+      // (CLAUDE_CODE_EFFORT_LEVEL outranks the hook: then the effort stays informational).
+      if (applyEffort && effortLevel(advice.effort)) advice.effortApplied = true;
       markPlanRow(db, advice);
       return advice;
     });
@@ -508,7 +535,11 @@ export function planLines(advice: readonly PlanAdvice[]): string[] {
           : a.model
             ? [a.forced ? `model ${a.model} (informational)` : `model ${a.model}`]
             : []),
-      a.saturated ? `effort ${a.effort}: informational` : `effort ${a.effort}`,
+      a.effortApplied
+        ? `effort ${a.effort} (applied by the hook)`
+        : a.saturated
+          ? `effort ${a.effort}: informational`
+          : `effort ${a.effort}`,
     ];
     let line = `#${a.taskId} → ${parts.join(" · ")} (${a.saturated ? "brief saturated; " : ""}complexity ${complexityBucket(a.complexity)}, conf ${r2(a.confidence)})`;
     const noted = a.suggestedRole && (a.roleConfidence ?? 0) >= ROLE_NOTE_MIN;
@@ -519,9 +550,12 @@ export function planLines(advice: readonly PlanAdvice[]): string[] {
   });
 }
 
-/** The head's nudge when no suggestion can change a worker (every role pins a model). */
+/**
+ * The head's nudge when no suggestion can change a worker's model (every role pins a model).
+ * The effort is not affected: apply mode still sets it on every dispatch.
+ */
 export const ALL_PINNED_NOTE =
-  "every role pins a model: the adjudicator cannot change any worker (add model_range in swarm.yaml)";
+  "every role pins a model: the adjudicator cannot change any worker's model (add model_range in swarm.yaml)";
 
 /** The advice block `em_swarm plan` appends; "" when there is no advice. */
 export function planAdviceBlock(
@@ -550,6 +584,8 @@ export function effortForced(env: NodeJS.ProcessEnv = process.env): boolean {
 export interface PlanPassing {
   model: boolean;
   effort: boolean;
+  /** Apply mode: the hook sets `effort` for some task, so the coordinator passes none for it. */
+  applied: boolean;
   pinned: boolean;
   forced: boolean;
   /** Some brief is saturated while CLAUDE_CODE_EFFORT_LEVEL is unset: its effort is informational. */
@@ -566,6 +602,7 @@ export function planPassing(
   return {
     model: rules.some((r, i) => (r.model === "pass" || r.model === "ranged") && !!advice[i]?.model),
     effort: rules.some((r) => r.effort === "pass"),
+    applied: rules.some((r) => r.effort === "applied"),
     pinned: rules.some((r) => r.model === "pin"),
     forced: rules.some((r) => r.model === "forced"),
     saturated: !effortSet && advice.some((a) => a.saturated),
@@ -577,6 +614,10 @@ const SATURATED_NOTE =
   "every brief is saturated, naming more work than its hardest statement scores";
 /** Why no effort is to be passed: the env, else every brief is saturated. */
 const noEffortWhy = (p: PlanPassing) => (p.saturated ? SATURATED_NOTE : EFFORT_NOTE);
+const APPLIED_NOTE = "the hook sets `effort` on the Agent call in apply mode, so pass no `effort`";
+/** What the effort clause says when no effort is to be passed: applied by the hook, or informational. */
+const noEffortClause = (p: PlanPassing) =>
+  p.applied ? APPLIED_NOTE : `effort is informational: ${noEffortWhy(p)}`;
 const FORCE_NOTE =
   "CLAUDE_CODE_SUBAGENT_MODEL_FORCE is on, so Claude Code ignores `model` on the Agent call and the agents' model pins";
 
@@ -594,15 +635,15 @@ export function planAdviceHead(
       : "";
   if (p.forced)
     return `Adjudicator suggestions (${FORCE_NOTE}; the model is informational; ${
-      p.effort ? effortPass : `${noEffortWhy(p)}, so effort is too`
+      p.effort ? effortPass : p.applied ? APPLIED_NOTE : `${noEffortWhy(p)}, so effort is too`
     }${saturated}):`;
   const pins = p.pinned ? "; a pinned agent keeps its model: pass no `model`" : "";
   let pass: string;
   if (p.model && p.effort)
     pass = `pass the model as \`model\` and the effort as \`effort\` on each Agent call (\`effort\` needs Claude Code ${AGENT_EFFORT_SINCE} or later)`;
-  else if (p.model)
-    pass = `pass the model as \`model\` on each Agent call (effort is informational: ${noEffortWhy(p)})`;
+  else if (p.model) pass = `pass the model as \`model\` on each Agent call (${noEffortClause(p)})`;
   else if (p.effort) pass = `${effortPass} on each Agent call`;
+  else if (p.applied) pass = `pass nothing: ${APPLIED_NOTE}`;
   else pass = `informational only (effort: ${noEffortWhy(p)})`;
   return `Adjudicator suggestions: ${pass}${pins}${saturated}:`;
 }
@@ -623,7 +664,12 @@ export function planNextHint(
       ? "leave `model` unset for pinned agents"
       : "";
   const pass = [p.model ? "`model`" : "", p.effort ? "`effort`" : ""].filter(Boolean).join(" and ");
+  // Apply mode: the hook sets the effort, whether or not a model is passed.
+  const applied =
+    p.applied && !p.effort ? "; the hook sets `effort` (apply mode): pass no `effort`" : "";
   if (!pass)
-    return `; the suggestions below are informational: ${keep ? `${keep} and ` : ""}pass no \`effort\` (${noEffortWhy(p)})`;
-  return `, passing ${pass} as each suggestion below says${keep ? `; ${keep}` : ""}`;
+    return p.applied
+      ? `; the suggestions below are informational${keep ? `: ${keep}` : ""}${applied}`
+      : `; the suggestions below are informational: ${keep ? `${keep} and ` : ""}pass no \`effort\` (${noEffortWhy(p)})`;
+  return `, passing ${pass} as each suggestion below says${keep ? `; ${keep}` : ""}${applied}`;
 }

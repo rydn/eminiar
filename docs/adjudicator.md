@@ -324,7 +324,7 @@ reports the key that would actually be sent, so a local target shows only its ke
 |---|---|---|---|
 | Prompt | UserPromptSubmit | One line for Claude, for example `eminiar adjudicator: complexity 1/4 (lookup) · start with em_symbols → em_search · if you delegate: haiku, role explorer` | `surfaces.prompt` |
 | Main session | UserPromptSubmit | A note when the session model is at least two tiers above the advice, at most once every `advice.cooldownPrompts` prompts: `… /model haiku would be cheaper than opus` | `advice.mainSession`: `user` (shown to you), `context` (to Claude) or `off` |
-| Subagent dispatch | PreToolUse on `Agent` | A note on the call: `adjudicator: model haiku would do (complexity 1, conf 0.82): pass model:'haiku'; pass effort:'low' (Claude Code 2.1.292+), role explorer`. For an agent whose definition pins a model it names the pin instead: `adjudicator: pinned opus (adjudicator would pick haiku; remove the model pin in .claude/agents/x.md to let it choose); …`. See [What the advice tells you to pass](#what-the-advice-tells-you-to-pass) for ranged swarm roles, FORCE and forks. In apply mode it may set the model | `surfaces.agent` |
+| Subagent dispatch | PreToolUse on `Agent` | A note on the call: `adjudicator: model haiku would do (complexity 1, conf 0.82): pass model:'haiku'; pass effort:'low' (Claude Code 2.1.292+), role explorer`. For an agent whose definition pins a model it names the pin instead: `adjudicator: pinned opus (adjudicator would pick haiku; remove the model pin in .claude/agents/x.md to let it choose); …`. See [What the advice tells you to pass](#what-the-advice-tells-you-to-pass) for ranged swarm roles, FORCE and forks. In apply mode it sets the effort and may set the model | `surfaces.agent` |
 | Swarm plan | `em_swarm plan` | One line per task, see [Swarm plans](#swarm-plans) | `surfaces.plan` |
 | Raw tool | PreToolUse on `Bash`, `Read`, `Grep`, … | A hint when the call contradicts the prompt's advised `em_*` tool, once per prompt, only when routing said nothing | `surfaces.tools` (off by default) |
 
@@ -347,17 +347,18 @@ prompt that mentions one of these tags further on is scored as usual. On a promp
 
 ## Advise and apply
 
-`mode: "advise"` (default) only suggests. The coordinator, or you, passes `model` on the Agent
-call. A dispatch in advise mode never makes a network call; it uses the plan's verdict, a cached
-one, or the heuristic.
+`mode: "advise"` (default) only suggests. The coordinator, or you, passes `model` and `effort`
+on the Agent call. A dispatch in advise mode never makes a network call; it uses the plan's
+verdict, a cached one, or the heuristic.
 
-`mode: "apply"` lets the PreToolUse hook set `model` on the Agent call itself, through Claude
-Code's `updatedInput`, which replaces the call's arguments. Claude Code runs the subagent on that
-model: a test on Claude Code 2.1.309 (`claude -p`) showed that a model the hook sets wins over
-the agent file's `model` pin and over a `model` passed on the call. eminiar itself never
-overrides either (see the conditions below). It still checks the result: `eminiar adjudicator
-status` and the dashboard show how many applied dispatches ran on the chosen model ("n of m"),
-and [Troubleshooting](#troubleshooting) lists what makes the two differ.
+`mode: "apply"` lets the PreToolUse hook set `model` and `effort` on the Agent call itself,
+through Claude Code's `updatedInput`, which replaces the call's arguments. Both go into the same
+single `updatedInput`. Claude Code runs the subagent on that model: a test on Claude Code 2.1.309
+(`claude -p`) showed that a model the hook sets wins over the agent file's `model` pin and over a
+`model` passed on the call. eminiar itself never overrides either (see the conditions below). It
+still checks the result: `eminiar adjudicator status` and the dashboard show how many applied
+dispatches ran on the chosen model ("n of m"), and [Troubleshooting](#troubleshooting) lists what
+makes the two differ. For the effort, see [Apply mode and effort](#apply-mode-and-effort).
 
 These are Claude Code's rules for a subagent's model, and the adjudicator follows them:
 
@@ -374,12 +375,13 @@ These are Claude Code's rules for a subagent's model, and the adjudicator follow
 4. **Effort can be passed per call** from Claude Code 2.1.292: the Agent call takes an `effort`
    parameter (`low`, `medium`, `high`, `xhigh` or `max`; levels a model lacks fall back to the
    highest one below) that overrides the agent file's `effort`, for non-fork subagents.
-   `CLAUDE_CODE_EFFORT_LEVEL` outranks both. The adjudicator suggests a level for the
-   coordinator to pass (`max` only at the very top of the complexity scale, c ≥ 3.75), and says
-   the level is informational while `CLAUDE_CODE_EFFORT_LEVEL` is set, when the call already
-   passes `effort`, and for a [saturated](#how-it-decides) brief. The hook never injects
-   `effort`, in apply mode too; reconcile checks afterwards which level ran (see
-   [Effort follow-through](#effort-follow-through)).
+   `CLAUDE_CODE_EFFORT_LEVEL` outranks both. An `effort` that a PreToolUse hook sets through
+   `updatedInput` counts as the call's `effort`. The adjudicator suggests a level (`max` only
+   at the very top of the complexity scale, c ≥ 3.75). In advise mode the coordinator passes it,
+   and the level is informational while `CLAUDE_CODE_EFFORT_LEVEL` is set, when the call already
+   passes `effort`, and for a [saturated](#how-it-decides) brief. In apply mode the hook sets it
+   (see [Apply mode and effort](#apply-mode-and-effort)). Either way, reconcile checks afterwards
+   which level ran (see [Effort follow-through](#effort-follow-through)).
 
 Apply mode changes the model only when all of these hold:
 
@@ -394,10 +396,64 @@ Apply mode changes the model only when all of these hold:
 The tier is clamped to `apply.floor` … `apply.ceiling`, and for a ranged role to its range as
 well. When that pick is the tier of the role's fallback `model`, or no tier lies inside both
 bounds, the hook sets nothing and the worker runs on its fallback, so a pinned model id or `[1m]`
-variant is never swapped for the bare alias. The hook keeps every other field of the call, never
-turns a deny or ask into an allow, and never adds `effort`. Each dispatch is recorded as
-`advised`, `applied` or `respected` (left alone because of an explicit model, a pin, a ranged
-role's fallback, a fork or FORCE).
+variant is never swapped for the bare alias. The hook keeps every other field of the call and
+never turns a deny or ask into an allow. Each dispatch is recorded as `advised`, `applied` or
+`respected` (left alone because of an explicit model, a pin, a ranged role's fallback, a fork or
+FORCE). These conditions are for the model only; the effort has its own, below.
+
+### Apply mode and effort
+
+In apply mode the hook always sets the advised effort on the Agent call, on every dispatch
+`apply.scope` covers. It does so even when the model is left alone (a pin, a ranged role's
+fallback, an explicit `model`, FORCE, or a tier confidence below `apply.minConfidence`), and even
+when the call or the agent file already sets an effort. The note then says `effort low applied`,
+for example `adjudicator: model haiku applied (complexity 1, conf 0.82); effort low applied, role
+explorer`, or, for a pinned agent, `adjudicator: pinned opus (…); effort low applied`.
+
+A probe on Claude Code 2.1.311 (`claude -p`, 22 runs; ground truth is the effort in the
+subagent's API requests) showed:
+
+| Case | What ran |
+|---|---|
+| The hook sets `low`, nothing else sets an effort | `low` (3 of 3) |
+| The call passes `high`, the hook sets `low` | `low`: the hook wins (2 of 2) |
+| The agent file sets `high`, the hook sets `low` | `low`: the hook wins (2 of 2) |
+| `CLAUDE_CODE_EFFORT_LEVEL=high`, the hook sets `low` | `high`: the environment variable wins, and the hook's value is dropped silently (2 of 2) |
+| A fork, the hook sets `low` | the parent's effort: a fork drops the value silently (3 of 3) |
+| The hook sets a value that is not a level | the whole Agent call fails schema validation and no subagent runs (2 of 2) |
+| A model without effort support (`claude-haiku-4-5`) | the call is accepted, and no effort is sent with its requests (2 of 2) |
+| `haiku` and `sonnet` 5.5 models, `xhigh` or `max` | the level that was set (6 of 6) |
+
+So the hook sets no effort when:
+
+- the dispatch is a fork (the note says ``no `model` to pass, effort not applied (a fork takes
+  none; …)``)
+- `CLAUDE_CODE_EFFORT_LEVEL` is set (the note says `effort low not applied:
+  CLAUDE_CODE_EFFORT_LEVEL is set and outranks it`)
+- routing denied or asked about the call (the call is never rewritten)
+- the dispatch is outside `apply.scope`: it is advised as in advise mode
+
+The hook only ever sends one of `low`, `medium`, `high`, `xhigh` or `max`, since any other
+value fails the call. It does not lower the level for a model: the 5.5 models take every level,
+and a model without effort support ignores it. For such a model the level that ran is unknown, so
+the dispatch is not counted in the effort follow rate.
+
+A [saturated](#how-it-decides) brief still gets its effort set in apply mode, but the dispatch is
+not counted in the follow rate, because its effort is informational advice.
+
+The provider is asked inline for an apply-mode dispatch only on a cache miss, within
+`timeouts.agentMs`, and only when the verdict will be applied. That is a dispatch whose model may
+still move (no explicit `model`, no pin, not a fork, not FORCE; a ranged role whose pick can move
+counts too), and any other in-scope dispatch whose effort is set: a pinned agent, an explicit
+`model`, or FORCE, which get their effort alone. It is not asked in advise mode, for a fork, under
+`CLAUDE_CODE_EFFORT_LEVEL` (unless the model may move), when the dispatch is denied or asked (unless
+the model may move, and then the call is still not rewritten), or when a plan row already holds the
+verdict.
+
+There is no Claude Code version check: the hook input carries no version. The Agent call takes
+`effort` from 2.1.292. On 2.1.311 an unknown key in `updatedInput` is dropped rather than
+rejected, so an older Claude Code probably drops `effort` too, and the call runs as without
+eminiar. Versions older than 2.1.292 were not tested.
 
 The pin is looked up the way Claude Code finds the agent: managed agents first, then the
 project's `.claude/agents` folders from the current directory up to the repo root (closest
@@ -436,15 +492,18 @@ tell the coordinator to pass on the Agent call. The first matching row decides `
 | The agent's pin is respected (pinned, or unknown), or a ranged role keeps its fallback (the pick is the fallback's tier, or no tier lies inside both bounds) | none: the agent keeps its pin or fallback | by the effort rule | none |
 | Anything else | pass the suggested `model`: the suggested tier clamped to `apply.floor` … `apply.ceiling` | by the effort rule | when followed or applied |
 
-The effort rule: pass the suggested `effort` (Claude Code 2.1.292+), unless
-`CLAUDE_CODE_EFFORT_LEVEL` is set, the call already passes `effort`, or the brief is
-[saturated](#how-it-decides); then the level is informational. The "Next:" line only mentions
+The effort rule: in apply mode, within `apply.scope`, pass no `effort`: the hook sets it
+(`applied`), unless `CLAUDE_CODE_EFFORT_LEVEL` is set, which makes it informational. Otherwise
+pass the suggested `effort` (Claude Code 2.1.292+), unless `CLAUDE_CODE_EFFORT_LEVEL` is set, the
+call already passes `effort`, or the brief is [saturated](#how-it-decides); then the level is
+informational. The "Next:" line only mentions
 `model` when at least one task has a model to pass, and then adds "leave `model` unset for
 pinned agents" when some agents keep a pin (a ranged role's fallback included). With
 `apply.respectFrontmatter` off, a range is ignored like any pin.
 
-When the agent file sets its own `effort`, the dispatch note says how it compares with the advice
-(a fork has no file, so its note never mentions one):
+In advise mode, when the agent file sets its own `effort`, the dispatch note says how it compares
+with the advice (a fork has no file, so its note never mentions one). In apply mode the note says
+`effort low applied` whatever the file sets, since the hook's level wins:
 
 | Case | Effort part of the note |
 |---|---|
@@ -454,7 +513,8 @@ When the agent file sets its own `effort`, the dispatch note says how it compare
 | The call passes `effort`, or `CLAUDE_CODE_EFFORT_LEVEL` is set | `suggested effort low` |
 
 The level is read from the frontmatter only when every copy of the definition agrees on it. The
-hook only reads it; it never changes the file or the call's `effort`.
+hook only reads the file and never changes it. In advise mode it never changes the call's
+`effort` either.
 
 A ranged role's note names the range and the fallback. When the pick moves the model:
 
@@ -469,14 +529,17 @@ adjudicator: fallback sonnet (range haiku–opus; matches the adjudicator's pick
 ```
 
 In apply mode the first one reads `adjudicator: model haiku applied (range haiku–opus, fallback
-sonnet; …)`. A saturated brief's effort reads `effort max: informational (brief saturated)`, and
-a note names a role (`role explorer`) only when the role table's confidence is at least 0.7.
+sonnet; …); effort low applied`, and the second ends in `effort medium applied`. In advise mode a
+saturated brief's effort reads `effort max: informational (brief saturated)`. A note names a role
+(`role explorer`) only when the role table's confidence is at least 0.7.
 
 A fork's note is only informational:
 
 ```text
 adjudicator: fork runs on the main session's model; no `model` or `effort` to pass (complexity 3, conf 0.80)
 ```
+
+In apply mode it reads ``no `model` to pass, effort not applied (a fork takes none; …)``.
 
 Under FORCE the note keeps the effort hint and calls the model informational:
 
@@ -493,13 +556,15 @@ matrix.
 
 ### Effort follow-through
 
-Effort is advice, and reconcile checks afterwards whether the subagent ran at the advised level.
-The dispatch row records what it knew at the call, and reconcile adds what ran, all in the
-decision's `scores` JSON (no new columns):
+Reconcile checks afterwards whether the subagent ran at the advised level, whether the
+coordinator passed it (advise mode) or the hook set it (apply mode). The dispatch row records
+what it knew at the call, and reconcile adds what ran, all in the decision's `scores` JSON (no
+new columns):
 
 | Key | Written by | Value |
 |---|---|---|
 | `passedEffort` | the dispatch hook | the `effort` the Agent call passed |
+| `effortApplied` | the dispatch hook | the `effort` the hook set on the call in apply mode; it overrides `passedEffort` and `agentEffort` |
 | `effortEnv` | the dispatch hook | `CLAUDE_CODE_EFFORT_LEVEL` while it is set (`other` for a value that is not a level) |
 | `agentEffort` | the dispatch hook | the agent file's frontmatter `effort` (not for a fork) |
 | `actualEffort` | reconcile | the level the subagent ran at: the most common `effort` of its `api_calls` rows (on a tie, the one seen last) |
@@ -513,36 +578,45 @@ the subagent run at another one.
 
 A dispatch is **not counted** when its advice named no level, the level that ran is unknown (no
 calls ingested yet, or none with an effort), it is a fork, `CLAUDE_CODE_EFFORT_LEVEL` was set, or
-the brief was [saturated](#how-it-decides) (the plan row's scoring decides when there is one).
-Otherwise it is **followed** when the level that ran equals the advice, or the effort set for the
-call is the advised level (a model without that level runs the next one down, so setting it is
-following): the level the call passed, or, when the call passed nothing, the level the agent file
-sets (the hook tells the coordinator to pass nothing then); a passed level wins over the agent
-file's. It is **ignored** when neither holds.
+the brief was [saturated](#how-it-decides) (the plan row's scoring decides when there is one;
+in apply mode such a brief still gets its effort set). Otherwise:
+
+- When the hook applied an effort (`effortApplied`), the dispatch is **followed** when the level
+  that ran equals the advice and **ignored** otherwise. The hook's level wins over the call and
+  the agent file, and a model without effort support records no level at all (so it is not
+  counted), so a different level means something else changed it.
+- Without an applied effort (advise mode), it is **followed** when the level that ran equals the
+  advice, or the effort set for the call is the advised level (a model without that level runs
+  the next one down, so setting it is following): the level the call passed, or, when the call
+  passed nothing, the level the agent file sets (the hook tells the coordinator to pass nothing
+  then); a passed level wins over the agent file's. It is **ignored** when neither holds.
 
 `em_adjudicate stats` and `eminiar adjudicator stats` add a line once a dispatch has been
 counted:
 
 ```text
-effort followed 75% (3 followed, 1 ignored of 4) · passed but not run 1
+effort followed 75% (3 followed, 1 ignored of 4) · set but not run 1
 ```
 
-The rate is followed ÷ (followed + ignored). "Passed but not run" counts the dispatches that
-passed an `effort` on the call and then ran at a different level (`effortIneffective`, out of
-`effortChecked`: the dispatches with both a passed and a ran level). `stats --json` carries them
-under `summary` as `rates.effortFollow`, `effortFollowed`, `effortIgnored`, `effortChecked` and
-`effortIneffective`. The Adjudicator tab shows the rate next to the follow rate, and the swarm
-view shows the level that ran on each decision, marked "(ignored)" when the advice was not
-followed.
+The rate is followed ÷ (followed + ignored). "Set but not run" counts the dispatches whose
+effort was set on the call and that then ran at a different level (`effortIneffective`, out of
+`effortChecked`: the dispatches with both a set and a ran level). The set level is the one the
+hook applied (`effortApplied`), else the one the call passed (`passedEffort`). `stats --json`
+carries them under `summary` as `rates.effortFollow`, `effortFollowed`, `effortIgnored`,
+`effortChecked` and `effortIneffective`. The Adjudicator tab shows the rate next to the follow
+rate. The swarm view shows the level that ran on each decision (else the level that was in
+force: the environment variable, the hook's, the call's, then the agent file's), marked
+"(applied)" when the hook set it and "(ignored)" when the advice was not followed.
 
-Reconcile skips rows that are already final, so a dispatch that settled before eminiar recorded
-effort never gets `actualEffort` or `effortFollow`: until a newer dispatch is reconciled, the
-dashboard's effort rate is n/a (shown as "—") and `stats` prints no effort line.
-
-Apply mode still never sets `effort`, though the Agent call would take it. Keeping effort as
-advice for the coordinator is a recorded decision (`adjudicator/advise-respects-pins-and-agent-effort`);
-letting the hook set it would take a new, explicit decision, which these follow-through numbers
-are meant to inform.
+Reconcile normally skips rows that are already final. So that dispatches which settled before
+eminiar recorded effort still count, each reconcile pass also fills in the effort keys of old
+final rows, newest first: it looks at up to 1,000 dispatch rows and repairs at most 200 of them,
+only rows linked to a subagent whose `scores` have no `actualEffort` yet and whose API calls
+record an effort. It writes only those keys, and is skipped when `learning.enabled` is false. A
+repaired row that recorded none of `effortApplied`, `agentEffort`, `passedEffort` or `effortEnv` (a
+legacy row) gets the level that ran but no verdict, so it is not counted. Until the
+repaired rows include some that can be counted, the dashboard's effort rate is n/a (shown as
+"—") and `stats` prints no effort line.
 
 ## Swarm plans
 
@@ -569,14 +643,17 @@ bounds, the line names the fallback and there is no `model` to pass. A role whos
 model (its `model` in `swarm.yaml` without a range, or any agent definition Claude Code would
 find first) keeps it; a definition that cannot be read shows `model pin is unknown`. When every
 role of the swarm pins a model, the line under the head says so: "every role pins a model: the
-adjudicator cannot change any worker (add model_range in swarm.yaml)".
+adjudicator cannot change any worker's model (add model_range in swarm.yaml)"; apply mode still
+sets each worker's `effort`.
 
 With `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` on the model is informational (`model haiku
 (informational)`, no pin or range named), and with `CLAUDE_CODE_EFFORT_LEVEL` set the effort is.
-So is the effort of a [saturated](#how-it-decides) brief (#8 above). The head and the "Next:"
+In advise mode so is the effort of a [saturated](#how-it-decides) brief (#8 above). The head and the "Next:"
 line follow [the same rule](#what-the-advice-tells-you-to-pass), so they never disagree: with
-every agent pinned, "Next:" says "passing `effort` as each suggestion below says; leave `model`
-unset for pinned agents". If scoring fails outright, the plan still succeeds, the MCP server
+every agent pinned in advise mode, "Next:" says "passing `effort` as each suggestion below says;
+leave `model` unset for pinned agents"; in apply mode it says "the suggestions below are
+informational: leave `model` unset for pinned agents; the hook sets `effort` (apply mode): pass no
+`effort`". If scoring fails outright, the plan still succeeds, the MCP server
 logs the error on stderr, and the plan ends with "Adjudicator advice unavailable for this plan
 (the tasks are planned)."
 
@@ -594,8 +671,12 @@ and the decision is not tied to the run.
 Advise and apply mode give the same answer. In advise mode the coordinator passes `model` (and
 `effort`) where the suggestion says to, which Claude Code honours unless
 `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` (or `CLAUDE_CODE_EFFORT_LEVEL`) is set, so it works only as
-well as the coordinator follows the lines. In apply mode the hook sets the model itself; the
-effort is still the coordinator's to pass.
+well as the coordinator follows the lines. In apply mode the hook sets the model and the effort
+itself. Each line then reads `effort low (applied by the hook)`, a saturated brief's included,
+and the head and the "Next:" line say to pass no `effort`: "the hook sets `effort` on the Agent
+call in apply mode, so pass no `effort`". With `CLAUDE_CODE_EFFORT_LEVEL` set the effort stays
+informational, as in advise mode. The same holds with `surfaces.agent` off: the dispatch hook
+does not run, so nothing is applied and the plan gives the advise-mode wording.
 
 ## em_adjudicate
 

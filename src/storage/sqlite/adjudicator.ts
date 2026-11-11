@@ -77,11 +77,13 @@ const COLUMNS: ReadonlyArray<readonly [Exclude<keyof AdjudicationRow, "id">, str
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
- * The three effort keys summary() counts, read from a scores JSON (passedEffort, actualEffort,
- * effortFollow). Same result as adjudicator/effort.ts rowEffort for those keys; never throws.
+ * The effort keys summary() counts, read from a scores JSON (passedEffort, effortApplied,
+ * actualEffort, effortFollow). Same result as adjudicator/effort.ts rowEffort for those keys;
+ * never throws. `set` is the effort set for the call: the one the hook applied, else the one the
+ * call passed.
  */
 function scoresEffort(scores: string | null | undefined): {
-  passed?: string;
+  set?: string;
   actual?: string;
   follow?: "followed" | "ignored";
 } {
@@ -98,9 +100,9 @@ function scoresEffort(scores: string | null | undefined): {
     const t = typeof v === "string" ? v.trim().toLowerCase() : "";
     return EFFORT_LEVELS.includes(t) ? t : undefined;
   };
-  const out: { passed?: string; actual?: string; follow?: "followed" | "ignored" } = {};
-  const passed = level(r.passedEffort);
-  if (passed) out.passed = passed;
+  const out: { set?: string; actual?: string; follow?: "followed" | "ignored" } = {};
+  const set = level(r.effortApplied) ?? level(r.passedEffort);
+  if (set) out.set = set;
   const actual = level(r.actualEffort);
   if (actual) out.actual = actual;
   if (r.effortFollow === "followed" || r.effortFollow === "ignored") out.follow = r.effortFollow;
@@ -678,9 +680,9 @@ export class SqliteAdjudicatorStore implements AdjudicatorStore {
         const e = scoresEffort(f.scores);
         if (e.follow === "followed") effortFollowed += 1;
         else if (e.follow === "ignored") effortIgnored += 1;
-        if (e.passed && e.actual) {
+        if (e.set && e.actual) {
           effortChecked += 1;
-          if (e.passed !== e.actual) effortIneffective += 1;
+          if (e.set !== e.actual) effortIneffective += 1;
         }
       }
       bump(bySurface, r.surface);

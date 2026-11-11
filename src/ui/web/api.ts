@@ -792,12 +792,12 @@ export type {
   SwarmDecision,
   SwarmDecisionAdvice,
   SwarmDecisionRan,
-} from "../../adjudicator/swarm-decisions.js";
+} from "../../adjudicator/swarm-decision-types.js";
 export interface SwarmRunDetail {
   run: RunRow;
   /** The adjudicator's decision per task id (newer servers). */
   decisions?:
-    | Record<number, import("../../adjudicator/swarm-decisions.js").SwarmDecision>
+    | Record<number, import("../../adjudicator/swarm-decision-types.js").SwarmDecision>
     | undefined;
   /** Opaque hash of the decisions map; send it back as `decisionsHash` to skip an unchanged map. */
   decisionsHash?: string | undefined;
@@ -863,7 +863,7 @@ export interface SwarmFinishResult {
 }
 export interface SwarmTaskFull {
   task: SwarmTask;
-  decision?: import("../../adjudicator/swarm-decisions.js").SwarmDecision;
+  decision?: import("../../adjudicator/swarm-decision-types.js").SwarmDecision;
 }
 export interface SwarmSyncResult {
   actions: Array<{ agentType: string; path: string; action: string; reason?: string }>;
@@ -947,9 +947,9 @@ export interface AdjSummary {
   effortFollowed?: number;
   /** Dispatches whose subagent ran at another effort than advised. */
   effortIgnored?: number;
-  /** Dispatches that passed an effort while a different level ran. */
+  /** Dispatches whose set effort (applied by the hook, else passed) differs from the level that ran. */
   effortIneffective?: number;
-  /** Dispatches with both a passed and an actual effort (the m in "n of m"). */
+  /** Dispatches with both a set and an actual effort (the m in "n of m"). */
   effortChecked?: number;
 }
 export interface AdjDayBucket {

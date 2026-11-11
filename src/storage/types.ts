@@ -568,9 +568,12 @@ export interface AdjudicationSummary {
   effortFollowed: number;
   /** Dispatches whose scores.effortFollow is "ignored". */
   effortIgnored: number;
-  /** Dispatches that passed an effort (passedEffort) while a different level ran (actualEffort). */
+  /**
+   * Dispatches whose set effort (effortApplied when the hook applied one, else passedEffort)
+   * differs from the level that ran (actualEffort).
+   */
   effortIneffective: number;
-  /** Dispatches with both passedEffort and actualEffort (the m of "n of m"). */
+  /** Dispatches with both a set effort (effortApplied or passedEffort) and actualEffort (the m of "n of m"). */
   effortChecked: number;
   /**
    * Dispatches that ran on a model the advice did not name, counted exactly like the savings
