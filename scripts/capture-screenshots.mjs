@@ -37,6 +37,7 @@ const click = (label) => `(() => {
 const SHOTS = [
   { name: "overview", hash: "#/overview", schemes: ["dark"] },
   { name: "swarm", hash: "#/swarm?run=20261105-12d798", schemes: ["dark", "light"] },
+  { name: "playbooks", hash: "#/playbooks", schemes: ["dark", "light"] },
   { name: "swarm-config", hash: "#/swarm/config?swarm=feature", schemes: ["dark", "light"] },
   {
     name: "swarm-config-role",

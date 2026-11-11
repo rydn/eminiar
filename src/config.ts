@@ -406,6 +406,48 @@ const BaseConfigSchema = z.object({
         .default(".eminiar/memories"),
     })
     .prefault({}),
+  playbooks: z
+    .object({
+      /**
+       * Project-relative directory of playbook files (`<name>.md`: a stored recurring task, kept
+       * as markdown with a small header); commit it. Absolute paths and `..` segments are
+       * refused: eminiar writes the files there.
+       */
+      dir: z
+        .string()
+        .regex(PROJECT_RELATIVE_PATH_RE, "must be a path inside the project (no leading / or ..)")
+        .default(".eminiar/playbooks"),
+      /**
+       * Where private playbooks are kept: a folder git must ignore (eminiar adds it to the
+       * project's .gitignore before it writes the first one). Same path rules as `dir`.
+       */
+      privateDir: z
+        .string()
+        .regex(PROJECT_RELATIVE_PATH_RE, "must be a path inside the project (no leading / or ..)")
+        .default(".eminiar/playbooks-private"),
+      /**
+       * Playbooks at all (MCP tool, CLI, dashboard). Off refuses every playbook call, read or
+       * write, and em_playbook is not listed.
+       */
+      viewing: z.boolean().default(true),
+      /**
+       * Every playbook write: add, edit and delete playbooks, record and report runs, save
+       * suggestions (a scan that is not a dry run), accept or dismiss them. Off makes playbooks
+       * read-only; `run` still returns the prompt but records nothing.
+       */
+      adding: z.boolean().default(true),
+      extraction: z
+        .object({
+          /**
+           * Suggest playbooks from recurring tasks seen in session history (`scan`); listing,
+           * accepting and dismissing suggestions need it too. Off by default: nothing is read for
+           * it and nothing is suggested until this is on.
+           */
+          enabled: z.boolean().default(false),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
   recall: z
     .object({
       /** Inject the memories and doc pages that match each prompt (UserPromptSubmit). */
@@ -981,6 +1023,8 @@ function projectLayer(raw: Record<string, unknown>): Record<string, unknown> {
 const PROJECT_PATH_KEYS = [
   ["docs", "manifest"],
   ["memories", "dir"],
+  ["playbooks", "dir"],
+  ["playbooks", "privateDir"],
 ] as const;
 
 /**

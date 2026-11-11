@@ -133,6 +133,16 @@ describe("destructiveHint follows the input schema", () => {
     expect(byName("em_adjudicate").annotations.idempotentHint).toBe(false);
   });
 
+  it("em_playbook deletes and overwrites playbooks and records a run per call", () => {
+    expect(byName("em_playbook").annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    expect(destructiveInputs(byName("em_playbook"))).toContain("action=delete");
+  });
+
   it("the command runners are not read-only, destructive and open-world", () => {
     for (const n of ["em_execute", "em_execute_file", "em_batch_execute"])
       expect(byName(n).annotations, n).toMatchObject({
