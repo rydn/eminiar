@@ -223,6 +223,26 @@ export async function playbooksRoute(
         })),
       });
     }
+    if (path === "/api/playbooks/run/close") {
+      // Reports how a run that is still `started` ended. The id is a run id, not a playbook name.
+      if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
+      const id = b.id;
+      if (typeof id !== "number" || !Number.isInteger(id) || id < 1)
+        return fail(400, "id must be a run id");
+      const status = strOrUndef(b.status);
+      if (status !== "done" && status !== "failed" && status !== "skipped")
+        return fail(400, "status must be done, failed or skipped");
+      const run = db.playbooks.getRun(id);
+      if (!run) return fail(404, `no run ${id}`);
+      return ok(
+        store.closeRun(ctx, db, {
+          playbook: run.playbook,
+          runId: id,
+          status,
+          note: strOrUndef(b.note),
+        }),
+      );
+    }
     return fail(404, "not found");
   } catch (err) {
     return fail(err instanceof store.PlaybookGateError ? 403 : 400, (err as Error).message);

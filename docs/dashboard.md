@@ -313,16 +313,23 @@ the same everywhere.
 The library of [playbooks](tools.md#playbooks): stored recurring tasks. The dashboard shows and
 edits them; it never runs one.
 
+![Playbooks: stored recurring tasks with their tags, use counts and Copy run prompt](images/dashboard-playbooks-dark.webp)
+
 - **Playbooks** lists each one with its title, tags, schedule hint, a private or suggested badge
   and how often it was used. Show prompt reveals the prompt, with a field per parameter.
   **Copy run prompt** copies the filled prompt to paste into Claude and records one use. Edit and
   Delete appear when `playbooks.adding` is on; New playbook creates one.
 - **Run history** lists the recorded runs: when, which playbook, the status and how it started.
+  A run still `started` has done, failed and skipped buttons (with `playbooks.adding` on) to
+  report how it ended; a closed run is not changed.
 - **Suggested** (only with `playbooks.extraction.enabled`) is the inbox of tasks eminiar found
   you repeat. Each shows its evidence and prompt, with Accept and Dismiss. Nothing becomes a
   playbook until you accept it, and a dismissed suggestion is not proposed again.
 - **Scan history** looks through your session history for recurring tasks and lists what it
   found without saving anything. Save as suggestions files them in the inbox; Cancel discards.
+
+The section is in the address (`#/playbooks?tab=history`, `suggested`), so a link, reload, Back
+and Forward keep it. Leaving the page with an edited, unsaved playbook form asks first.
 
 With `playbooks.viewing` off the tab says playbooks are turned off. The tab changes files in
 `.eminiar/playbooks/`, so review them in version control like any other change.

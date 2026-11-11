@@ -51,3 +51,23 @@ describe("dashboard fillPrompt agrees with the store's", () => {
     expect(clientFill("x {{a}} y", params, { a: "$& $1" })).toBe("x $& $1 y");
   });
 });
+
+describe("dashboard playbooks client: closing a run", () => {
+  it("POSTs the run id and outcome to /api/playbooks/run/close", async () => {
+    const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify({ id: 7 }), { status: 200 });
+    });
+    const { playbooksApi } = (await import(/* @vite-ignore */ CLIENT)) as {
+      playbooksApi: {
+        closeRun: (id: number, s: "done" | "failed" | "skipped") => Promise<unknown>;
+      };
+    };
+    expect(await playbooksApi.closeRun(7, "skipped")).toEqual({ id: 7 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toContain("/api/playbooks/run/close");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ id: 7, status: "skipped" });
+  });
+});
