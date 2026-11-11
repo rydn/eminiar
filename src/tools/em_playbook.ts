@@ -14,6 +14,7 @@ import {
   remove,
   rowParams,
   rowTags,
+  shadowedBy,
   suggestions,
   write,
 } from "../playbooks/store.js";
@@ -120,7 +121,12 @@ export const emPlaybook = defineTool({
           const rows = list(ctx, db, { tag: args.tag });
           return text(
             rows.length
-              ? rows.map(line).join("\n")
+              ? rows
+                  .map((r) => {
+                    const hidden = r.private ? shadowedBy(ctx, r.name) : undefined;
+                    return hidden ? `${line(r)} [hides committed ${hidden}]` : line(r);
+                  })
+                  .join("\n")
               : 'no playbooks; em_playbook {action:"add", title, prompt} stores one',
           );
         }
@@ -190,8 +196,12 @@ export const emPlaybook = defineTool({
             status: "started",
             sessionId: getCurrentSession(ctx),
           });
+          const hidden = f.private ? shadowedBy(ctx, f.name) : undefined;
+          const note = hidden
+            ? `\n\n— note: the committed file ${hidden} has the same name and is ignored (hidden by this private playbook); check it before trusting either.`
+            : "";
           return text(
-            `${fillPrompt(f, args.values)}\n\n— playbook ${f.name}, run ${id}. Carry out the task above, then em_playbook {action:"report", name:"${f.name}", run_id:${id}, status:"done"|"failed"|"skipped", note}.`,
+            `${fillPrompt(f, args.values)}${note}\n\n— playbook ${f.name}, run ${id}. Carry out the task above, then em_playbook {action:"report", name:"${f.name}", run_id:${id}, status:"done"|"failed"|"skipped", note}.`,
           );
         }
         case "report": {

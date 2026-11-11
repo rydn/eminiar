@@ -370,14 +370,14 @@ describe("reconcile", () => {
     expect([f.title, f.prompt]).toEqual(["bare", "Just a prompt"]);
   });
 
-  it("keeps the public file when a name exists in both folders", () => {
+  it("keeps the private file when a name exists in both folders (the committed one is skipped)", () => {
     mkdirSync(join(root, ".eminiar/playbooks"), { recursive: true });
     mkdirSync(join(root, ".eminiar/playbooks-private"), { recursive: true });
     writeFileSync(join(root, ".eminiar/playbooks/dup.md"), "public\n");
     writeFileSync(join(root, ".eminiar/playbooks-private/dup.md"), "private\n");
     const s = reconcile(ctx, db);
-    expect(s.skipped).toEqual([".eminiar/playbooks-private/dup.md"]);
-    expect(db.playbooks.get("dup")!.prompt).toBe("public");
+    expect(s.skipped).toEqual([".eminiar/playbooks/dup.md"]);
+    expect(db.playbooks.get("dup")!.prompt).toBe("private");
   });
 });
 
