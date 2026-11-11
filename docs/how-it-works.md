@@ -347,6 +347,8 @@ adapter can be added later for a shared team knowledge base. The global database
 | `~/.eminiar/plugin/` | The stable plugin copy |
 | `<project>/.eminiar/memories/` | Memory files (commit them) |
 | `<project>/.eminiar/docs.json` | Documentation sources manifest (commit it) |
+| `<project>/.eminiar/playbooks/` | Playbook files (commit them) |
+| `<project>/.eminiar/playbooks-private/` | Private playbooks (git-ignored) |
 
 On macOS and Linux, `~/.eminiar` is readable by you alone (mode 0700), and each database with its
 `-wal` and `-shm` files is 0600. An existing `~/.eminiar` is tightened the next time eminiar opens

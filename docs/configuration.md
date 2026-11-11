@@ -153,6 +153,19 @@ absolute path, a drive letter, a `..` segment or a control character is refused,
 file that sets one is ignored for that key only, with a stderr note. Sessions repair missing or stale
 headers of the memory files there, so a cloned repo must not aim it at your other files.
 
+### `playbooks`
+
+| Key | Default | Description |
+|---|---|---|
+| `dir` | `".eminiar/playbooks"` | Where playbook files (`<name>.md`) live, relative to the project root. Commit it |
+| `privateDir` | `".eminiar/playbooks-private"` | Where private playbooks live. eminiar adds it to the project's `.gitignore` before writing the first one, and refuses a path equal to or inside `dir` |
+| `viewing` | `true` | List and read playbooks (tool, dashboard, CLI). Off hides them |
+| `adding` | `true` | Create, edit and delete playbooks, and accept or dismiss suggestions. Off makes them read-only |
+| `extraction.enabled` | `false` | Allow `scan`, which reads your session history for recurring tasks and files them as suggestions. Nothing is read or suggested while it is off |
+
+`dir` and `privateDir` follow the same path rule as `memories.dir`. Playbooks are stored tasks,
+not jobs: eminiar never runs or schedules them. See [Tools](tools.md#playbooks).
+
 ### `recall`
 
 | Key | Default | Description |

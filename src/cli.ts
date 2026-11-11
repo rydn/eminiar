@@ -66,6 +66,14 @@ Agent swarms (opt-in: .eminiar/swarm.yaml)
                                quiet for 15 min); their tasks go back to pending
   swarm watch [--run id] [--interval 2]          One NDJSON line per change (for the Monitor
                                tool); exits when the run finishes. --json on the others
+
+Playbooks (stored recurring tasks; eminiar never runs or schedules them)
+  playbook list [--tag t] | show <name> | rm <name>
+  playbook add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]]
+                               [--schedule S] [--tag t] [--private] [--replace]
+  playbook edit <name> [--title T] [--prompt P] [--param ...] [--schedule S] [--tag t]
+  playbook run <name> [--set k=v] [--note N]   Print the filled prompt and record a run
+  playbook runs [name] [--limit N]             Past runs. --json on all
 `;
 
 type Command = (args: string[]) => Promise<number>;
@@ -615,6 +623,11 @@ const commands: Record<string, Command> = {
   async swarm(args) {
     const { swarmCommand } = await import("./swarm/cli.js");
     return swarmCommand(args, getContext());
+  },
+
+  async playbook(args) {
+    const { playbookCommand } = await import("./playbooks/cli.js");
+    return playbookCommand(args, getContext());
   },
 
   async statusline() {
