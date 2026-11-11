@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -37,6 +37,7 @@ import {
   parsePlaybookFile,
   serializePlaybookFile,
 } from "./frontmatter.js";
+import { gitIgnoredFor, gitTrackedIn, type IgnoreAnswer } from "./git.js";
 
 /**
  * Playbooks are stored recurring tasks: a name, a title, a prompt, optional parameters, an
@@ -182,41 +183,65 @@ function ignoreCovers(lines: string[], rel: string): boolean {
   return covered;
 }
 
-/** Does git ignore a file in the private folder? undefined when git cannot say (no git, no repo). */
-function gitIgnores(ctx: ProjectContext, rel: string): boolean | undefined {
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
-  ) as NodeJS.ProcessEnv;
-  try {
-    execFileSync("git", ["check-ignore", "-q", "--no-index", "--", `${rel}/probe.md`], {
-      cwd: ctx.root,
-      env,
-      stdio: "ignore",
-      timeout: 10_000,
-    });
-    return true; // exit 0: ignored
-  } catch (e) {
-    return (e as { status?: unknown }).status === 1 ? false : undefined;
-  }
+/**
+ * The files of the private folder that git tracks (project-relative), [] when none or when git
+ * cannot say (no git, no repository: nothing is tracked then).
+ */
+function trackedPrivate(ctx: ProjectContext): string[] {
+  const rel = relDir(ctx, true);
+  return (gitTrackedIn(ctx.root, rel) ?? []).map((f) => `${rel}/${f}`);
+}
+
+/** Is the private playbook `name` a file git tracks (force-added upstream, arrived by a pull)? */
+function isTrackedPrivate(ctx: ProjectContext, name: string): boolean {
+  const want = `${relDir(ctx, true)}/${name}.md`.toLowerCase();
+  return trackedPrivate(ctx).some((f) => f.toLowerCase() === want);
 }
 
 /**
- * Makes sure git ignores the private folder before a private playbook is written there, adding
- * a line to the project's .gitignore when it does not. Throws when that fails: a private
- * playbook is never written to a folder git might commit.
+ * Does git ignore the private folder? Asks about the file being written (with the index, so a
+ * tracked file is "not ignored") and about a random name no .gitignore line can single out, so
+ * a line that covers only `probe.md` or `p*` does not pass for the folder. Ignored only when
+ * every answer is; unknown when git cannot say (no git, no repository, an error).
  */
-export function ensurePrivateIgnored(ctx: ProjectContext): void {
+function gitIgnoresPrivate(ctx: ProjectContext, name: string | undefined): IgnoreAnswer {
   const rel = relDir(ctx, true);
+  const probes = [`${rel}/eminiar-probe-${randomBytes(8).toString("hex")}.md`];
+  if (name !== undefined) probes.push(`${rel}/${name}.md`);
+  const answers = probes.map((p) => gitIgnoredFor(ctx.root, p));
+  if (answers.includes("not-ignored")) return "not-ignored";
+  return answers.every((a) => a === "ignored") ? "ignored" : "unknown";
+}
+
+/**
+ * Makes sure git ignores the private folder before a private playbook (`name`) is written there,
+ * adding a line to the project's .gitignore when it does not. Throws when that fails, or when
+ * git tracks files in the folder (then it is a committed folder, and an edit there is a change to
+ * a tracked file): a private playbook is never written to a folder git might commit.
+ */
+export function ensurePrivateIgnored(ctx: ProjectContext, name?: string): void {
+  const rel = relDir(ctx, true);
+  const tracked = trackedPrivate(ctx);
+  if (tracked.length > 0)
+    throw new Error(
+      `git tracks ${tracked.slice(0, 5).join(", ")}${tracked.length > 5 ? ` and ${tracked.length - 5} more` : ""} in the private playbook folder ${rel}, so that folder is not private; refusing to write a private playbook there. Untrack them (git rm --cached) or set playbooks.privateDir to another folder`,
+    );
   const file = join(ctx.root, ".gitignore");
   assertInside(ctx, file);
   const text = existsSync(file) ? readFileSync(file, "utf8") : "";
   // Git is the authority: a glob and a later negation can undo each other in ways a text scan
-  // misreads. Without git (or outside a repo) the text check stands in.
-  const before = gitIgnores(ctx, rel);
-  if (before === true || (before === undefined && ignoreCovers(text.split(/\r?\n/), rel))) return;
+  // misreads. Without git (or outside a repo) the text check stands in. A project without a
+  // .git of its own (inside a parent repository that ignores everything, say) keeps its own
+  // line too, so the folder stays ignored after a later `git init` there.
+  const covered = ignoreCovers(text.split(/\r?\n/), rel);
+  const ownRepo = !!lstatSync(join(ctx.root, ".git"), { throwIfNoEntry: false });
+  const before = gitIgnoresPrivate(ctx, name);
+  if (before === "ignored" && (ownRepo || covered)) return;
+  if (before === "unknown" && covered) return;
   const sep = text === "" || text.endsWith("\n") ? "" : "\n";
   writeFileSync(file, `${text}${sep}# eminiar: private playbooks stay local\n${rel}/\n`);
-  if (before === false && gitIgnores(ctx, rel) !== true)
+  const after = gitIgnoresPrivate(ctx, name);
+  if (after === "not-ignored" || (after === "unknown" && before !== "unknown"))
     throw new Error(
       `git would still track ${rel} after adding it to .gitignore (a later rule or a nested .gitignore un-ignores it); refusing to write a private playbook there`,
     );
@@ -245,6 +270,8 @@ function carryOver(extra: PlaybookMeta): PlaybookMeta {
 
 function writeAtomic(abs: string, text: string, priv: boolean): void {
   mkdirSync(dirname(abs), { recursive: true, ...(priv ? { mode: 0o700 } : {}) });
+  // mkdir's mode applies only to a folder it creates: an existing private folder is tightened
+  if (priv && (statSync(dirname(abs)).mode & 0o077) !== 0) chmodSync(dirname(abs), 0o700);
   // A random name opened with `wx` (never follows a link, never reuses a file): a planted
   // symlink at a guessable tmp name must not lead the write to a file outside the project.
   const tmp = `${abs}.${randomBytes(6).toString("hex")}.tmp`;
@@ -539,10 +566,13 @@ function fileOf(row: PlaybookRow): PlaybookFile {
 /**
  * Which folder holds `name`. The private one wins when a name exists in both: that file is the
  * user's own, while a committed file of the same name can arrive with any pull and must not
- * replace what a person wrote for themselves. `shadowedBy` tells callers about the loser.
+ * replace what a person wrote for themselves. `shadowedBy` tells callers about the loser. A file
+ * in the private folder that git tracks is not the user's own (it came with the repo): it never
+ * counts, so it neither wins nor lists as private.
  */
 function locate(ctx: ProjectContext, name: string): boolean | undefined {
-  if (lstatSync(absOf(ctx, name, true), { throwIfNoEntry: false })) return true;
+  if (lstatSync(absOf(ctx, name, true), { throwIfNoEntry: false }) && !isTrackedPrivate(ctx, name))
+    return true;
   if (lstatSync(absOf(ctx, name, false), { throwIfNoEntry: false })) return false;
   return undefined;
 }
@@ -595,12 +625,17 @@ export interface ReconcileSummary {
   removed: number;
   /** Files that are not valid names, are links, or repeat a name held by another folder. */
   skipped: string[];
+  /**
+   * Files in the private folder that git tracks: not imported (they came with the repo, so they
+   * are neither private nor the user's own). Also listed in `skipped`.
+   */
+  tracked: string[];
 }
 
 /** Bring the database in line with the files: cheap (a stat per file) and safe to call often. */
 export function reconcile(ctx: ProjectContext, db: StorageAdapter): ReconcileSummary {
   assertFolders(ctx);
-  const out: ReconcileSummary = { files: 0, synced: 0, removed: 0, skipped: [] };
+  const out: ReconcileSummary = { files: 0, synced: 0, removed: 0, skipped: [], tracked: [] };
   const seen = new Set<string>();
   let readable = true;
   for (const priv of [true, false]) {
@@ -619,10 +654,19 @@ export function reconcile(ctx: ProjectContext, db: StorageAdapter): ReconcileSum
       readable = false;
       continue;
     }
+    // one git call per reconcile, and only when the private folder has playbooks in it
+    const tracked = new Set(
+      priv && entries.length > 0 ? trackedPrivate(ctx).map((t) => t.toLowerCase()) : [],
+    );
     for (const f of entries) {
       // names are compared without case: on a case-insensitive disk Review-PRs.md is review-prs
       const name = f.slice(0, -3).toLowerCase();
       const relFile = `${rel}/${f}`;
+      if (tracked.has(relFile.toLowerCase())) {
+        out.tracked.push(relFile);
+        out.skipped.push(relFile);
+        continue;
+      }
       if (!isValidName(name) || seen.has(name)) {
         out.skipped.push(relFile);
         continue;
@@ -736,7 +780,7 @@ export function write(
   const abs = absOf(ctx, name, priv);
   assertInside(ctx, abs);
   if (where !== undefined && where !== priv) assertInside(ctx, absOf(ctx, name, where));
-  if (priv) ensurePrivateIgnored(ctx);
+  if (priv) ensurePrivateIgnored(ctx, name);
 
   const prev = db.playbooks.get(name);
   let extra: PlaybookMeta = {};
