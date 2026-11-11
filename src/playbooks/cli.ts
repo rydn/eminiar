@@ -35,7 +35,7 @@ const defaultIO: CliIO = {
 };
 
 export const PLAYBOOK_USAGE =
-  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR] [--model-invocable]] [--schedule] [--set k=v] | scan [--dry-run]> [--json]";
+  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR | --user] [--model-invocable] [--allow-private]] [--schedule] [--set k=v] | scan [--dry-run]> [--json]";
 
 async function storage(ctx: ProjectContext): Promise<StorageAdapter> {
   const { getStorage } = await import("../storage/index.js");
@@ -96,6 +96,8 @@ export async function playbookCommand(
       skill: { type: "boolean" },
       "model-invocable": { type: "boolean" },
       target: { type: "string" },
+      user: { type: "boolean" },
+      "allow-private": { type: "boolean" },
       "dry-run": { type: "boolean" },
     },
     allowPositionals: true,
@@ -275,8 +277,14 @@ export async function playbookCommand(
         reconcile(ctx, db);
         const n = name as string;
         if (values.skill) {
+          if (values.user && values.target !== undefined) {
+            io.err("choose one of --user and --target");
+            return 2;
+          }
           const r = exportSkill(ctx, db, n, {
             targetDir: str(values.target),
+            userScope: !!values.user,
+            allowPrivate: !!values["allow-private"],
             sideEffecting: !values["model-invocable"],
             values: parseSets(strs(values.set)),
           });
@@ -286,8 +294,15 @@ export async function playbookCommand(
               path: r.path,
               created: r.created,
               sideEffecting: r.sideEffecting,
+              escaped: r.escaped,
             });
-          else io.out(`${r.created ? "wrote" : "updated"} skill ${r.name} at ${r.path}`);
+          else {
+            io.out(`${r.created ? "wrote" : "updated"} skill ${r.name} at ${r.path}`);
+            if (r.escaped > 0)
+              io.out(
+                `escaped ${r.escaped} construct${r.escaped === 1 ? "" : "s"} Claude Code would run or substitute when the skill loads (!\`cmd\`, $ARGUMENTS, \${...})`,
+              );
+          }
           return 0;
         }
         if (scheduleFlag) {
