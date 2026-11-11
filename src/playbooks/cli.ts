@@ -3,6 +3,7 @@ import { parseArgs } from "node:util";
 import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { PlaybookParam } from "../storage/types.js";
+import { exportMarkdown, exportSkill, schedulePrompt } from "./export.js";
 import {
   fillPrompt,
   list,
@@ -33,7 +34,7 @@ const defaultIO: CliIO = {
 };
 
 export const PLAYBOOK_USAGE =
-  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | runs [name] [--limit N]> [--json]";
+  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR] [--model-invocable]] [--schedule] [--set k=v]> [--json]";
 
 async function storage(ctx: ProjectContext): Promise<StorageAdapter> {
   const { getStorage } = await import("../storage/index.js");
@@ -73,8 +74,11 @@ export async function playbookCommand(
   io: CliIO = defaultIO,
   stdin: () => Promise<string> = readStdin,
 ): Promise<number> {
+  // `--schedule` takes a value for add/edit but is a plain switch for export
+  const exporting = args[0] === "export";
+  const scheduleFlag = exporting && args.includes("--schedule");
   const { values, positionals } = parseArgs({
-    args,
+    args: exporting ? args.filter((a) => a !== "--schedule") : args,
     options: {
       json: { type: "boolean" },
       title: { type: "string" },
@@ -88,13 +92,16 @@ export async function playbookCommand(
       limit: { type: "string" },
       private: { type: "boolean" },
       replace: { type: "boolean" },
+      skill: { type: "boolean" },
+      "model-invocable": { type: "boolean" },
+      target: { type: "string" },
     },
     allowPositionals: true,
     strict: false,
   });
   const [sub = "list", name] = positionals;
   const json = !!values.json;
-  for (const o of ["title", "prompt", "file", "schedule", "note", "limit"] as const)
+  for (const o of ["title", "prompt", "file", "schedule", "note", "limit", "target"] as const)
     if (values[o] === true) {
       io.err(`--${o} needs a value`);
       return 2;
@@ -254,6 +261,47 @@ export async function playbookCommand(
               `unfilled parameters: ${[...new Set(missing)].join(", ")} (pass --set name=value)`,
             );
         }
+        return 0;
+      }
+
+      case "export": {
+        if (!needName()) return 2;
+        if (values.skill && scheduleFlag) {
+          io.err("choose one of --skill and --schedule");
+          return 2;
+        }
+        reconcile(ctx, db);
+        const n = name as string;
+        if (values.skill) {
+          const r = exportSkill(ctx, db, n, {
+            targetDir: str(values.target),
+            sideEffecting: !values["model-invocable"],
+            values: parseSets(strs(values.set)),
+          });
+          if (json)
+            emit({
+              name: r.name,
+              path: r.path,
+              created: r.created,
+              sideEffecting: r.sideEffecting,
+            });
+          else io.out(`${r.created ? "wrote" : "updated"} skill ${r.name} at ${r.path}`);
+          return 0;
+        }
+        if (scheduleFlag) {
+          const t = schedulePrompt(ctx, db, n, parseSets(strs(values.set)));
+          if (json) emit({ name: n, prompt: t });
+          else io.out(t);
+          return 0;
+        }
+        const f = read(ctx, db, n);
+        if (!f) {
+          io.err(`no playbook named "${n}"`);
+          return 1;
+        }
+        const md = exportMarkdown(f);
+        if (json) emit({ name: f.name, markdown: md });
+        else io.out(md);
         return 0;
       }
 

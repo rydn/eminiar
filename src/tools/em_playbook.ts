@@ -1,6 +1,6 @@
 import { z } from "zod";
+import { exportMarkdown, exportSkill, schedulePrompt } from "../playbooks/export.js";
 import { scan } from "../playbooks/extract.js";
-import { serializePlaybookFile } from "../playbooks/frontmatter.js";
 import {
   acceptSuggestion,
   closeRun,
@@ -46,7 +46,7 @@ function describe(f: PlaybookFile): string {
 export const emPlaybook = defineTool({
   name: "em_playbook",
   description:
-    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export; run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it for good.",
+    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export (format markdown|skill|schedule: skill writes a Claude Code SKILL.md, schedule returns text to paste into a Desktop or cloud scheduled task); run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it for good.",
   schema: {
     action: z.enum([
       "list",
@@ -85,6 +85,24 @@ export const emPlaybook = defineTool({
     id: z.number().int().optional().describe("accept/dismiss: the suggestion id"),
     dry_run: z.boolean().optional().describe("scan: report candidates without storing them"),
     confirm: z.boolean().optional().describe("delete: must be true"),
+    format: z
+      .enum(["markdown", "skill", "schedule"])
+      .optional()
+      .describe(
+        "export: markdown (default; returns the file), skill (writes <target>/<name>/SKILL.md), schedule (returns text for a Desktop or cloud scheduled task)",
+      ),
+    target: z
+      .string()
+      .optional()
+      .describe(
+        "export skill: directory for the skill folder (default .claude/skills in the project)",
+      ),
+    side_effecting: z
+      .boolean()
+      .optional()
+      .describe(
+        "export skill: the task changes things outside the repo; true (default) keeps the model from starting it on its own",
+      ),
   },
   handler: async (args, ctx) => {
     const db = getStorage(ctx);
@@ -109,16 +127,22 @@ export const emPlaybook = defineTool({
           return text(describe(f));
         }
         case "export": {
-          const f = read(ctx, db, need(args.name, "name"));
-          if (!f) return errorResult(`no playbook named "${args.name}"`);
-          const meta: Record<string, string | string[]> = {
-            name: f.name,
-            title: f.title,
-            tags: f.tags,
-          };
-          if (f.params.length) meta.params = paramItems(f);
-          if (f.schedule) meta.schedule = f.schedule;
-          return text(serializePlaybookFile(meta, `\n${f.prompt}\n`));
+          const name = need(args.name, "name");
+          const format = args.format ?? "markdown";
+          if (format === "skill") {
+            const r = exportSkill(ctx, db, name, {
+              targetDir: args.target,
+              sideEffecting: args.side_effecting,
+              values: args.values,
+            });
+            return text(
+              `${r.created ? "wrote" : "updated"} skill ${r.name} at ${r.path}${r.sideEffecting ? " (disable-model-invocation: only you can start it)" : ""}`,
+            );
+          }
+          if (format === "schedule") return text(schedulePrompt(ctx, db, name, args.values));
+          const f = read(ctx, db, name);
+          if (!f) return errorResult(`no playbook named "${name}"`);
+          return text(exportMarkdown(f));
         }
         case "add": {
           const r = write(ctx, db, {

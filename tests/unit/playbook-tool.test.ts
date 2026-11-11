@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -116,6 +116,55 @@ describe("em_playbook", () => {
     expect(s.text).toContain("every weekday 9am");
     await call({ action: "add", name: "plain", title: "Plain", prompt: "do it" });
     expect((await call({ action: "schedule", name: "plain" })).err).toBe(true);
+  });
+
+  it("export format skill writes SKILL.md in the project, schedule returns paste-ready text", async () => {
+    const root = ctx.root;
+    const md = await call({ action: "export", name: "pr-review", format: "markdown" });
+    expect(md.text).toContain("title: Review all PRs");
+    const sk = await call({ action: "export", name: "pr-review", format: "skill" });
+    expect(sk.err).toBe(false);
+    const path = join(root, ".claude", "skills", "pr-review", "SKILL.md");
+    expect(sk.text).toContain(path);
+    expect(existsSync(path)).toBe(true);
+    const body = readFileSync(path, "utf8");
+    expect(body).toContain("name: pr-review");
+    expect(body).toContain("disable-model-invocation: true");
+    // a second export replaces eminiar's own file; model-invocable drops the flag
+    const again = await call({
+      action: "export",
+      name: "pr-review",
+      format: "skill",
+      side_effecting: false,
+    });
+    expect(again.text).toContain("updated skill");
+    expect(readFileSync(path, "utf8")).not.toContain("disable-model-invocation");
+    // a custom target inside the project, and one that escapes it
+    const custom = await call({
+      action: "export",
+      name: "pr-review",
+      format: "skill",
+      target: "out/skills",
+    });
+    expect(custom.err).toBe(false);
+    expect(existsSync(join(root, "out", "skills", "pr-review", "SKILL.md"))).toBe(true);
+    expect(
+      (await call({ action: "export", name: "pr-review", format: "skill", target: "../escape" }))
+        .err,
+    ).toBe(true);
+    const sch = await call({
+      action: "export",
+      name: "pr-review",
+      format: "schedule",
+      values: { repo: "rydn/eminiar" },
+    });
+    expect(sch.err).toBe(false);
+    expect(sch.text).toContain("Scheduled task: Review all PRs");
+    expect(sch.text).toContain("Suggested schedule: every weekday 9am");
+    expect(sch.text).toContain("rydn/eminiar");
+    expect((await call({ action: "export", name: "ghost", format: "skill" })).err).toBe(true);
+    expect((await call({ action: "export", name: "ghost", format: "schedule" })).err).toBe(true);
+    expect((await call({ action: "export", name: "ghost" })).err).toBe(true);
   });
 
   it("errors on missing inputs and unknown names; delete needs confirm", async () => {

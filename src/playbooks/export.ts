@@ -13,7 +13,7 @@ import { redactSecrets } from "../adjudicator/redact.js";
 import type { ProjectContext } from "../context.js";
 import { within } from "../docs/manifest.js";
 import type { StorageAdapter } from "../storage/adapter.js";
-import { oneLine } from "./frontmatter.js";
+import { oneLine, serializePlaybookFile } from "./frontmatter.js";
 import { fillPrompt, type PlaybookFile, read } from "./store.js";
 
 /**
@@ -224,4 +224,19 @@ export function schedulePrompt(
   if (file.schedule) lines.push(`Suggested schedule: ${mask(oneLine(file.schedule))}`);
   lines.push("", mask(fillPrompt(file, values)).trim(), "");
   return lines.join("\n");
+}
+
+/** The playbook as its own markdown file (front matter and prompt), for copying elsewhere. */
+export function exportMarkdown(file: PlaybookFile): string {
+  const meta: Record<string, string | string[]> = {
+    name: file.name,
+    title: file.title,
+    tags: file.tags,
+  };
+  if (file.params.length)
+    meta.params = file.params.map((p) =>
+      p.default === undefined ? p.name : `${p.name}=${p.default}`,
+    );
+  if (file.schedule) meta.schedule = file.schedule;
+  return serializePlaybookFile(meta, `\n${file.prompt}\n`);
 }

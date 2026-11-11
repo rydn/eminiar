@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -37,6 +37,8 @@ afterAll(() => {
 beforeEach(() => {
   rmSync(join(root, ".eminiar"), { recursive: true, force: true });
   rmSync(join(root, ".gitignore"), { force: true });
+  rmSync(join(root, ".claude"), { recursive: true, force: true });
+  rmSync(join(root, "elsewhere"), { recursive: true, force: true });
   getStorage(ctx).playbooks.purgeActivity();
 });
 
@@ -118,6 +120,46 @@ describe("eminiar playbook", () => {
     expect((await run(["runs", "--limit", "1"])).out.split("\n")).toHaveLength(1);
     expect((await run(["run", "ghost"])).code).toBe(1);
     expect((await run(["run", "r", "--set", "bad"])).code).toBe(1);
+  });
+
+  it("export prints markdown by default, writes a skill with --skill, prints a schedule prompt with --schedule", async () => {
+    await run([
+      "add",
+      "x1",
+      "--title",
+      "Check CI",
+      "--prompt",
+      "Look at {{repo}} CI",
+      "--schedule",
+      "daily 8am",
+    ]);
+    const md = await run(["export", "x1"]);
+    expect(md.code).toBe(0);
+    expect(md.out).toContain("title: Check CI");
+    const sk = await run(["export", "x1", "--skill", "--set", "repo=rydn/eminiar"]);
+    expect(sk.code).toBe(0);
+    const path = join(root, ".claude", "skills", "x1", "SKILL.md");
+    expect(sk.out).toContain(path);
+    expect(readFileSync(path, "utf8")).toContain("Look at rydn/eminiar CI");
+    expect(readFileSync(path, "utf8")).toContain("disable-model-invocation: true");
+    expect((await run(["export", "x1", "--skill", "--model-invocable"])).out).toContain("updated");
+    expect(readFileSync(path, "utf8")).not.toContain("disable-model-invocation");
+    const custom = await run(["export", "x1", "--skill", "--target", "elsewhere", "--json"]);
+    expect(JSON.parse(custom.out)).toMatchObject({ name: "x1", created: true });
+    expect(existsSync(join(root, "elsewhere", "x1", "SKILL.md"))).toBe(true);
+    // --schedule is a switch here, even before the name
+    const sch = await run(["export", "--schedule", "x1"]);
+    expect(sch.code).toBe(0);
+    expect(sch.out).toContain("Scheduled task: Check CI");
+    expect(sch.out).toContain("Suggested schedule: daily 8am");
+    expect(JSON.parse((await run(["export", "x1", "--schedule", "--json"])).out).prompt).toContain(
+      "Look at {{repo}} CI",
+    );
+    expect((await run(["export", "x1", "--skill", "--schedule"])).code).toBe(2);
+    expect((await run(["export"])).code).toBe(2);
+    expect((await run(["export", "ghost"])).code).toBe(1);
+    expect((await run(["export", "ghost", "--skill"])).code).toBe(1);
+    expect((await run(["export", "x1", "--skill", "--target", "../out"])).code).toBe(1);
   });
 
   it("validates usage", async () => {
