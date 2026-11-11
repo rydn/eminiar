@@ -36,6 +36,13 @@ const EMBED_BATCH = 256;
 /** Give the event loop a turn after this many items, or this many comparisons. */
 const YIELD_ITEMS = 64;
 const YIELD_COMPARES = 20_000;
+/** The store keeps at most this much evidence (MAX_NOTE in store.ts). */
+const MAX_EVIDENCE = 500;
+/** A suggestion's evidence keeps the cluster's most common words and short ids of its prompts. */
+const PROFILE_WORDS = 8;
+const ID_LEN = 8;
+/** Past suggestions embedded again per scan in embeddings mode, newest first. */
+const MAX_PAST_EMBED = 1000;
 
 const STOP = new Set(
   "a an and are as at be but by can could do for from has have how i if in into is it its just me my of on or our please should so that the their them then there these this to up us was we what when where which will with would you your let lets now also any all some".split(
@@ -270,37 +277,50 @@ function unit(v: Float32Array): Float32Array {
   return out;
 }
 
+/** Unit vectors of `texts` (identical texts share one), or undefined when the model fails. */
+async function embedTexts(
+  p: EmbeddingProvider,
+  texts: string[],
+): Promise<Map<string, Float32Array> | undefined> {
+  const distinct = [...new Set(texts)];
+  const byText = new Map<string, Float32Array>();
+  for (let at = 0; at < distinct.length; at += EMBED_BATCH) {
+    const batch = distinct.slice(at, at + EMBED_BATCH);
+    const vecs = await p.embed(batch, "passage");
+    if (vecs.length !== batch.length) return undefined;
+    batch.forEach((t, i) => {
+      const v = vecs[i];
+      if (v) byText.set(t, unit(v));
+    });
+    await nextTurn();
+  }
+  return byText;
+}
+
 async function embedAll(
   items: Item[],
   opt: ScanOptions,
   ctx: ProjectContext,
-): Promise<"embeddings" | "lexical"> {
-  if (opt.embeddings === false || !items.length) return "lexical";
+): Promise<{ mode: "embeddings" | "lexical"; provider?: EmbeddingProvider }> {
+  if (opt.embeddings === false || !items.length) return { mode: "lexical" };
   try {
     const p = opt.embeddings ?? (await getProvider(ctx.config));
-    if (!p) return "lexical";
+    if (!p) return { mode: "lexical" };
     if (!p.ready()) {
       p.warm();
-      return "lexical";
+      return { mode: "lexical" };
     }
     // Identical prompts share one vector: a recurring task is the same text again and again.
-    const texts = [...new Set(items.map((i) => i.text))];
-    const byText = new Map<string, Float32Array>();
-    for (let at = 0; at < texts.length; at += EMBED_BATCH) {
-      const batch = texts.slice(at, at + EMBED_BATCH);
-      const vecs = await p.embed(batch, "passage");
-      if (vecs.length !== batch.length) return "lexical";
-      batch.forEach((t, i) => {
-        const v = vecs[i];
-        if (v) byText.set(t, unit(v));
-      });
-      await nextTurn();
-    }
+    const byText = await embedTexts(
+      p,
+      items.map((i) => i.text),
+    );
+    if (!byText) return { mode: "lexical" };
     for (const it of items) it.vec = byText.get(it.text);
-    return "embeddings";
+    return { mode: "embeddings", provider: p };
   } catch {
     for (const it of items) it.vec = undefined;
-    return "lexical";
+    return { mode: "lexical" };
   }
 }
 
@@ -379,6 +399,10 @@ function topTokens(members: Item[], n: number): string[] {
 interface Mined {
   cand: Candidate;
   members: Item[];
+  /** The member whose prompt is the candidate's. */
+  rep: Item;
+  /** The cluster's most common words among its evidence. */
+  words: string[];
 }
 
 /** The calendar day of `ts` in `timeZone` (default: the machine's), as a sortable string. */
@@ -428,6 +452,11 @@ function toCandidate(members: Item[], dayOf: (ts: number) => string): Mined | un
       tags: servers,
     },
     members,
+    rep,
+    // only words most of the evidence shares: a stray prompt's own words are not the task's
+    words: topTokens(evidence, PROFILE_WORDS).filter(
+      (t) => 2 * (freq.get(t) ?? 0) > evidence.length,
+    ),
   };
 }
 
@@ -465,58 +494,157 @@ function parseTags(tags: string | null): string[] {
   }
 }
 
+const WORDS_RE = /; words: ([a-z0-9 -]+?)(?:;|$)/;
+const IDS_RE = new RegExp(`; ids:((?: [0-9a-f]{${ID_LEN}})+)`);
+
+const shortId = (text: string): string => playbookFingerprint(text).slice(0, ID_LEN);
+
 /**
- * What was proposed before, in terms that do not move when a cluster grows, a word changes or
- * the clustering switches between words and embeddings: the signature, the fingerprint of the
- * prompt, and the prompt's words with the servers it was suggested for.
+ * What a suggestion keeps of its whole cluster, bounded by the store's evidence limit: the
+ * signature, the most common words and short ids of the member prompts (most frequent first),
+ * so the task is recognised after those prompts have left the scan window.
+ */
+function identityOf(m: Mined): { ids: string[]; evidence: string } {
+  const { cand } = m;
+  const count = new Map<string, { n: number; ts: number }>();
+  for (const it of m.members) {
+    const c = count.get(it.text);
+    if (c) c.n++;
+    else count.set(it.text, { n: 1, ts: it.ts });
+  }
+  const order = [...count.entries()].sort(
+    (a, b) => b[1].n - a[1].n || a[1].ts - b[1].ts || (a[0] < b[0] ? -1 : 1),
+  );
+  let evidence = `sig:${cand.signature} seen in ${cand.sessions} sessions on ${cand.days} days; servers: ${cand.servers.join(", ")}`;
+  if (m.words.length) evidence += `; words: ${m.words.join(" ")}`;
+  const ids: string[] = [];
+  let tail = "; ids:";
+  for (const id of new Set([shortId(m.rep.text), ...order.map(([t]) => shortId(t))])) {
+    if (evidence.length + tail.length + 1 + ID_LEN > MAX_EVIDENCE) break;
+    tail += ` ${id}`;
+    ids.push(id);
+  }
+  if (ids.length) evidence += tail;
+  return { ids, evidence };
+}
+
+interface Past {
+  servers: Set<string>;
+  /** The suggested prompt's words, and the cluster's most common words when they were kept. */
+  words: Array<Set<string>>;
+  vec?: Float32Array | undefined;
+}
+
+/**
+ * What was proposed before, in terms that do not move when a cluster grows, a word changes, the
+ * old prompts leave the scan window or the clustering switches between words and embeddings: the
+ * signature, the fingerprints of the prompts, their words with the servers they were suggested
+ * for and, in embeddings mode, the suggested prompts embedded again.
  */
 class Known {
   private readonly sigs = new Set<string>();
   private readonly fps = new Set<string>();
-  private readonly past: Array<{ tokens: Set<string>; servers: Set<string> }> = [];
+  private readonly ids = new Set<string>();
+  private readonly past: Past[] = [];
+  /** Past prompts, newest suggestion first, for embedding. */
+  private readonly prompts: Array<{ prompt: string; past: Past }> = [];
 
   constructor(rows: PlaybookSuggestionRow[]) {
-    for (const r of rows) {
-      const m = SIG_RE.exec(r.evidence ?? "");
+    for (const r of [...rows].sort((a, b) => b.id - a.id)) {
+      const ev = r.evidence ?? "";
+      const m = SIG_RE.exec(ev);
       if (m?.[1]) this.sigs.add(m[1]);
       this.fps.add(r.fingerprint);
-      this.addPast(r.prompt, parseTags(r.tags));
+      for (const id of IDS_RE.exec(ev)?.[1]?.trim().split(" ") ?? []) this.ids.add(id);
+      const words = WORDS_RE.exec(ev)?.[1]?.trim().split(" ") ?? [];
+      const past = this.addPast(r.prompt, words, parseTags(r.tags));
+      this.prompts.push({ prompt: r.prompt, past });
     }
   }
 
-  private addPast(prompt: string, servers: string[]): void {
-    const tokens = tokenize(prompt);
-    if (tokens.size) this.past.push({ tokens, servers: new Set(servers) });
+  private addPast(prompt: string, words: string[], servers: string[]): Past {
+    const sets = [tokenize(prompt), new Set(words)].filter((s) => s.size > 0);
+    const past: Past = { servers: new Set(servers), words: sets };
+    this.past.push(past);
+    return past;
   }
 
-  /** A new cluster is known when its signature, any member's prompt, or any member's wording was proposed before. */
-  has(m: Mined): boolean {
-    if (this.sigs.has(m.cand.signature)) return true;
-    const texts = new Map<string, Set<string>>();
-    for (const it of m.members) texts.set(it.text, it.tokens);
-    const near = this.past.filter((p) => m.cand.servers.some((s) => p.servers.has(s)));
-    for (const [text, tokens] of texts) {
-      if (this.fps.has(playbookFingerprint(text))) return true;
-      for (const p of near) if (jaccard(p.tokens, tokens) >= LEXICAL_SIM) return true;
+  /**
+   * Embed the past prompts suggested for any of `servers` (the newest MAX_PAST_EMBED of them),
+   * since only those can match; a model failure leaves words and ids.
+   */
+  async embed(p: EmbeddingProvider, servers: Set<string>): Promise<void> {
+    const recent = this.prompts
+      .filter((r) => [...r.past.servers].some((s) => servers.has(s)))
+      .slice(0, MAX_PAST_EMBED);
+    if (!recent.length) return;
+    try {
+      const byText = await embedTexts(
+        p,
+        recent.map((r) => r.prompt),
+      );
+      if (byText) for (const r of recent) r.past.vec = byText.get(r.prompt);
+    } catch {
+      // keep words and ids
+    }
+  }
+
+  /** One prompt matches a past suggestion on a shared server, by text, words or vector. */
+  private matches(it: Item, near: Past[]): boolean {
+    const fp = playbookFingerprint(it.text);
+    if (this.fps.has(fp) || this.ids.has(fp.slice(0, ID_LEN))) return true;
+    for (const p of near) {
+      for (const w of p.words) if (jaccard(w, it.tokens) >= LEXICAL_SIM) return true;
+      if (it.vec && p.vec && dot(it.vec, p.vec) >= EMBED_SIM) return true;
     }
     return false;
   }
 
-  add(m: Mined): void {
+  /**
+   * A new cluster is known when its signature was proposed before, or when more than half of its
+   * prompts match a past suggestion: one stray prompt that also names an old task does not make
+   * a new task known, and a tie is new (a task hidden by mistake never shows; one proposed again
+   * by mistake is dismissed again, with this cluster's identity kept).
+   */
+  async has(m: Mined, pace: Pacer): Promise<boolean> {
+    if (this.sigs.has(m.cand.signature)) return true;
+    const near = this.past.filter((p) => m.cand.servers.some((s) => p.servers.has(s)));
+    const texts = new Map<string, { it: Item; n: number }>();
+    for (const it of m.members) {
+      const t = texts.get(it.text);
+      if (t) t.n++;
+      else texts.set(it.text, { it, n: 1 });
+    }
+    let hit = 0;
+    for (const { it, n } of texts.values()) {
+      await pace.compare(near.length + 1);
+      if (this.matches(it, near)) hit += n;
+    }
+    return 2 * hit > m.members.length;
+  }
+
+  /** Remember a suggestion made in this scan exactly as a later scan will read it back. */
+  add(m: Mined, ids: string[]): void {
     this.sigs.add(m.cand.signature);
     this.fps.add(playbookFingerprint(m.cand.prompt));
-    this.addPast(m.cand.prompt, m.cand.servers);
+    for (const id of ids) this.ids.add(id);
+    const past = this.addPast(m.cand.prompt, m.words, m.cand.servers);
+    past.vec = m.rep.vec;
   }
 }
 
 /**
  * Mine the project's history for recurring tasks and, unless `dryRun`, store each new
  * candidate as a pending suggestion. A candidate that matches an earlier suggestion (pending,
- * accepted or dismissed) is never proposed again, however its cluster has since grown or been
- * worded. The work is bounded (the most recent prompts only, see `truncated`) and the event loop
- * gets a turn between batches, so a scan does not stall the server that runs it. It checks the
- * config gate itself (store.assertCanScan: viewing and extraction, plus adding unless dryRun), so
- * a direct library call is refused exactly as the CLI, tool and dashboard refuse it.
+ * accepted or dismissed) is not proposed again, however its cluster has since grown, and also
+ * after its old prompts left the window: each suggestion keeps its cluster's words and prompt
+ * ids, and in embeddings mode a rewording the model places beside it matches too. In word mode a
+ * rewording that shares under half its words with all of those is a different task. A cluster is
+ * known only when most of its prompts match (see Known.has). The work is bounded (the most recent
+ * prompts only, see `truncated`) and the event loop gets a turn between batches, so a scan does
+ * not stall the server that runs it. It checks the config gate itself (store.assertCanScan:
+ * viewing and extraction, plus adding unless dryRun), so a direct library call is refused exactly
+ * as the CLI, tool and dashboard refuse it.
  */
 export async function scan(
   ctx: ProjectContext,
@@ -526,23 +654,30 @@ export async function scan(
   assertCanScan(ctx, { dryRun: opt.dryRun });
   const pace = new Pacer();
   const { items, skipped, truncated } = await loadItems(db, opt.since, pace);
-  const mode = await embedAll(items, opt, ctx);
+  const { mode, provider } = await embedAll(items, opt, ctx);
   const clusters = await cluster(items, mode, pace);
+  const dayOf = dayCounter(opt.timeZone);
+  const mined: Mined[] = [];
+  for (const c of clusters) {
+    const m = toCandidate(c, dayOf);
+    if (m) mined.push(m);
+  }
   const known = new Known(await allSuggestions(db));
+  if (provider && mined.length) {
+    await known.embed(provider, new Set(mined.flatMap((m) => m.cand.servers)));
+  }
   const candidates: Candidate[] = [];
   const errors: string[] = [];
   let knownCount = 0;
   let suggested = 0;
-  const dayOf = dayCounter(opt.timeZone);
-  for (const c of clusters) {
-    const mined = toCandidate(c, dayOf);
-    if (!mined) continue;
-    const { cand } = mined;
-    if (known.has(mined)) {
+  for (const m of mined) {
+    const { cand } = m;
+    if (await known.has(m, pace)) {
       knownCount++;
       continue;
     }
-    known.add(mined);
+    const { ids, evidence } = identityOf(m);
+    known.add(m, ids);
     candidates.push(cand);
     if (opt.dryRun) continue;
     try {
@@ -551,7 +686,7 @@ export async function scan(
         title: cand.title,
         prompt: cand.prompt,
         tags: cand.tags,
-        evidence: `sig:${cand.signature} seen in ${cand.sessions} sessions on ${cand.days} days; servers: ${cand.servers.join(", ")}`,
+        evidence,
       });
       if (r.created) suggested++;
       else knownCount++;
