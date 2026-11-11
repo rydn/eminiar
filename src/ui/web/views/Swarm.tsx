@@ -622,6 +622,8 @@ function RunView({
   const tasksList = useRef<SwarmTask[]>([]);
   const tasksMax = useRef(0);
   const roles = useRef<string[]>();
+  /** Decisions keyed by the server's hash: sent back each poll, the map comes only when it changed. */
+  const decisionsRef = useRef<{ hash: string | undefined; value: SwarmRunDetail["decisions"] }>();
   const status = useRef("");
   const behindRef = useRef(false);
   const busy = useRef(false);
@@ -639,6 +641,7 @@ function RunView({
           id,
           tasksSince: delta ? tasksMax.current : undefined,
           events: loaded.current ? 0 : undefined,
+          decisionsHash: decisionsRef.current?.hash,
         });
       } catch (e) {
         if (alive.current) setError((e as Error).message);
@@ -669,7 +672,15 @@ function RunView({
         lastId.current = d.events.length ? d.events[d.events.length - 1]!.id : 0;
         setEvents(d.events);
       }
-      setDetail({ ...d, tasks: tasksList.current, roles: roles.current ?? d.roles });
+      // An unchanged map is left out; an older server sends it whole with no hash (always take it).
+      if (!(d.decisionsUnchanged && decisionsRef.current))
+        decisionsRef.current = { hash: d.decisionsHash, value: d.decisions };
+      setDetail({
+        ...d,
+        tasks: tasksList.current,
+        roles: roles.current ?? d.roles,
+        decisions: decisionsRef.current?.value,
+      });
       setError(undefined);
       setRetryIn(null);
       if (was === "active" && d.run.status !== "active") {
@@ -770,6 +781,7 @@ function RunView({
   const { run } = detail;
   const live = run.status === "active";
   const runRoles = detail.roles;
+  const decisions = detail.decisions;
   const workersTotal = detail.workers.length;
   const inspected = inspect ? detail.workers.find((w) => w.agent_id === inspect) : undefined;
   const swarmDef = swarms.find((s) => s.name === run.swarm);
@@ -820,6 +832,7 @@ function RunView({
             />
           </Card>
           <Workers
+            decisions={decisions}
             workers={detail.workers}
             tasks={detail.tasks}
             roles={runRoles}
@@ -834,6 +847,7 @@ function RunView({
       </div>
 
       <TaskBoard
+        decisions={decisions}
         tasks={detail.tasks}
         workers={detail.workers}
         roles={runRoles}
@@ -863,6 +877,7 @@ function RunView({
 
       {inspected ? (
         <WorkerDrawer
+          decisions={decisions}
           worker={inspected}
           role={swarmDef?.roles.find((r) => r.role === inspected.role)}
           roles={runRoles}

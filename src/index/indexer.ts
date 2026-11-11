@@ -1,8 +1,10 @@
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import fg from "fast-glob";
+import { redactSecrets } from "../adjudicator/redact.js";
 import { chunk, hashText, type Kind, kindToContentType } from "../chunker/index.js";
 import { finalize, type RawChunk } from "../chunker/types.js";
+import { within } from "../docs/manifest.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { ContentType, Source } from "../storage/types.js";
 
@@ -31,8 +33,122 @@ export interface IndexResult {
   fallback: boolean;
 }
 
+/**
+ * Captured output: what em_execute, em_execute_file, em_batch_execute and em_fetch_and_index
+ * store. Unlike a project file or a memory, the index holds the only copy, it outlives the session
+ * and any later em_search reads it, so secrets are masked before it is chunked. What the tools
+ * show inline (small outputs, the head/tail preview) is as printed; sections they return for an
+ * intent or queries come from this masked copy.
+ */
+const CAPTURED = new Set<Source>(["exec", "batch", "url"]);
+
+/** Bump when the masking rules change enough that stored output should be masked again. */
+const CAPTURED_MASK_VERSION = "1";
+
+/** A captured document as stored: title, content, pre-cut chunks and string meta masked. */
+function maskCaptured(input: IndexInput): IndexInput {
+  const meta = input.meta
+    ? Object.fromEntries(
+        Object.entries(input.meta).map(([k, v]) => [
+          k,
+          typeof v === "string" ? redactSecrets(v) : v,
+        ]),
+      )
+    : undefined;
+  return {
+    ...input,
+    title: redactSecrets(input.title),
+    content: redactSecrets(input.content),
+    meta,
+    chunks: input.chunks?.map((c) => ({
+      ...c,
+      title: redactSecrets(c.title),
+      body: redactSecrets(c.body),
+    })),
+  };
+}
+
+/** How long one slice of the re-mask may read and mask before it writes and yields to tool calls. */
+const REMASK_SLICE_MS = 20;
+
+/**
+ * The pause after a slice that wrote. Another process waiting on the lock retries on its own
+ * schedule (every 25-50 ms by then), so a lock taken again at once would starve it; this leaves
+ * it a gap as long as the remask's longest hold.
+ */
+const REMASK_GAP_MS = 40;
+
+/** A busy database: retry after 50 ms, doubling to 2 s, and give up after this many in a row. */
+const REMASK_BUSY_TRIES = 40;
+const REMASK_BUSY_FIRST_MS = 50;
+const REMASK_BUSY_MAX_MS = 2000;
+
+/** The lock wait of the remask's own progress write (the default is 2000 ms, which stalls tool calls). */
+const REMASK_LOCK_WAIT_MS = 40;
+
+const isBusy = (err: unknown): boolean =>
+  /^SQLITE_(BUSY|LOCKED)/.test(String((err as { code?: unknown } | null)?.code ?? ""));
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => (ms > 0 ? setTimeout(resolve, ms) : setImmediate(resolve)));
+
+/** `fn`, retried with a growing pause while another process holds the database. */
+async function whenFree<T>(fn: () => T): Promise<T> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return fn();
+    } catch (err) {
+      if (!isBusy(err) || tries >= REMASK_BUSY_TRIES) throw err;
+      await sleep(Math.min(REMASK_BUSY_MAX_MS, REMASK_BUSY_FIRST_MS * 2 ** (tries - 1)));
+    }
+  }
+}
+
+/**
+ * `<CAPTURED_MASK_VERSION>:<id>`: every captured document up to that id is masked under these
+ * rules. Document ids are AUTOINCREMENT, so they are never handed out again below it.
+ */
+const CAPTURED_MASK_KEY = "captured_mask_upto";
+
+/**
+ * Mask captured output stored before it was masked (or under older rules) in place. The server
+ * runs it in its warm-up on every start: the first run goes over the whole database, and later
+ * ones only over the documents stored since, which catches output that an older eminiar still
+ * running on the same database stored unmasked meanwhile. It yields every REMASK_SLICE_MS so a
+ * tool call is never queued behind it, pauses REMASK_GAP_MS after each write so hooks get the
+ * lock, waits out a busy database (a second server starting with this one), and records where it
+ * got to after each slice, so a server stopped halfway resumes there. Hooks never run it. Returns
+ * the number of rows (chunks and document titles) that changed.
+ */
+export async function remaskCapturedOutput(db: StorageAdapter): Promise<number> {
+  const saved = db.metaGet(CAPTURED_MASK_KEY);
+  const [version, id] = (saved ?? "").split(":");
+  let afterId = version === CAPTURED_MASK_VERSION ? Number(id) || 0 : 0;
+  let pointer = saved;
+  let changed = 0;
+  const shortWait = <T>(fn: () => T): T =>
+    db.adjudicator.withLockWait ? db.adjudicator.withLockWait(REMASK_LOCK_WAIT_MS, fn) : fn();
+  for (;;) {
+    const slice = await whenFree(() =>
+      db.remaskDocuments([...CAPTURED], redactSecrets, afterId, REMASK_SLICE_MS),
+    );
+    changed += slice.changed;
+    afterId = slice.lastId;
+    // Written after the slice, not inside its transactions: a stop between the two only redoes
+    // documents that are already masked, which changes nothing.
+    const next = `${CAPTURED_MASK_VERSION}:${afterId}`;
+    if (next !== pointer) {
+      await whenFree(() => shortWait(() => db.metaSet(CAPTURED_MASK_KEY, next)));
+      pointer = next;
+    }
+    if (slice.done) return changed;
+    await sleep(slice.wrote ? REMASK_GAP_MS : 0);
+  }
+}
+
 /** Chunk + store one piece of content. Unchanged uri+content is a no-op (created=false). */
-export function indexContent(db: StorageAdapter, input: IndexInput): IndexResult {
+export function indexContent(db: StorageAdapter, raw: IndexInput): IndexResult {
+  const input = CAPTURED.has(raw.source) ? maskCaptured(raw) : raw;
   const kind =
     input.kind ??
     (input.contentType === "code" ? "code" : input.contentType === "json" ? "json" : undefined);
@@ -117,6 +233,61 @@ export interface IndexPathOptions {
         rel: string,
       ) => { content: string; title?: string | undefined; kind?: Kind | undefined } | undefined)
     | undefined;
+  /**
+   * Why a file found under the target must not be read (a Read deny rule, a symlink out of the
+   * project), or undefined. Refused files are reported in `skipped` and never opened; the
+   * target itself is the caller's to check.
+   */
+  refuse?: ((file: string) => string | undefined) | undefined;
+}
+
+/**
+ * An IndexPathOptions.refuse for paths that must stay inside `root` once symlinks are resolved
+ * (fast-glob follows them), so a committed `docs/link -> ~` cannot index the home folder. A path
+ * that cannot be resolved is left to the reader, which reports it.
+ */
+export function refuseOutside(root: string): (file: string) => string | undefined {
+  const realRoot = realpathSync.native(root);
+  return (file) => {
+    let real: string;
+    try {
+      real = realpathSync.native(file);
+    } catch {
+      return undefined;
+    }
+    return within(real, realRoot) ? undefined : "refused, it resolves outside the project";
+  };
+}
+
+/**
+ * Drop every document indexed from `file` (any source), so a file a Read rule now denies, or
+ * one that resolves outside the project, leaves the index instead of staying searchable.
+ * Returns how many documents went.
+ */
+export function forgetFile(db: StorageAdapter, file: string): number {
+  const uri = `file://${file}`;
+  let n = 0;
+  // One row per (uri, content hash); bounded so a corrupt table cannot spin.
+  for (let doc = db.findDocumentByUri(uri); doc && n < 1000; doc = db.findDocumentByUri(uri)) {
+    db.deleteDocument(doc.id);
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Drop the documents of `source` indexed from files under `dir` that no longer exist, so a
+ * deleted or renamed file stops answering searches. `seen` (files the walk just found) skips
+ * the stat for the common case.
+ */
+function pruneMissing(db: StorageAdapter, source: Source, dir: string, seen: Set<string>): void {
+  const prefix = `file://${dir.endsWith("/") ? dir : `${dir}/`}`;
+  for (const doc of db.documentsBySource(source, 1_000_000)) {
+    if (!doc.uri?.startsWith(prefix)) continue;
+    const file = doc.uri.slice("file://".length);
+    if (seen.has(file) || existsSync(file)) continue;
+    db.deleteDocument(doc.id);
+  }
 }
 
 export function indexPath(
@@ -149,6 +320,13 @@ export function indexPath(
     summary.files++;
     const rel = relative(root, file) || file;
     try {
+      const refused = opts.refuse?.(file);
+      if (refused) {
+        // Indexed before the rule existed (or by an older version): it leaves the index too.
+        forgetFile(db, file);
+        summary.skipped.push({ path: rel, reason: refused });
+        continue;
+      }
       const size = statSync(file).size;
       if (size > MAX_FILE_BYTES) {
         summary.skipped.push({ path: rel, reason: `too large (${size} bytes)` });
@@ -175,5 +353,6 @@ export function indexPath(
       summary.skipped.push({ path: rel, reason: (err as Error).message });
     }
   }
+  if (st.isDirectory()) pruneMissing(db, opts.source ?? "file", abs, new Set(files));
   return summary;
 }

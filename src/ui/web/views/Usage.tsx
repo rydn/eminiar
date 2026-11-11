@@ -88,6 +88,8 @@ interface Score {
 }
 interface Savings {
   savedTokens: number;
+  measuredTokens: number;
+  counterfactualTokens: number;
   directUsd: number;
   compoundingUsd: number;
   laterCallsPerSession: number;
@@ -821,16 +823,16 @@ export function Usage({ params }: { params: Record<string, string> }): JSX.Eleme
         <Card title="Insights" right={d.insights.insights.length}>
           <InsightList items={d.insights.insights} empty="Nothing to flag in this range" />
         </Card>
-        <Card title="eminiar savings">
+        <Card title="eminiar savings" right="estimated">
           <div class="us-savings">
             <div>
-              <div class="us-big">{usd(s.savings.directUsd)}</div>
+              <div class="us-big">≈ {usd(s.savings.directUsd)}</div>
               <div class="muted small">
-                direct · {fmt(s.savings.savedTokens)} tokens never written to cache
+                {`direct · ≈${fmt(s.savings.savedTokens)} tokens never written to cache: ≈${fmt(s.savings.measuredTokens)} measured execution output, ≈${fmt(s.savings.counterfactualTokens)} counterfactual (vs native calls)`}
               </div>
             </div>
             <div>
-              <div class="us-big">{usd(s.savings.compoundingUsd)}</div>
+              <div class="us-big">≈ {usd(s.savings.compoundingUsd)}</div>
               <div class="muted small">
                 compounding · re-read on {s.savings.laterCallsPerSession.toFixed(1)} later calls per
                 session

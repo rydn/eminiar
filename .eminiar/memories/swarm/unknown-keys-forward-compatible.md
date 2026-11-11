@@ -1,0 +1,19 @@
+---
+name: swarm/unknown-keys-forward-compatible
+kind: decision
+status: accepted
+tags: [swarm, config, enforcement, version-skew]
+related: [decision/swarm-enforcement, swarm/run-2026-11-04-fix-adjudicator-heuristic-weak, file:src/swarm/config.ts, file:src/swarm/agents.ts, file:src/swarm/hooks.ts, file:docs/swarms.md, file:tests/unit/swarm-core.test.ts, file:tests/unit/swarm-hooks.test.ts]
+created: 2026-11-08T17:34:36.613Z
+updated: 2026-11-08T17:52:42.505Z
+---
+
+swarm.yaml keys this version does not know are ignored with a note, not errors. Problem: every object in the schema was strict, and an invalid file with `enforce: true` denies every subagent (decision/swarm-enforcement). A key only a newer eminiar knows therefore switched swarms off for every older install, and with enforce denied Explore, Plan, general-purpose and the workers too. This already happened once: model_range was not written to .eminiar/swarm.yaml because the installed plugin rejected the key and would switch swarms off (swarm/run-2026-11-04-fix-adjudicator-heuristic-weak). `version: 1` cannot catch it: additive keys never bump it.
+
+Rule (src/swarm/config.ts): the nested schemas are plain z.object, so zod strips what it does not know, runs every refinement and never touches the input. unknownKeys walks the parsed YAML along the schema once and lists each unknown key with its object's known keys (top-level x-* and merge keys are part of the format). A key that is a typo of a known key there (equal ignoring case, or editDistance 1, 2 for keys of 7+ characters, the threshold search's correctTerms uses) is an ERROR with `did you mean`: `max_agent`, `disallowedTools`, `disalowed_tool`, `enforced`. A typo is invalid for its author's version too, so it is caught before it is committed. Any other unknown key goes to SwarmConfig.ignoredKeys and is shown by SessionStart, `eminiar swarm validate` (stderr, exit 0, `ignored_keys` in --json), `swarm list` / em_swarm list and the dashboard studio (warning kind `ignored-key`, never blocks a save). An invalid file reports only its errors.
+
+Agent files are held: while ignoredKeys is non-empty, planAgentSync turns every update and delete into a conflict with `held: true` unless forced (`eminiar swarm sync --force`, em_swarm sync force; force also overwrites hand-edited generated files). Creates still happen: a missing file has no newer setting to lose, and holding them left a fresh clone (or a team that does not commit .claude/agents) with no workers at all. Reason for the hold: the newer eminiar may have generated the committed agent files with the ignored settings (a permission mode, a hook), and rewriting them here would drop those settings and leave a diff that strips them. Deletes are held too, since the newer version may define roles this one cannot see. SessionStart says so (also with enabled: false, where the pruning is held); enforcement and tracking still apply.
+
+Unchanged on purpose: a wrong VALUE of a known key (count: 0, enforce: yes, allowed_agents: "Explore", effort: ultra) is still an error and still fails closed under enforce. Dropping a known key with a bad value would silently change what the file allows (a dropped disallowed_tools gives the role every tool).
+
+Known limits: an ignored key may be a restriction in the version that wrote it; this version cannot apply it, so its workers run without it (the agent files a newer version generated are kept, see above, but a file created here lacks the setting). A new key within the typo distance of an existing one (min_turns next to max_turns, min_agents, min_chars, a top-level `async` next to `sync`) reads as a typo and still fails closed on older installs, so pick new key names away from existing ones. A newer version that widens a known key's values (a new effort, topology or colour) also still fails closed on older installs; prefer a new key, or bump `version`, when that matters.

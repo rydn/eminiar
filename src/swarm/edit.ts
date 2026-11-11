@@ -119,6 +119,8 @@ export interface SwarmDocRead {
   /** The file as a draft; null when there is no file or its YAML does not parse. */
   doc: SwarmDoc | null;
   issues: ConfigIssue[];
+  /** SwarmConfig.ignoredKeys of a valid file. */
+  ignoredKeys: ConfigIssue[];
   /** Dotted paths the draft form must not edit (aliases, anchors, merge keys, x-* keys, hooks). */
   locked: string[];
 }
@@ -133,7 +135,16 @@ export function readSwarmDoc(root: string): SwarmDocRead {
   const { file, rel, exists } = swarmFile(root);
   const base = { file, rel };
   if (!exists)
-    return { ...base, state: "absent", text: null, hash: null, doc: null, issues: [], locked: [] };
+    return {
+      ...base,
+      state: "absent",
+      text: null,
+      hash: null,
+      doc: null,
+      issues: [],
+      ignoredKeys: [],
+      locked: [],
+    };
   let bytes: Buffer;
   try {
     bytes = readFileSync(file);
@@ -145,6 +156,7 @@ export function readSwarmDoc(root: string): SwarmDocRead {
       hash: null,
       doc: null,
       issues: [{ path: "", message: `cannot read ${rel}: ${(err as Error).message}` }],
+      ignoredKeys: [],
       locked: [],
     };
   }
@@ -152,9 +164,10 @@ export function readSwarmDoc(root: string): SwarmDocRead {
   const hash = createHash("sha256").update(bytes).digest("hex");
   const result = parseSwarmYaml(text, file, rel);
   const issues = result.state === "invalid" ? result.issues : [];
+  const ignoredKeys = result.state === "ok" ? result.config.ignoredKeys : [];
   const state = result.state === "ok" ? "ok" : "invalid";
   if (text.length > SWARM_FILE_MAX_CHARS)
-    return { ...base, state, text, hash, doc: null, issues, locked: [] };
+    return { ...base, state, text, hash, doc: null, issues, ignoredKeys, locked: [] };
 
   const Y = yaml();
   const parsed = Y.parseDocument(text, { uniqueKeys: true, merge: true });
@@ -171,7 +184,7 @@ export function readSwarmDoc(root: string): SwarmDocRead {
       // an alias expansion over the limit: raw mode only
     }
   }
-  return { ...base, state, text, hash, doc, issues, locked };
+  return { ...base, state, text, hash, doc, issues, ignoredKeys, locked };
 }
 
 /** Parse `text` with the real validator, and check the `enforce:` line the shell hook greps agrees. */
@@ -747,6 +760,11 @@ function applyDiff(ctx: Ctx, path: string[], oldV: unknown, newV: unknown): void
 }
 
 // --- warnings ---------------------------------------------------------------------------
+
+/** SwarmConfig.ignoredKeys as studio warnings: they never block a save. */
+export function ignoredKeyWarnings(ignoredKeys: readonly ConfigIssue[]): SwarmDocWarning[] {
+  return ignoredKeys.map((i) => ({ path: i.path, kind: "ignored-key", message: i.message }));
+}
 
 /**
  * Non-blocking notes about a draft. `prev` is the draft on disk (null: no file yet, undefined:

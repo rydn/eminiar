@@ -110,7 +110,10 @@
             "**/*.jsx",
             "**/*.mjs",
             "**/*.cjs",
+            "**/*.mts",
+            "**/*.cts",
             "**/*.py",
+            "**/*.pyi",
             "**/*.go",
             "**/*.php"
           ],
@@ -183,26 +186,14 @@
         }
       }
     },
-    "code": {
-      "default": {},
-      "type": "object",
-      "properties": {
-        "backend": {
-          "default": "tree-sitter",
-          "type": "string",
-          "enum": [
-            "tree-sitter"
-          ]
-        }
-      }
-    },
     "memories": {
       "default": {},
       "type": "object",
       "properties": {
         "dir": {
           "default": ".eminiar/memories",
-          "type": "string"
+          "type": "string",
+          "pattern": "^(?![/\\\\])(?![A-Za-z]:)(?!(?:[\\s\\S]*[/\\\\])?\\.\\.[. ]*(?:[/\\\\]|$))[^\\p{Cc}]+$"
         }
       }
     },

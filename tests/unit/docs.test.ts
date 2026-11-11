@@ -22,6 +22,8 @@ import { catalogForProvider, catalogLookup } from "../../src/docs/catalog.js";
 import { categoryInfo, docCategory } from "../../src/docs/category.js";
 import { discoverDocs, rootDomain } from "../../src/docs/discover.js";
 import {
+  clearSyncState,
+  type DocSource,
   docsTag,
   MANIFEST_MAX_BYTES,
   ManifestRefusedError,
@@ -31,17 +33,20 @@ import {
   readManifest,
   readManifestAt,
   removeSource,
+  setSyncState,
+  syncState,
   upsertSources,
 } from "../../src/docs/manifest.js";
 import { docGuesses, githubRepo, resolveProvider } from "../../src/docs/resolve.js";
 import { looksLikeSpec, specToMarkdown } from "../../src/docs/specs.js";
-import { extractLinks, scopeOf, syncSource } from "../../src/docs/sync.js";
+import { extractLinks, scopeOf, syncSource, syncSources } from "../../src/docs/sync.js";
 import { docsSourceFor, suggest } from "../../src/hooks/routing.js";
 import { indexContent } from "../../src/index/indexer.js";
 import { renderProjectBrief } from "../../src/session/brief.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import { emDocs, orphanedDocSources } from "../../src/tools/em_docs.js";
+import { emReindex } from "../../src/tools/em_graph.js";
 import { emSearch } from "../../src/tools/em_search.js";
 
 let root: string;
@@ -1167,5 +1172,319 @@ describe("manifest writes stay inside the project and never reduce a manifest (p
     const fresh = withManifest(project(), "docs/sources.json");
     upsertSources(fresh, [add]);
     expect(readManifest(fresh).sources.map((s) => s.name)).toEqual(["vitest"]);
+  });
+});
+
+describe("path sources stay inside the project", () => {
+  let proj: string;
+  let outside: string;
+  let pctx: ProjectContext;
+  let pdb: StorageAdapter;
+  const src = (name: string, path: string): DocSource => ({
+    name,
+    kind: "path",
+    path,
+    glob: ["**/*.md"],
+    addedAt: "2026-01-01T00:00:00.000Z",
+  });
+  beforeAll(() => {
+    proj = mkdtempSync(join(tmpdir(), "eminiar-path-sources-"));
+    outside = mkdtempSync(join(tmpdir(), "eminiar-path-outside-"));
+    writeFileSync(join(outside, "private.md"), "# Private\n\nNot part of the project.\n");
+    mkdirSync(join(proj, "docs"), { recursive: true });
+    mkdirSync(join(proj, ".eminiar"));
+    writeFileSync(join(proj, "package.json"), "{}");
+    writeFileSync(join(proj, "docs", "own.md"), "# Own\n\nThe project's guide.\n");
+    // Committed symlinks: one inside the source folder, one registered as a source itself.
+    symlinkSync(outside, join(proj, "docs", "home"));
+    symlinkSync(outside, join(proj, "elsewhere"));
+    pctx = getContext(proj);
+    pdb = getStorage(pctx);
+  });
+  afterAll(() => {
+    rmSync(proj, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("add refuses a path that climbs out after a folder, or names a drive", () => {
+    for (const path of ["docs/../../..", "docs/..", "C:\\Users", "\\\\host\\share"])
+      expect(() => makeSource({ name: "x", kind: "path", path }), path).toThrow(/inside/);
+    expect(makeSource({ name: "x", kind: "path", path: "docs/..hidden" }).path).toBe(
+      "docs/..hidden",
+    );
+  });
+
+  it("a committed manifest's path outside the project is dropped on read, and blocks writes", () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      writeFileSync(
+        manifestPath(pctx),
+        JSON.stringify({ version: 1, sources: [src("up", "docs/../../.."), src("abs", "/etc")] }),
+      );
+      expect(readManifest(pctx).sources).toEqual([]);
+      expect(err.mock.calls.map((a) => String(a[0])).join("")).toContain(
+        'ignoring docs source "up": its path "docs/../../.." must be inside the project',
+      );
+      expect(() => upsertSources(pctx, [{ name: "docs", kind: "path", path: "docs" }])).toThrow(
+        "2 of its sources are not valid entries (up, abs: path outside the project)",
+      );
+    } finally {
+      err.mockRestore();
+      rmSync(manifestPath(pctx));
+    }
+  });
+
+  it("a dropped entry's old pages go on sync, and em_docs remove clears it from the file", async () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const keep = { ...src("keep", "docs"), glob: ["own.md"] };
+      writeFileSync(
+        manifestPath(pctx),
+        JSON.stringify({ version: 1, sources: [src("up", "docs/../.."), keep] }),
+      );
+      // Pages an earlier version indexed for the entry.
+      indexContent(pdb, {
+        source: docsTag("up"),
+        title: "up/secret.md",
+        uri: "file:///elsewhere/secret.md",
+        content: "# Secret\n\nOutside the project.\n",
+        kind: "markdown",
+      });
+      const results = await syncSources(pctx, pdb);
+      expect(results.find((r) => r.name === "up")?.errors).toEqual([
+        "ignored: its path is outside the project; 1 earlier page(s) removed",
+      ]);
+      expect(pdb.countDocuments(docsTag("up"))).toBe(0);
+      expect(results.find((r) => r.name === "keep")?.indexed).toBe(1);
+      // The only lossy entry is the one being removed, so the write is allowed.
+      expect(removeDocSource(pctx, pdb, "up").removed).toBe(true);
+      const raw = JSON.parse(readFileSync(manifestPath(pctx), "utf8")) as {
+        sources: Array<{ name: string }>;
+      };
+      expect(raw.sources.map((x) => x.name)).toEqual(["keep"]);
+      // Another bad entry still blocks it: that write would lose it.
+      writeFileSync(
+        manifestPath(pctx),
+        JSON.stringify({ version: 1, sources: [src("up", "/a"), src("down", "/b"), keep] }),
+      );
+      expect(() => removeDocSource(pctx, pdb, "up")).toThrow(
+        "1 of its sources is not valid entries (down: path outside the project)",
+      );
+    } finally {
+      err.mockRestore();
+      rmSync(manifestPath(pctx), { force: true });
+      pdb.deleteDocumentsBySource(docsTag("keep"));
+    }
+  });
+
+  describe("entries dropped for a path outside the project", () => {
+    const state = { hash: "h", syncedAt: "2026-01-01T00:00:00.000Z" } as unknown as Parameters<
+      typeof setSyncState
+    >[2];
+    const seed = () => {
+      writeFileSync(
+        manifestPath(pctx),
+        JSON.stringify({
+          version: 1,
+          sources: [src("up", "docs/../.."), src("down", "/abs"), src("keep", "docs")],
+        }),
+      );
+      for (const name of ["up", "down"]) {
+        indexContent(pdb, {
+          source: docsTag(name),
+          title: `${name}/old.md`,
+          uri: `file:///gone/${name}.md`,
+          content: `# Old ${name}\n\nEarlier page.\n`,
+          kind: "markdown",
+        });
+        setSyncState(pdb, name, state);
+      }
+    };
+    const cleanup = () => {
+      rmSync(manifestPath(pctx), { force: true });
+      for (const n of ["up", "down", "keep"]) {
+        pdb.deleteDocumentsBySource(docsTag(n));
+        clearSyncState(pdb, n);
+      }
+    };
+
+    it("clears the stale sync state along with the pages", async () => {
+      const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        seed();
+        expect(syncState(pdb, "up")).toBeDefined();
+        await syncSources(pctx, pdb);
+        expect(pdb.countDocuments(docsTag("up"))).toBe(0);
+        expect(syncState(pdb, "up")).toBeUndefined();
+        expect(syncState(pdb, "down")).toBeUndefined();
+      } finally {
+        err.mockRestore();
+        cleanup();
+      }
+    });
+
+    it("syncing one source leaves an unrequested dropped entry untouched", async () => {
+      const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        seed();
+        const results = await syncSources(pctx, pdb, ["keep"]);
+        expect(results.map((r) => r.name)).toEqual(["keep"]);
+        expect(pdb.countDocuments(docsTag("up"))).toBe(1);
+        expect(pdb.countDocuments(docsTag("down"))).toBe(1);
+        expect(syncState(pdb, "up")).toBeDefined();
+      } finally {
+        err.mockRestore();
+        cleanup();
+      }
+    });
+
+    it("syncing a dropped entry by name gives one result, not also 'not registered'", async () => {
+      const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        seed();
+        const results = await syncSources(pctx, pdb, ["up"]);
+        expect(results.map((r) => r.name)).toEqual(["up"]);
+        expect(results[0]?.errors).toEqual([
+          "ignored: its path is outside the project; 1 earlier page(s) removed",
+        ]);
+        expect(pdb.countDocuments(docsTag("down"))).toBe(1);
+      } finally {
+        err.mockRestore();
+        cleanup();
+      }
+    });
+  });
+
+  it("sync refuses a source that resolves outside the project through a symlink", async () => {
+    // A page an earlier version indexed through the link: a refused sync removes it.
+    indexContent(pdb, {
+      source: docsTag("elsewhere"),
+      title: "elsewhere/private.md",
+      uri: `file://${join(pctx.root, "elsewhere", "private.md")}`,
+      content: "# Private\n\nNot part of the project.\n",
+      kind: "markdown",
+    });
+    expect(pdb.countDocuments(docsTag("elsewhere"))).toBe(1);
+    const r = await syncSource(pctx, pdb, src("elsewhere", "elsewhere"));
+    expect([r.pages, r.indexed, r.skipped]).toEqual([0, 0, 1]);
+    expect(r.errors).toEqual(["elsewhere: refused, it resolves outside the project"]);
+    expect(pdb.countDocuments(docsTag("elsewhere"))).toBe(0);
+    // Refused, not synced: no state is recorded for it, and an earlier one is cleared.
+    expect(syncState(pdb, "elsewhere")).toBeUndefined();
+  });
+
+  it("a Read-denied file is never indexed by a path source sync or em_reindex docs", async () => {
+    const settings = join(pctx.root, ".claude", "settings.json");
+    mkdirSync(join(pctx.root, ".claude"), { recursive: true });
+    mkdirSync(join(pctx.root, "guides"), { recursive: true });
+    writeFileSync(join(pctx.root, "guides", "open.md"), "# Open\n\nPublic guide.\n");
+    writeFileSync(join(pctx.root, "guides", "secret.md"), "# Secret\n\nhunter2 token.\n");
+    writeFileSync(
+      settings,
+      JSON.stringify({ permissions: { deny: ["Read(**/guides/secret.md)"] } }),
+    );
+    const secret = `file://${join(pctx.root, "guides", "secret.md")}`;
+    try {
+      const r = await syncSource(pctx, pdb, src("guides", "guides"));
+      expect([r.pages, r.indexed, r.skipped]).toEqual([2, 1, 1]);
+      expect(r.errors[0]).toContain("guides/secret.md: refused by permission rule");
+      expect(pdb.documentsBySource(docsTag("guides")).map((d) => d.title)).toEqual([
+        "guides/open.md",
+      ]);
+      // A denied source folder is refused whole.
+      writeFileSync(
+        settings,
+        JSON.stringify({ permissions: { deny: ["Read(**/guides)", "Read(**/guides/**)"] } }),
+      );
+      const whole = await syncSource(pctx, pdb, src("guides", "guides"));
+      expect(whole.errors[0]).toContain("guides: refused by permission rule");
+      expect(pdb.countDocuments(docsTag("guides"))).toBe(0);
+      expect(syncState(pdb, "guides")).toBeUndefined();
+      // em_reindex docs applies the same rules to the default globs.
+      writeFileSync(
+        settings,
+        JSON.stringify({ permissions: { deny: ["Read(**/guides/secret.md)"] } }),
+      );
+      await emReindex.handler({ scope: "docs" }, pctx);
+      expect(pdb.findDocumentByUri(secret)).toBeUndefined();
+      expect(pdb.findDocumentByUri(`file://${join(pctx.root, "guides", "open.md")}`)).toBeDefined();
+    } finally {
+      rmSync(settings, { force: true });
+      rmSync(join(pctx.root, "guides"), { recursive: true, force: true });
+      pdb.deleteDocumentsBySource(docsTag("guides"));
+      pdb.deleteDocumentsBySource("file");
+    }
+  });
+
+  it("sync skips files a folder source reaches through a symlink out of the project", async () => {
+    const r = await syncSource(pctx, pdb, src("docs", "docs"));
+    expect([r.pages, r.indexed, r.skipped]).toEqual([2, 1, 1]);
+    expect(r.errors).toEqual(["docs/home/private.md: refused, it resolves outside the project"]);
+    expect(pdb.documentsBySource(docsTag("docs")).map((d) => d.title)).toEqual(["docs/own.md"]);
+  });
+
+  it("em_reindex docs skips files that resolve outside the project", async () => {
+    const out = textOf(await emReindex.handler({ scope: "docs" }, pctx));
+    expect(out).toMatch(/docs: \d+ files, \d+ indexed, \d+ unchanged, 2 skipped/);
+    for (const rel of ["docs/home/private.md", "elsewhere/private.md"])
+      expect(pdb.findDocumentByUri(`file://${join(pctx.root, rel)}`), rel).toBeUndefined();
+  });
+
+  it("a project-relative Read(./.env) deny keeps .env out of a `**/.env` docs source (review repro)", async () => {
+    const settings = join(pctx.root, ".claude", "settings.json");
+    mkdirSync(join(pctx.root, ".claude"), { recursive: true });
+    writeFileSync(join(pctx.root, ".env"), "API_TOKEN=zq9xv7secretvalue\n");
+    writeFileSync(settings, JSON.stringify({ permissions: { deny: ["Read(./.env)"] } }));
+    const tag = docsTag("envs");
+    try {
+      const r = await syncSource(pctx, pdb, { ...src("envs", "."), glob: ["**/.env"] });
+      expect(r.indexed).toBe(0);
+      expect(r.errors.join("\n")).toContain(".env: refused by permission rule Read(./.env) (deny)");
+      expect(pdb.countDocuments(tag)).toBe(0);
+      expect(pdb.findDocumentByUri(`file://${join(pctx.root, ".env")}`)).toBeUndefined();
+      expect(pdb.termExists("zq9xv7secretvalue")).toBe(false);
+      expect(pdb.ftsSearch("trigram", '"zq9xv7secret"', 5)).toEqual([]);
+    } finally {
+      rmSync(settings, { force: true });
+      rmSync(join(pctx.root, ".env"), { force: true });
+      pdb.deleteDocumentsBySource(tag);
+    }
+  });
+
+  it("a file indexed before a Read rule denied it, or before it was deleted, leaves the index", async () => {
+    const settings = join(pctx.root, ".claude", "settings.json");
+    mkdirSync(join(pctx.root, ".claude"), { recursive: true });
+    mkdirSync(join(pctx.root, "notes"), { recursive: true });
+    const keep = join(pctx.root, "notes", "keep.md");
+    const later = join(pctx.root, "notes", "later.md");
+    const gone = join(pctx.root, "notes", "gone.md");
+    writeFileSync(keep, "# Keep\n\nStays.\n");
+    writeFileSync(later, "# Later\n\nDenied later.\n");
+    writeFileSync(gone, "# Gone\n\nDeleted later.\n");
+    const tag = docsTag("notes");
+    const uris = () =>
+      pdb
+        .documentsBySource(tag)
+        .map((d) => d.uri)
+        .sort();
+    try {
+      await syncSource(pctx, pdb, src("notes", "notes"));
+      expect(uris()).toEqual([`file://${gone}`, `file://${keep}`, `file://${later}`]);
+      // Denied by a form that resolves against the project root, and deleted from disk.
+      writeFileSync(settings, JSON.stringify({ permissions: { deny: ["Read(notes/later.md)"] } }));
+      rmSync(gone);
+      const r = await syncSource(pctx, pdb, src("notes", "notes"));
+      expect(r.skipped).toBe(1);
+      expect(uris()).toEqual([`file://${keep}`]);
+      // The same for em_reindex docs (source `file`): the denied file goes, the open one stays.
+      await emReindex.handler({ scope: "docs" }, pctx);
+      expect(pdb.findDocumentByUri(`file://${later}`)).toBeUndefined();
+      expect(pdb.findDocumentByUri(`file://${keep}`)).toBeDefined();
+    } finally {
+      rmSync(settings, { force: true });
+      rmSync(join(pctx.root, "notes"), { recursive: true, force: true });
+      pdb.deleteDocumentsBySource(tag);
+      pdb.deleteDocumentsBySource("file");
+    }
   });
 });

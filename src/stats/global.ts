@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { ensureDirs } from "../paths.js";
+import { ensureDirs, restrictDbFiles } from "../paths.js";
 import type { StatDelta, StatRow } from "../storage/types.js";
 
 /**
@@ -13,6 +13,7 @@ export class GlobalDb {
 
   constructor(path = ensureDirs().globalDb) {
     this.db = new Database(path, { timeout: 2000 });
+    restrictDbFiles(path);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS stats (

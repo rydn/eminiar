@@ -700,11 +700,30 @@ describe("eminiar swarm CLI", () => {
     expect(JSON.parse(init.out).sync.conflicts).toBe(1);
     writeSwarm(
       fresh,
-      "swarms:\n  s:\n    description: d\n    bogus: 1\n    agents:\n      a: { description: x }\n",
+      "swarms:\n  s:\n    description: d\n    max_agents: 0\n    agents:\n      a: { description: x }\n",
     );
     const bad = await runIn(c, "sync", "--json");
     expect(bad.code).toBe(1);
     expect(JSON.parse(bad.out).reason).toMatch(/is invalid/);
+    // keys this version does not know: missing files are created, existing ones need --force
+    const agentFile = join(fresh, ".claude", "agents", "swarm-s-a.md");
+    writeSwarm(
+      fresh,
+      "swarms:\n  s:\n    description: d\n    agents:\n      a: { description: x, background: true }\n",
+    );
+    // (init's feature files are kept: deleting them is held too)
+    expect((await runIn(c, "sync")).out).toContain("+ created .claude/agents/swarm-s-a.md");
+    const created = readFileSync(agentFile, "utf8");
+    writeSwarm(
+      fresh,
+      "swarms:\n  s:\n    description: d\n    agents:\n      a: { description: y, background: true }\n",
+    );
+    const held = await runIn(c, "sync");
+    expect(held.code).toBe(1);
+    expect(held.out).toContain("kept: .eminiar/swarm.yaml has keys this eminiar version");
+    expect(readFileSync(agentFile, "utf8")).toBe(created);
+    expect((await runIn(c, "sync", "--force")).code).toBe(0);
+    expect(readFileSync(agentFile, "utf8")).not.toBe(created);
     resetSwarmConfigCache();
   });
 
@@ -719,6 +738,18 @@ describe("eminiar swarm CLI", () => {
     expect(bad.err).toMatch(/^\.eminiar\/swarm\.yaml:4 swarms\.s\.topology: /);
     const js = await run("validate", "--json");
     expect(JSON.parse(js.out).state).toBe("invalid");
+    // a key from a newer eminiar is a warning: validation passes and names it
+    writeSwarm(root, YAML.replace("count: 2", "count: 2\n        retry_policy: plan"));
+    const newer = await run("validate");
+    expect(newer.code).toBe(0);
+    expect(newer.out).toMatch(/^ok: /);
+    expect(newer.err).toMatch(
+      /^\.eminiar\/swarm\.yaml:\d+ swarms\.feat\.agents\.coder: unknown key "retry_policy" ignored: not a setting/,
+    );
+    expect(JSON.parse((await run("validate", "--json")).out).ignored_keys).toEqual([
+      expect.objectContaining({ path: "swarms.feat.agents.coder" }),
+    ]);
+    expect((await run("list")).out).toContain('unknown key "retry_policy" ignored');
     writeSwarm(root, YAML);
   });
 

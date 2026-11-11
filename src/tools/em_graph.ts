@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { refuseUnreadable } from "../docs/sync.js";
 import { getProvider } from "../embeddings/provider.js";
 import { embedPending } from "../embeddings/queue.js";
 import { formatEdges, formatHits, nodeLabel } from "../graph/format.js";
@@ -434,13 +435,19 @@ export const emReindex = defineTool({
       );
     }
     if (scope === "docs" || scope === "all") {
-      const s = indexPath(db, ctx.root, ".", { source: "file", globs: ctx.config.index.docs });
-      lines.push(`docs: ${s.files} files, ${s.indexed} indexed, ${s.unchanged} unchanged`);
+      const s = indexPath(db, ctx.root, ".", {
+        source: "file",
+        globs: ctx.config.index.docs,
+        refuse: refuseUnreadable(ctx),
+      });
+      lines.push(
+        `docs: ${s.files} files, ${s.indexed} indexed, ${s.unchanged} unchanged${s.skipped.length ? `, ${s.skipped.length} skipped` : ""}`,
+      );
     }
     if (scope === "memories" || scope === "all") {
       const s = reconcile(ctx, db);
       lines.push(
-        `memories: ${s.files} files, ${s.synced} synced, ${s.removed} removed${s.migrated ? `, ${s.migrated} migrated from the database into files` : ""}${s.skipped.length ? `, ${s.skipped.length} skipped (invalid name, e.g. ${s.skipped[0]})` : ""}`,
+        `memories: ${s.files} files, ${s.synced} synced, ${s.removed} removed${s.migrated ? `, ${s.migrated} migrated from the database into files` : ""}${s.skipped.length ? `, ${s.skipped.length} skipped (invalid name or outside the project, e.g. ${s.skipped[0]})` : ""}`,
       );
     }
     if (scope === "embeddings" || scope === "all") {

@@ -90,7 +90,8 @@ export type SwarmDocWarningKind =
   | "active-run"
   | "enforce"
   | "disable"
-  | "prompt";
+  | "prompt"
+  | "ignored-key";
 
 /** A non-blocking note about a draft; `path` is a dotted path like an issue's. */
 export interface SwarmDocWarning {

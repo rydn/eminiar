@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -173,11 +173,43 @@ describe("renderStatusline", () => {
     writeConfig({ budgets: { sessionUsd: 0.5 } });
   });
 
+  it("records under the session's project_dir after Claude cd's into a nested repo", () => {
+    const sub = join(root, "sub");
+    mkdirSync(join(sub, ".git"), { recursive: true });
+    dropRenderCache();
+    renderStatusline(
+      JSON.stringify(
+        statusline({
+          session_id: "sl-cd",
+          cwd: sub,
+          workspace: { current_dir: sub, project_dir: root },
+        }),
+      ),
+    );
+    expect(db.statuslineSnapshots({ sessionId: "sl-cd" })).toHaveLength(1);
+    expect(existsSync(getContext(sub).dbPath)).toBe(false);
+  });
+
   it("renders the base line when the input carries no usage figures", () => {
     dropRenderCache();
     const line = renderStatusline(JSON.stringify({ session_id: "sl-bare", cwd: root }));
     expect(line).toMatch(/% efficient$/);
     expect(db.statuslineSnapshots({ sessionId: "sl-bare" })).toHaveLength(0);
+  });
+
+  it("shows the session's saved tokens as estimates with the measured part", () => {
+    // em_execute 40000 → 2000 chars: ≈9.5k measured; em_search 8000 → 800: ≈1.8k counterfactual
+    db.statRecord("sl-saved", "em_execute", {
+      rawChars: 40_000,
+      returnedChars: 2_000,
+      durationMs: 1,
+    });
+    db.statRecord("sl-saved", "em_search", { rawChars: 8_000, returnedChars: 800, durationMs: 1 });
+    dropRenderCache();
+    const line = renderStatusline(JSON.stringify({ session_id: "sl-saved", cwd: root }));
+    expect(line).toMatch(
+      /^eminiar · ≈11\.3k saved \(≈9\.5k measured\) · ≈\S+ lifetime · 94% efficient$/,
+    );
   });
 });
 

@@ -11,9 +11,11 @@ export type RoutingMode = z.infer<typeof RoutingMode>;
 /**
  * A relative path that stays inside the folder it is joined to: not empty, no leading `/` or
  * `\`, no drive letter, no `..` segment (either separator), no control character (`\p{Cc}`: NUL, newline,
- * ...). Lexical only: symlinks are checked where the path is used (src/docs/manifest.ts). The
- * `..` lookahead reads `[\s\S]` so a line break could never hide a segment from it, and it also
- * refuses `.. ` / `...` segments, which Windows trims to `..` (trailing dots and spaces).
+ * ...). Lexical only: symlinks are checked where the path is used (the docs manifest in
+ * src/docs/manifest.ts, docs path sources by refuseOutside in src/index/indexer.ts, memory files
+ * in reconcile in src/memory/store.ts). The `..` lookahead reads `[\s\S]` so a line break could
+ * never hide a segment from it, and it also refuses `.. ` / `...` segments, which Windows trims
+ * to `..` (trailing dots and spaces).
  */
 export const PROJECT_RELATIVE_PATH_RE =
   /^(?![/\\])(?![A-Za-z]:)(?!(?:[\s\S]*[/\\])?\.\.[. ]*(?:[/\\]|$))[^\p{Cc}]+$/u;
@@ -268,6 +270,35 @@ export function adjudicatorDefaults(): AdjudicatorConfig {
 }
 
 /** Everything but the adjudicator section; loadConfig parses this alone while it is untouched. */
+/**
+ * Why a graph include/exclude glob is refused, or undefined when it is fine. The patterns reach
+ * micromatch, whose regexes backtrack exponentially in the number of `*` groups inside one path
+ * segment (`**\/*a*a*a*a*a*a*a*a*b.ts` froze a server for a minute on a 40 character file name),
+ * and a committed eminiar.config.json is untrusted. Bounds: 200 characters, 4 braces, 2 extglob
+ * groups, 3 wildcard groups per segment and 8 per pattern; the defaults use at most 2.
+ */
+export function graphGlobProblem(g: string): string | undefined {
+  if (g.length > 200) return "longer than 200 characters";
+  if ((g.match(/\{/g)?.length ?? 0) > 4) return "more than 4 braces";
+  if ((g.match(/\(/g)?.length ?? 0) > 2) return "more than 2 extglob groups";
+  let total = 0;
+  for (const seg of g.split(/[\\/]/)) {
+    const groups = seg.match(/\*+|\?/g)?.length ?? 0;
+    if (groups > 3) return "more than 3 wildcards in one path segment";
+    total += groups;
+  }
+  return total > 8 ? "more than 8 wildcards" : undefined;
+}
+
+const GraphGlob = z.string().superRefine((g, ctx) => {
+  const why = graphGlobProblem(g);
+  if (why)
+    ctx.addIssue({
+      code: "custom",
+      message: `graph glob ${JSON.stringify(g.slice(0, 40))} is ${why}`,
+    });
+});
+
 const BaseConfigSchema = z.object({
   routing: z
     .object({
@@ -312,7 +343,7 @@ const BaseConfigSchema = z.object({
   graph: z
     .object({
       include: z
-        .array(z.string())
+        .array(GraphGlob)
         .default([
           "**/*.ts",
           "**/*.tsx",
@@ -320,12 +351,15 @@ const BaseConfigSchema = z.object({
           "**/*.jsx",
           "**/*.mjs",
           "**/*.cjs",
+          "**/*.mts",
+          "**/*.cts",
           "**/*.py",
+          "**/*.pyi",
           "**/*.go",
           "**/*.php",
         ]),
       exclude: z
-        .array(z.string())
+        .array(GraphGlob)
         .default([
           "**/node_modules/**",
           "**/dist/**",
@@ -360,16 +394,16 @@ const BaseConfigSchema = z.object({
       extraDeny: z.array(z.string()).default([]),
     })
     .prefault({}),
-  code: z
-    .object({
-      /** Symbol backend for parsing and references; tree-sitter ships in the box. */
-      backend: z.enum(["tree-sitter"]).default("tree-sitter"),
-    })
-    .prefault({}),
   memories: z
     .object({
-      /** Project-relative directory of markdown memory files (`<topic>/<name>.md`); commit it. */
-      dir: z.string().default(".eminiar/memories"),
+      /**
+       * Project-relative directory of markdown memory files (`<topic>/<name>.md`); commit it.
+       * Absolute paths and `..` segments are refused: reconcile repairs the headers of files there.
+       */
+      dir: z
+        .string()
+        .regex(PROJECT_RELATIVE_PATH_RE, "must be a path inside the project (no leading / or ..)")
+        .default(".eminiar/memories"),
     })
     .prefault({}),
   recall: z
@@ -576,6 +610,73 @@ function deepMerge(
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Lists that add up across layers instead of replacing: the default, then each layer's entries
+ * in order, without repeats. They only ever skip or refuse more, so a project file can add a
+ * deny rule, a disabled language or an exclude, but cannot take back a personal one.
+ * NEGATABLE_LISTS also take `"!<entry>"`, which removes that entry from the built-in defaults
+ * only (e.g. `"!**\/vendor/**"` to index vendored code), never another entry a config file
+ * listed; the security lists do not. A personal entry that merely repeats a built-in default
+ * does not count as personal for this: older installs froze the whole default list into the
+ * personal file, so a "!" still removes it.
+ */
+export const ADDITIVE_LISTS: readonly (readonly [string, string])[] = [
+  ["permissions", "extraDeny"],
+  ["sandbox", "disabledLanguages"],
+  ["graph", "exclude"],
+];
+const NEGATABLE_LISTS: ReadonlySet<string> = new Set(["graph.exclude"]);
+
+let listDefaults: Record<string, unknown> | undefined;
+
+/** The schema default of an ADDITIVE_LISTS entry; parsed once, only when a layer sets one. */
+function defaultList(section: string, key: string): unknown[] {
+  listDefaults ??= BaseConfigSchema.parse({}) as Record<string, unknown>;
+  const v = (listDefaults[section] as Record<string, unknown> | undefined)?.[key];
+  return Array.isArray(v) ? v : [];
+}
+
+/**
+ * deepMerge of the layers in order, except that ADDITIVE_LISTS are combined. When a layer holds
+ * something other than a list there, that value is what the merge keeps, even under a later
+ * layer's list, so the schema refuses it and loadConfig drops that layer with a note; a later
+ * list must not quietly replace the defaults. A section that is not an object is left as merged.
+ */
+function mergeLayers(layers: Record<string, unknown>[]): Record<string, unknown> {
+  let out: Record<string, unknown> = {};
+  for (const l of layers) out = deepMerge(out, l);
+  for (const [section, key] of ADDITIVE_LISTS) {
+    const lists: unknown[] = [];
+    for (const l of layers) {
+      const s = l[section];
+      if (isPlainObject(s) && Object.hasOwn(s, key)) lists.push(s[key]);
+    }
+    if (!lists.length || !isPlainObject(out[section])) continue;
+    const bad = lists.findIndex((l) => !Array.isArray(l));
+    if (bad >= 0) {
+      out[section] = { ...out[section], [key]: lists[bad] };
+      continue;
+    }
+    const negatable = NEGATABLE_LISTS.has(`${section}.${key}`);
+    const defaults = defaultList(section, key);
+    const acc: unknown[] = [...defaults];
+    // A "!" removes only a built-in default, so a project file cannot undo a personal entry of
+    // its own. A personal entry equal to a default is not protected: every older install wrote
+    // the whole default list into ~/.eminiar/config.json (frozenDefaults), and those copies
+    // cannot be told apart from a deliberate one.
+    for (const list of lists as unknown[][])
+      for (const e of list) {
+        if (negatable && typeof e === "string" && e.startsWith("!")) {
+          const target = e.slice(1);
+          const i = acc.indexOf(target);
+          if (i >= 0 && defaults.includes(target)) acc.splice(i, 1);
+        } else if (!acc.includes(e)) acc.push(e);
+      }
+    out[section] = { ...(out[section] as Record<string, unknown>), [key]: acc };
+  }
+  return out;
 }
 
 function envOverrides(): Record<string, unknown> {
@@ -865,7 +966,7 @@ export function personalConfigProblem(
 /**
  * The project layer with its adjudicator section cut down to what projectKeeps allows. A section
  * holding a key-like field stays whole instead, so the schema's secret check still refuses it
- * (the whole config falls back to defaults, the adjudicator off) rather than dropping it quietly.
+ * (loadConfig ignores the whole project file, with a stderr note) rather than dropping it quietly.
  */
 function projectLayer(raw: Record<string, unknown>): Record<string, unknown> {
   const adj = raw.adjudicator;
@@ -876,26 +977,34 @@ function projectLayer(raw: Record<string, unknown>): Record<string, unknown> {
   return { ...(ownJson(raw) as Record<string, unknown>), adjudicator: kept };
 }
 
+/** Paths joined to the project root and written through, as [section, key]. */
+const PROJECT_PATH_KEYS = [
+  ["docs", "manifest"],
+  ["memories", "dir"],
+] as const;
+
 /**
- * A config layer without a docs.manifest that could leave the project (absolute, `..`, not a
- * string): em_docs rewrites that file, so a cloned repo must not aim it at ../settings.json, and a
- * bad personal value must not cost the rest of the personal config. Only that key is dropped, so
- * the next layer's or the default value applies and everything else stays. `source` names the
- * file in the stderr note. The real guard stays at write time (src/docs/manifest.ts).
+ * A config layer without a PROJECT_PATH_KEYS value that could leave the project (absolute, `..`,
+ * not a string): em_docs rewrites the docs manifest and reconcile repairs memory file headers,
+ * so a cloned repo must not aim them at ../settings.json or ~, and a bad personal value must not
+ * cost the rest of the personal config. Only that key is dropped, so the next layer's or the
+ * default value applies and everything else stays. `source` names the file in the stderr note.
+ * The real guard for the manifest stays at write time (src/docs/manifest.ts).
  */
-function withoutUnsafeDocsManifest(
-  raw: Record<string, unknown>,
-  source: string,
-): Record<string, unknown> {
-  const docs = raw.docs;
-  if (!isPlainObject(docs) || !Object.hasOwn(docs, "manifest")) return raw;
-  const m = docs.manifest;
-  if (typeof m === "string" && PROJECT_RELATIVE_PATH_RE.test(m)) return raw;
-  process.stderr.write(
-    `eminiar: ignoring docs.manifest ${JSON.stringify(m)} in ${source}: it must be a path inside the project\n`,
-  );
-  const { manifest: _dropped, ...rest } = ownJson(docs) as Record<string, unknown>;
-  return { ...(ownJson(raw) as Record<string, unknown>), docs: rest };
+function withoutUnsafePaths(raw: Record<string, unknown>, source: string): Record<string, unknown> {
+  let out = raw;
+  for (const [section, key] of PROJECT_PATH_KEYS) {
+    const sec = out[section];
+    if (!isPlainObject(sec) || !Object.hasOwn(sec, key)) continue;
+    const v = sec[key];
+    if (typeof v === "string" && PROJECT_RELATIVE_PATH_RE.test(v)) continue;
+    process.stderr.write(
+      `eminiar: ignoring ${section}.${key} ${JSON.stringify(v)} in ${source}: it must be a path inside the project\n`,
+    );
+    const { [key]: _dropped, ...rest } = ownJson(sec) as Record<string, unknown>;
+    out = { ...(ownJson(out) as Record<string, unknown>), [section]: rest };
+  }
+  return out;
 }
 
 /**
@@ -910,29 +1019,96 @@ function personalLayer(projectRoot: string): Record<string, unknown> {
     !droppedProjectAdjudicatorKeys(raw).length || personalConfigTrusted(projectRoot, file)
       ? raw
       : projectLayer(raw);
-  return withoutUnsafeDocsManifest(layer, file);
+  return withoutUnsafePaths(layer, file);
 }
 
 /**
  * Precedence: defaults < ~/.eminiar/config.json < <root>/eminiar.config.json < EMINIAR_* env.
- * The project file is the one teams commit.
+ * The project file is the one teams commit. ADDITIVE_LISTS add up instead (mergeLayers).
+ * Keys the schema does not know are dropped by the parse, so they never make a layer invalid.
  */
 export function loadConfig(projectRoot: string): Config {
-  const merged = deepMerge(
-    deepMerge(
-      personalLayer(projectRoot),
-      withoutUnsafeDocsManifest(
-        projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
-        "eminiar.config.json",
-      ),
+  const layers = [
+    personalLayer(projectRoot),
+    withoutUnsafePaths(
+      projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
+      "eminiar.config.json",
     ),
     envOverrides(),
-  );
-  // zod reads inherited properties: hand it a plain own-key copy, never the merged object.
-  const parsed = parseConfig(ownJson(merged) as Record<string, unknown>);
+  ];
+  const parsed = parseLayers(layers);
   if (parsed.success) return parsed.data;
+  // A value the schema refuses costs only the layer that holds it: a bad recall.maxMemories in
+  // one file must not reset the other file's routing.mode. Each layer is checked on its own
+  // (over the defaults) and the invalid ones are left out. The rest are then merged in order;
+  // a layer that is valid alone but not on top of the earlier ones (e.g. more than 64
+  // adjudicator.weights.features once its keys join the personal ones) loses only the fields the
+  // schema names, or the whole layer when that is not enough. An earlier layer is never blamed.
+  const sources = [paths().configFile, "eminiar.config.json", "EMINIAR_* environment"];
+  const acc: Record<string, unknown>[] = [];
+  layers.forEach((layer, i) => {
+    const alone = parseLayers([layer]);
+    if (!alone.success) {
+      process.stderr.write(
+        `eminiar: invalid config in ${sources[i]}, ignoring it: ${alone.error.message}\n`,
+      );
+      return;
+    }
+    const merged = parseLayers([...acc, layer]);
+    if (merged.success) {
+      acc.push(layer);
+      return;
+    }
+    const issuePaths = merged.error.issues.map((is) => is.path.map(String));
+    const trimmed = withoutPaths(layer, issuePaths);
+    if (trimmed && parseLayers([...acc, trimmed.layer]).success) {
+      acc.push(trimmed.layer);
+      process.stderr.write(
+        `eminiar: ignoring ${trimmed.removed.join(", ")} in ${sources[i]}: invalid together with the earlier config: ${merged.error.message}\n`,
+      );
+      return;
+    }
+    process.stderr.write(
+      `eminiar: invalid config in ${sources[i]} together with the earlier config, ignoring it: ${merged.error.message}\n`,
+    );
+  });
+  const retry = parseLayers(acc);
+  if (retry.success) return retry.data;
   process.stderr.write(`eminiar: invalid config, using defaults: ${parsed.error.message}\n`);
   return { ...BaseConfigSchema.parse({}), adjudicator: adjudicatorDefaults() };
+}
+
+/**
+ * `layer` without the deepest key it holds on each issue path (dotted names in `removed`), or
+ * undefined when it holds none of them, so the caller drops the whole layer instead.
+ */
+function withoutPaths(
+  layer: Record<string, unknown>,
+  issuePaths: string[][],
+): { layer: Record<string, unknown>; removed: string[] } | undefined {
+  const out = ownJson(layer) as Record<string, unknown>;
+  const removed: string[] = [];
+  for (const p of issuePaths) {
+    let node: Record<string, unknown> = out;
+    let depth = 0;
+    for (; depth < p.length - 1; depth++) {
+      const next = node[p[depth] as string];
+      if (!Object.hasOwn(node, p[depth] as string) || !isPlainObject(next)) break;
+      node = next;
+    }
+    const key = p[depth];
+    if (key === undefined || !Object.hasOwn(node, key)) return undefined;
+    delete node[key];
+    const name = p.slice(0, depth + 1).join(".");
+    if (!removed.includes(name)) removed.push(name);
+  }
+  return removed.length ? { layer: out, removed } : undefined;
+}
+
+/** parseConfig of the merged layers. */
+function parseLayers(layers: Record<string, unknown>[]) {
+  // zod reads inherited properties: hand it a plain own-key copy, never the merged object.
+  return parseConfig(ownJson(mergeLayers(layers)) as Record<string, unknown>);
 }
 
 /**

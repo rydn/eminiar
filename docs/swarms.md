@@ -25,7 +25,7 @@ You can opt in three ways:
 
 - run `eminiar swarm init`. It writes a starter file with two swarms (`feature` and `review`)
   and generates their agent files;
-- click "Create starter swarm.yaml" on the Swarms tab of the dashboard (`eminiar ui`);
+- click "Create from the starter" on the Swarms tab of the dashboard (`eminiar ui`);
 - write the file yourself, using the reference below.
 
 Commit `.eminiar/swarm.yaml` so your team shares the swarms. The generated agent files in
@@ -113,10 +113,24 @@ swarms:
         prompt: Find correctness bugs, each with a concrete failing input.
 ```
 
-Unknown keys are errors, so a typo is reported instead of ignored. Each error names its YAML
-path and line, for example `.eminiar/swarm.yaml:23 swarms.feature.agents.coder.count`. Check the
-file with `eminiar swarm validate`. While the file is invalid, swarms stay off and sync changes
-nothing.
+Each error names its YAML path and line, for example
+`.eminiar/swarm.yaml:23 swarms.feature.agents.coder.count`. Check the file with
+`eminiar swarm validate`. While the file is invalid, swarms stay off and sync changes nothing.
+
+**Keys from a newer eminiar.** A key this version does not know is ignored, not an error, so a
+file a teammate wrote for a newer eminiar keeps working here, and `enforce: true` keeps enforcing
+instead of denying every subagent. `eminiar swarm validate` and `eminiar swarm list` name each
+ignored key, and session start and the dashboard show them too. While a file has ignored keys,
+sync creates missing agent files but neither rewrites nor deletes existing generated ones: the
+newer eminiar may have generated them with those settings, and rewriting them would drop the
+settings. `eminiar swarm sync --force` writes them anyway (it also overwrites generated files
+that were edited by hand). An ignored key has no effect here: if a newer eminiar uses it to
+restrict a worker, the agent files this version creates do not carry that restriction.
+
+A typo is still an error: an unknown key that differs from a key known at that place only in
+case, or by one edit (two for keys of 7 or more characters), such as `max_agent`,
+`disallowedTools` or `enforced`, is reported with the key it is close to. A known key with a
+wrong value is always an error.
 
 ### Top level
 
@@ -216,7 +230,7 @@ swarm or a role; the most specific value wins.
 | `history` | `true` | Bug-prone files among the task's files (or in the role's scope), each with its fix count and last fix, plus the project's history lesson |
 | `structure` | `true` | The project brief |
 | `insights` | `true` | Hot files (fan-in × churn) among the task's files or in the role's scope |
-| `max_chars` | `4000` | Size budget of the brief, 500 to 20000 characters |
+| `max_chars` | `4000` | Size budget of the brief, 500 to 9000 characters |
 
 ### Role hooks
 
@@ -423,12 +437,13 @@ it. Projects without `enforce: true` are never affected.
 | No swarm file, `enforce` off, or `enabled: false` | Not enforced |
 | Valid file with `enforce: true` | Enforced |
 | Invalid file that sets `enforce: true` (including YAML that does not parse) | Every subagent is denied until the file is fixed |
+| Valid file with `enforce: true` and keys this version does not know | Enforced; the keys are ignored |
 | Swarm file unreadable | Not enforced (no evidence of opt-in); session start warns |
 | Loading the config throws | Denied if the raw file says `enforce: true`, otherwise allowed |
 | Database error while checking a swarm worker | Denied (a busy database gets a retry message) |
 | The hook throws elsewhere | Denied if the raw file says `enforce: true` |
 | No Node.js or no installed copy (`bin/em-hook` shim) | Denied if the raw file says `enforce: true` |
-| Hook timeout (5 s) or a crash while loading | **Not covered: the spawn goes ahead** |
+| Hook timeout (5 s for the plugin's hook, 10 s for the entry `eminiar install` writes into settings) or a crash while loading | **Not covered: the spawn goes ahead** |
 
 The last row is an open gap. Claude Code treats a hook that times out or cannot start as a
 non-blocking error. For a hard guarantee, add your own entry to the project's

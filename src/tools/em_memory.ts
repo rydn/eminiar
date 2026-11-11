@@ -79,7 +79,7 @@ export const emMemory = defineTool({
           });
           if (!rows.length)
             return text(
-              `no memories${args.topic ? ` under ${args.topic}/` : ""}${args.kind ? ` of kind ${args.kind}` : ""} in ${memoriesDir(ctx)}; em_remember writes them${summary.skipped.length ? ` (${summary.skipped.length} file(s) skipped for invalid names, e.g. ${summary.skipped[0]})` : ""}`,
+              `no memories${args.topic ? ` under ${args.topic}/` : ""}${args.kind ? ` of kind ${args.kind}` : ""} in ${memoriesDir(ctx)}; em_remember writes them${summary.skipped.length ? ` (${summary.skipped.length} file(s) skipped for invalid names or symlinks out of the project, e.g. ${summary.skipped[0]})` : ""}`,
             );
           return text(rows.map(memoryLine).join("\n"));
         }

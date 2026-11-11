@@ -7,7 +7,7 @@ import { getContext, type ProjectContext, resetContextCache } from "../../src/co
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import type { ApiCallRow, ToolUseRow } from "../../src/storage/types.js";
-import { emStats } from "../../src/tools/em_stats.js";
+import { emStats, SAVINGS_LEGEND } from "../../src/tools/em_stats.js";
 import {
   type BlocksPayload,
   CSV_VIEWS,
@@ -336,7 +336,10 @@ describe("em_usage views", () => {
       /active block: started \d{2}:\d{2}:\d{2} UTC · 3 calls · \$[\d.]+ · \$[\d.]+\/h/,
     );
     expect(out).toContain("insights:");
-    expect(out).toContain("eminiar savings: 9.5k tokens");
+    // estimated (≈) and split: the one stat row is em_execute, so all of it is measured
+    expect(out).toContain(
+      "eminiar savings: ≈9.5k tokens kept out of context (≈9.5k measured, ≈0 counterfactual) ≈ $",
+    );
     expect(out).toContain("without a bundled price");
   });
 
@@ -517,9 +520,13 @@ describe("em_usage views", () => {
 
   it("savings prices eminiar's stat rows all-time, or only sessions active in the window", async () => {
     const out = text(await emUsage.handler({ view: "savings" }, ctx));
-    expect(out).toMatch(/^eminiar savings: 9\.5k tokens kept out of context/);
-    expect(out).toMatch(/\n {2}direct {6}\$[\d.]+ {2}\(never written to cache/);
-    expect(out).toMatch(/\n {2}compounding \$[\d.]+ {2}\(never re-read/);
+    expect(out).toMatch(
+      /^eminiar savings: ≈9\.5k tokens kept out of context \(estimated, 4 characters per token\)/,
+    );
+    expect(out).toMatch(/\n {2}measured {7}≈9\.5k {2}\(execution output/);
+    expect(out).toMatch(/\n {2}counterfactual ≈0 {2}\(what native Read, Grep or git calls/);
+    expect(out).toMatch(/\n {2}direct {9}≈ \$[\d.]+ {2}\(never written to cache/);
+    expect(out).toMatch(/\n {2}compounding {4}≈ \$[\d.]+ {2}\(never re-read/);
     expect(out).toContain("    - All-time: every stat row of the project is counted.");
     const all = JSON.parse(
       text(await emUsage.handler({ view: "savings", json: true }, ctx)),
@@ -582,7 +589,7 @@ describe("em_usage views", () => {
       turns: /^turns \(session sess-a\): 5 calls/,
       tools: /^tool results in context \(9\.1k est\. tokens total\)/,
       insights: /^insights \(\d+\):\n {2}\[(info|warn|high)\]/,
-      savings: /^eminiar savings: 9\.5k tokens/,
+      savings: /^eminiar savings: ≈9\.5k tokens/,
     };
     for (const view of USAGE_VIEWS)
       expect(renderUsage(view, usageView(ctx, view, data)), view).toMatch(heads[view]);
@@ -646,6 +653,19 @@ describe("em_usage views", () => {
   it("em_stats ends with a usage line that points at em_usage", async () => {
     const out = text(await emStats.handler({ scope: "session" }, ctx));
     expect(out).toMatch(/\nusage: today \$[\d.,]+ · session \$[\d.,]+ · see em_usage$/);
+  });
+
+  it("em_stats labels the session's savings as estimates, split by kind, with the legend", async () => {
+    const out = text(await emStats.handler({ scope: "session" }, ctx));
+    // sess-a's stat row: em_execute 40000 → 2000 chars, ≈9.5k tokens kept out (measured)
+    expect(out).toMatch(
+      /^session sess-a: \d+ call\(s\), ≈[\d.]+k tokens saved of ≈[\d.]+k seen \(\d+% efficient, estimated\)$/m,
+    );
+    expect(out).toMatch(
+      /^ {2}measured ≈9\.5k \(execution output kept out\) · counterfactual ≈\S+ \(vs native calls\)$/m,
+    );
+    expect(out).toMatch(/^ {2}em_execute +measured +1 /m);
+    expect(out).toContain(SAVINGS_LEGEND);
   });
 });
 

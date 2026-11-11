@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { getContext, type ProjectContext } from "../context.js";
+import { getContext, type ProjectContext, sessionContext } from "../context.js";
 import { hookLog } from "../hooks/log.js";
 import type { HookHandler, HookInput, HookOutput } from "../hooks/types.js";
-import { findProjectRoot, resolveProjectRoot } from "../project.js";
+import { resolveProjectRoot, sessionRoot } from "../project.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import { roleHasEmTool, syncAgents } from "./agents.js";
@@ -141,23 +141,6 @@ function configFor(local: string, main: string, agentType?: string): SwarmConfig
 }
 
 /**
- * This session's project root: CLAUDE_PROJECT_DIR (Claude Code sets it per hook command for
- * THIS session), then EMINIAR_PROJECT_ROOT (inherited by nested `claude` processes started
- * from Bash, so it must not win), then the process cwd. Unlike resolveProjectRoot, which the
- * MCP server uses, the hook order puts the per-session variable first.
- */
-function sessionRoot(): string {
-  const root = findProjectRoot(
-    process.env.CLAUDE_PROJECT_DIR || process.env.EMINIAR_PROJECT_ROOT || process.cwd(),
-  );
-  try {
-    return realpathSync(root);
-  } catch {
-    return root;
-  }
-}
-
-/**
  * The project roots a swarm hook tries, in order: the session's project root (sessionRoot),
  * then the hook's own. The cwd drifts when the coordinator's shell cd's into a nested
  * repository or package, and its root then stops short of the workspace's swarm.yaml. Pure fs,
@@ -180,14 +163,8 @@ function orderedRoots(hookRoot: string | undefined): string[] {
  * checkout of a worktree). No getContext, no database: safe after a handler threw.
  */
 export function swarmRoots(input: Pick<HookInput, "cwd">): string[] {
-  let hook: string | undefined;
-  try {
-    hook = resolveProjectRoot(input.cwd || undefined);
-  } catch {
-    // fall back to the session root alone
-  }
   const out: string[] = [];
-  for (const r of orderedRoots(hook)) {
+  for (const r of orderedRoots(hookRootOf(input))) {
     for (const d of [r, coordinationRoot(r)]) if (!out.includes(d)) out.push(d);
   }
   return out;
@@ -212,10 +189,27 @@ function enforcementRoots(): string[] {
   }
 }
 
-/** The project contexts a swarm hook should try, in the order of swarmRoots. */
-export function swarmRootCandidates(ctx: ProjectContext): ProjectContext[] {
+/** The project root of the hook's cwd (where Claude is); undefined when it cannot be resolved. */
+function hookRootOf(input: Pick<HookInput, "cwd">): string | undefined {
+  try {
+    return resolveProjectRoot(input.cwd || undefined);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The project contexts a swarm hook should try, in the order of swarmRoots. `ctx` is the hook's
+ * own (sessionContext: the session root's) and is reused when its root comes up; the cwd's
+ * root is added from `input` here, so a caller passes the one context it has and the cwd
+ * fallback cannot be lost on the way.
+ */
+export function swarmRootCandidates(
+  ctx: ProjectContext,
+  input: Pick<HookInput, "cwd">,
+): ProjectContext[] {
   const out: ProjectContext[] = [];
-  for (const r of orderedRoots(ctx.root)) {
+  for (const r of orderedRoots(hookRootOf(input))) {
     if (r === ctx.root) {
       out.push(ctx);
       continue;
@@ -229,8 +223,12 @@ export function swarmRootCandidates(ctx: ProjectContext): ProjectContext[] {
   return out;
 }
 
-function swarmScope(hookCtx: ProjectContext, agentType?: string): SwarmScope | undefined {
-  for (const ctx of swarmRootCandidates(hookCtx)) {
+function swarmScope(
+  hookCtx: ProjectContext,
+  input: Pick<HookInput, "cwd">,
+  agentType?: string,
+): SwarmScope | undefined {
+  for (const ctx of swarmRootCandidates(hookCtx, input)) {
     const main = coordinationRoot(ctx.root);
     const config = configFor(ctx.root, main, agentType);
     if (!config) continue;
@@ -267,7 +265,7 @@ export function swarmPreAgent(ctx: ProjectContext, input: HookInput): SwarmSpawn
   if (!isSwarmAgentType(agentType)) return undefined;
   let scope: SwarmScope | undefined;
   try {
-    scope = swarmScope(ctx, agentType);
+    scope = swarmScope(ctx, input, agentType);
   } catch (err) {
     return fail("preAgent", err);
   }
@@ -591,7 +589,7 @@ function isBusy(err: unknown): boolean {
 export function swarmTouch(ctx: ProjectContext, input: HookInput): void {
   if (!input.agent_id || !isSwarmAgentType(input.agent_type)) return;
   try {
-    const s = swarmScope(ctx, input.agent_type);
+    const s = swarmScope(ctx, input, input.agent_type);
     if (s) touchWorker(s.db, input.agent_id);
   } catch (err) {
     fail("touch", err);
@@ -669,7 +667,7 @@ export function swarmAgentReturned(ctx: ProjectContext, input: HookInput): void 
   const agentType = spawnType(input);
   if (!isSwarmAgentType(agentType) || !input.tool_use_id) return;
   try {
-    const s = swarmScope(ctx, agentType);
+    const s = swarmScope(ctx, input, agentType);
     if (s) releaseSpawn(s.db, input.tool_use_id);
   } catch (err) {
     fail("agentReturned", err);
@@ -680,7 +678,7 @@ export function swarmAgentReturned(ctx: ProjectContext, input: HookInput): void 
 export function swarmSessionEnd(ctx: ProjectContext, input: HookInput): void {
   if (!input.session_id) return;
   try {
-    const s = swarmScope(ctx);
+    const s = swarmScope(ctx, input);
     if (s) closeSessionWorkers(s.db, input.session_id);
   } catch (err) {
     fail("sessionEnd", err);
@@ -703,7 +701,7 @@ export async function swarmSubagentStart(
   if (!isSwarmAgentType(agentType) || !input.agent_id) return undefined;
   let s: SwarmScope | undefined;
   try {
-    s = swarmScope(ctx, agentType);
+    s = swarmScope(ctx, input, agentType);
   } catch (err) {
     return fail("subagentStart", err);
   }
@@ -769,7 +767,7 @@ function fallbackBrief(role: string, swarm: string, runId?: string): string {
 export const subagentStart: HookHandler = async (input) => {
   if (!isSwarmAgentType(input.agent_type) || !input.agent_id) return undefined;
   try {
-    return await swarmSubagentStart(getContext(input.cwd), input);
+    return await swarmSubagentStart(sessionContext(input.cwd), input);
   } catch (err) {
     return fail("subagentStart", err);
   }
@@ -782,7 +780,7 @@ export function swarmActivity(ctx: ProjectContext, input: HookInput, failed: boo
   const agentType = input.agent_type;
   if (!isSwarmAgentType(agentType) || !input.agent_id || !input.tool_name) return;
   try {
-    const s = swarmScope(ctx, agentType);
+    const s = swarmScope(ctx, input, agentType);
     if (!s) return;
     recordActivity(s.db, s.config, s.root, {
       agentId: input.agent_id,
@@ -803,7 +801,7 @@ export function swarmSubagentStop(ctx: ProjectContext, input: HookInput): void {
   const agentType = input.agent_type;
   if (!isSwarmAgentType(agentType) || !input.agent_id) return;
   try {
-    const s = swarmScope(ctx, agentType);
+    const s = swarmScope(ctx, input, agentType);
     if (!s) return;
     closeWorker(s.db, s.config, {
       agentId: input.agent_id,
@@ -896,9 +894,17 @@ function sessionStartAt(ctx: ProjectContext, sessionId?: string): string | undef
           ? `Agent files were regenerated (${sync.changed} changed); if Claude Code does not list them yet, run /agents or restart.`
           : `${sync.changed} agent file(s) are out of date (sync: manual); run \`eminiar swarm sync\`.`,
       );
-    if (sync.conflicts)
+    const held = sync.actions.filter((a) => a.held).length;
+    if (config.ignoredKeys.length)
       out.push(
-        `${sync.conflicts} agent file(s) in .claude/agents were left alone (hand-written, or generated and then edited); \`eminiar swarm sync --dry-run\` explains.`,
+        clip(
+          `${config.rel}: ${config.ignoredKeys.length} unknown key(s) ignored (first: ${issueWhere(config.ignoredKeys)}); generated agent files of the roles those keys belong to are not rewritten unless an update only tightens them (\`eminiar swarm sync --force\` does). \`eminiar swarm validate\` lists the keys.`,
+          400,
+        ),
+      );
+    if (sync.conflicts > held)
+      out.push(
+        `${sync.conflicts - held} agent file(s) in .claude/agents were left alone (hand-written, or generated and then edited); \`eminiar swarm sync --dry-run\` explains.`,
       );
     const mctx = main === local ? ctx : getContext(main);
     const db = getStorage(mctx, { vectors: false });

@@ -165,6 +165,10 @@ describe("history and graph context before a read or an edit", () => {
 });
 
 describe("git history commands route to em_history", () => {
+  beforeAll(() => {
+    // em_history reads the root's repository, so routing sends history there only inside one
+    spawnSync("git", ["init", "-q"], { cwd: root });
+  });
   it("maps log, blame, show and shortlog forms to the matching em_history call", () => {
     const call = (cmd: string) => suggest("Bash", { command: cmd }, root);
     expect(call("git log --oneline -30")?.tool).toBe("em_history");
@@ -190,7 +194,8 @@ describe("git history commands route to em_history", () => {
       '{action:"timeline", author:"ryan"}',
     );
     expect(call("cd src && git log -5")?.tool).toBe("em_history");
-    expect(call("git -C /tmp/other --no-pager log -5")?.tool).toBe("em_history");
+    // another repository: em_history reads only this one
+    expect(call("git -C /tmp/other --no-pager log -5")).toBeUndefined();
   });
   it("leaves one-commit lookups and file prints alone", () => {
     const call = (cmd: string) => suggest("Bash", { command: cmd }, root);
