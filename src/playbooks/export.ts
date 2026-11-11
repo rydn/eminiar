@@ -1,13 +1,15 @@
 import { execFileSync } from "node:child_process";
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -314,13 +316,50 @@ export function exportSkill(
     created = false;
   }
   mkdirSync(dir, { recursive: true });
-  if (dirname(realpathSync.native(dir)) !== realpathSync.native(target))
-    throw new Error(`refusing to write into ${dir}: it resolves outside the target directory`);
-  const tmp = `${path}.${process.pid}.tmp`;
+  // A concurrent writer may swap a path component for a symlink between the checks above and the
+  // write. So: resolve the directory once, require the result to sit inside the project (not only
+  // below the target), write through that resolved name, and re-check where the temp file and the
+  // final file really are, removing them if they left the project.
+  let realRoot = resolve(ctx.root);
   try {
-    writeFileSync(tmp, content, { flag: "wx" });
-    renameSync(tmp, path);
+    realRoot = realpathSync.native(realRoot);
+  } catch {
+    /* keep root */
+  }
+  const escapes = (p: string): boolean => {
+    try {
+      const rd = realpathSync.native(dirname(p));
+      return dirname(rd) !== realpathSync.native(target) || (inProject && !within(rd, realRoot));
+    } catch {
+      return true;
+    }
+  };
+  const outside = `refusing to write into ${dir}: it resolves outside the target directory`;
+  if (escapes(path)) throw new Error(outside);
+  const realDir = realpathSync.native(dir);
+  const rpath = join(realDir, "SKILL.md");
+  const tmp = `${rpath}.${process.pid}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, "wx");
+    if (escapes(tmp)) throw new Error(outside);
+    writeSync(fd, content);
+    closeSync(fd);
+    fd = undefined;
+    if (escapes(tmp)) throw new Error(outside);
+    renameSync(tmp, rpath);
+    if (escapes(path)) {
+      unlinkSync(rpath);
+      throw new Error(outside);
+    }
   } catch (e) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
     try {
       unlinkSync(tmp);
     } catch {
