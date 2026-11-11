@@ -1,6 +1,9 @@
 import { z } from "zod";
+import { scan } from "../playbooks/extract.js";
 import { serializePlaybookFile } from "../playbooks/frontmatter.js";
 import {
+  acceptSuggestion,
+  dismissSuggestion,
   fillPrompt,
   list,
   type PlaybookFile,
@@ -10,6 +13,7 @@ import {
   remove,
   rowParams,
   rowTags,
+  suggestions,
   write,
 } from "../playbooks/store.js";
 import { getCurrentSession } from "../session/current.js";
@@ -41,7 +45,7 @@ function describe(f: PlaybookFile): string {
 export const emPlaybook = defineTool({
   name: "em_playbook",
   description:
-    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export; run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything.",
+    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export; run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it for good.",
   schema: {
     action: z.enum([
       "list",
@@ -53,6 +57,10 @@ export const emPlaybook = defineTool({
       "report",
       "schedule",
       "export",
+      "scan",
+      "suggestions",
+      "accept",
+      "dismiss",
     ]),
     name: z
       .string()
@@ -69,6 +77,8 @@ export const emPlaybook = defineTool({
     note: z.string().optional().describe("report: what happened"),
     run_id: z.number().int().optional().describe("report: the id run returned"),
     tag: z.string().optional().describe("list: only this tag"),
+    id: z.number().int().optional().describe("accept/dismiss: the suggestion id"),
+    dry_run: z.boolean().optional().describe("scan: report candidates without storing them"),
     confirm: z.boolean().optional().describe("delete: must be true"),
   },
   handler: async (args, ctx) => {
@@ -167,6 +177,43 @@ export const emPlaybook = defineTool({
             note: note || undefined,
           });
           return text(`recorded ${args.status} for ${name} (entry ${id})`);
+        }
+        case "scan": {
+          const r = await scan(ctx, db, { dryRun: args.dry_run });
+          const head = `scanned ${r.prompts} prompts in ${r.clusters} clusters (${r.mode}): ${r.candidates.length} recurring, ${args.dry_run ? "none stored (dry run)" : `${r.suggested} new suggestions`}, ${r.known} already known`;
+          return text(
+            [
+              head,
+              ...r.candidates.map(
+                (c) =>
+                  `- ${c.title}: ${c.sessions} sessions, ${c.days} days; ${c.prompt.slice(0, 120)}`,
+              ),
+            ].join("\n"),
+          );
+        }
+        case "suggestions": {
+          const rows = suggestions(ctx, db, { status: "pending" });
+          return text(
+            rows.length
+              ? rows.map((r) => `#${r.id} ${r.name} — ${r.title}`).join("\n")
+              : 'no pending suggestions; em_playbook {action:"scan"} looks for recurring tasks',
+          );
+        }
+        case "accept": {
+          if (args.id === undefined) throw new Error("accept needs `id`");
+          const r = acceptSuggestion(ctx, db, args.id, {
+            ...(args.name ? { name: args.name } : {}),
+            ...(args.title ? { title: args.title } : {}),
+            ...(args.prompt ? { prompt: args.prompt } : {}),
+            ...(args.private !== undefined ? { private: args.private } : {}),
+          });
+          return text(`accepted: stored playbook ${r.name} in ${r.path}`);
+        }
+        case "dismiss": {
+          if (args.id === undefined) throw new Error("dismiss needs `id`");
+          return dismissSuggestion(ctx, db, args.id)
+            ? text(`dismissed suggestion ${args.id}; it will not be proposed again`)
+            : errorResult(`no pending suggestion ${args.id}`);
         }
         case "schedule": {
           const f = read(ctx, db, need(args.name, "name"));
