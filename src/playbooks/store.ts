@@ -652,6 +652,51 @@ export function recordRun(
   };
 }
 
+export interface CloseRunInput {
+  playbook: string;
+  /** The id `run` returned; without one the newest run of the playbook still started is closed. */
+  runId?: number | undefined;
+  status: PlaybookRunStatus;
+  note?: string | undefined;
+}
+
+/**
+ * Close a started run in place: its row gets the outcome, no second row is added. Rejects an
+ * unknown run (or one of another playbook), a run that is already closed, and `started` itself.
+ */
+export function closeRun(
+  ctx: ProjectContext,
+  db: StorageAdapter,
+  input: CloseRunInput,
+): { id: number } {
+  assertViewing(ctx);
+  assertValidName(input.playbook);
+  if (
+    input.status === "started" ||
+    !(PLAYBOOK_RUN_STATUSES as readonly string[]).includes(input.status)
+  )
+    throw new Error(`invalid status "${input.status}": use done | failed | skipped`);
+  if (!db.playbooks.get(input.playbook)) throw new Error(`no playbook named "${input.playbook}"`);
+  let run: PlaybookRunRow | undefined;
+  if (input.runId === undefined) {
+    run = db.playbooks
+      .runs({ playbook: input.playbook, limit: 1000 })
+      .find((r) => r.status === "started");
+    if (!run) throw new Error(`playbook ${input.playbook} has no started run to report on`);
+  } else {
+    run = db.playbooks
+      .runs({ playbook: input.playbook, limit: 1000 })
+      .find((r) => r.id === input.runId);
+    if (!run) throw new Error(`no run ${input.runId} for playbook ${input.playbook}`);
+    if (run.status !== "started")
+      throw new Error(`run ${run.id} is already ${run.status}; a closed run is not changed`);
+  }
+  const note = input.note ? mask(oneLine(input.note)).slice(0, MAX_NOTE) : undefined;
+  if (!db.playbooks.runSetStatus(run.id, input.status, note))
+    throw new Error(`run ${run.id} is already closed; a closed run is not changed`);
+  return { id: run.id };
+}
+
 export function runs(
   ctx: ProjectContext,
   db: StorageAdapter,

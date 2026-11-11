@@ -18,6 +18,7 @@ import { getContext, type ProjectContext, resetContextCache } from "../../src/co
 import { parsePlaybookFile, serializePlaybookFile } from "../../src/playbooks/frontmatter.js";
 import {
   acceptSuggestion,
+  closeRun,
   dismissSuggestion,
   fillPrompt,
   isValidName,
@@ -406,6 +407,39 @@ describe("runs", () => {
       recordRun(ctx, db, { playbook: "pr", trigger: "cli", status: "x" as never }),
     ).toThrow(/status/);
     expect(() => recordRun(ctx, db, { playbook: "nope", trigger: "cli" })).toThrow(/no playbook/);
+  });
+
+  it("closeRun updates the started row in place and never reopens or rewrites a closed one", () => {
+    write(ctx, db, { name: "cl", title: "CL", prompt: "x" });
+    const { id } = recordRun(ctx, db, { playbook: "cl", trigger: "mcp", status: "started" });
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    expect(
+      closeRun(ctx, db, { playbook: "cl", runId: id, status: "done", note: `ok ${secret}` }),
+    ).toEqual({ id });
+    const rows = runs(ctx, db, { playbook: "cl" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("done");
+    expect(rows[0]!.note).not.toContain(secret);
+    expect(() => closeRun(ctx, db, { playbook: "cl", runId: id, status: "failed" })).toThrow(
+      /already done/,
+    );
+    expect(() => closeRun(ctx, db, { playbook: "cl", runId: 9999, status: "done" })).toThrow(
+      /no run/,
+    );
+    expect(() => closeRun(ctx, db, { playbook: "cl", status: "done" })).toThrow(/no started run/);
+    expect(() => closeRun(ctx, db, { playbook: "cl", runId: id, status: "started" })).toThrow(
+      /status/,
+    );
+    // a run id of another playbook is not found under this name
+    write(ctx, db, { name: "cl2", title: "CL2", prompt: "x" });
+    const other = recordRun(ctx, db, { playbook: "cl2", trigger: "cli" }).id;
+    expect(() => closeRun(ctx, db, { playbook: "cl", runId: other, status: "done" })).toThrow(
+      /no run/,
+    );
+    // the store refuses to touch a closed run too, and keeps a note when none is given
+    expect(db.playbooks.runSetStatus(id, "failed", "x")).toBe(false);
+    expect(db.playbooks.runSetStatus(other, "skipped")).toBe(true);
+    expect(db.playbooks.runSetStatus(other, "done")).toBe(false);
   });
 });
 
