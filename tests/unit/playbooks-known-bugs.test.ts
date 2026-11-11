@@ -167,7 +167,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
   // src/ui/playbooks-api.ts /api/playbooks/save: `private: b.private === true`, so an edit
   // (replace) that leaves `private` out moves a private playbook into the committed folder. The
   // CLI and the MCP tool keep the playbook where it is.
-  it.fails("saving over a private playbook without a private flag keeps it private", async () => {
+  it("saving over a private playbook without a private flag keeps it private", async () => {
     write(ctx, db, { name: "priv", title: "P", prompt: "x", private: true });
     const r = await call(ctx, "/api/playbooks/save", {
       name: "priv",
@@ -182,7 +182,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
 
   // src/ui/playbooks-api.ts accept/dismiss: `Number(b.id)` turns null, "" and [] into 0 and
   // true into 1, so those pass the integer check.
-  it.fails("accept and dismiss reject an id that is not a number", async () => {
+  it("accept and dismiss reject an id that is not a number", async () => {
     for (const path of ["/api/playbooks/suggestion/accept", "/api/playbooks/suggestion/dismiss"])
       for (const bad of [{ id: null }, { id: "" }, { id: true }, { id: [] }])
         expect([path, JSON.stringify(bad), (await call(on(), path, bad)).status]).toEqual([
@@ -195,7 +195,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
   // src/ui/playbooks-api.ts playbooksOverview: run counts are tallied from the newest 200 runs
   // of all playbooks, so a busy playbook hides another's history. `runStats()` has the totals
   // and is not used.
-  it.fails("the dashboard run count of a playbook is its total, not its share of the newest 200 runs", async () => {
+  it("the dashboard run count of a playbook is its total, not its share of the newest 200 runs", async () => {
     write(ctx, db, { name: "old", title: "Old", prompt: "x" });
     write(ctx, db, { name: "busy", title: "Busy", prompt: "y" });
     const t = Date.now();

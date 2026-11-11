@@ -92,12 +92,8 @@ export function playbooksOverview(ctx: ProjectContext): Record<string, unknown> 
   const rec = store.reconcile(ctx, db);
   const runs = store.runs(ctx, db, { limit: 200 });
   const stats = new Map<string, { runs: number; last: number }>();
-  for (const r of runs) {
-    const s = stats.get(r.playbook) ?? { runs: 0, last: 0 };
-    s.runs++;
-    s.last = Math.max(s.last, r.ts);
-    stats.set(r.playbook, s);
-  }
+  for (const [name, s] of db.playbooks.runStats())
+    stats.set(name, { runs: s.runs, last: s.lastTs });
   return {
     ...base,
     skipped: rec.skipped,
@@ -161,6 +157,14 @@ export async function playbooksRoute(
 
     if (path === "/api/playbooks/save") {
       if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
+      const saveName = strOrUndef(b.name)?.trim();
+      // Without an explicit flag an existing playbook keeps its privacy, as the CLI and tool do.
+      const priv =
+        typeof b.private === "boolean"
+          ? b.private
+          : saveName
+            ? db.playbooks.get(saveName)?.private === 1
+            : false;
       const r = store.write(ctx, db, {
         name: strOrUndef(b.name),
         title: strOrUndef(b.title) ?? "",
@@ -168,7 +172,7 @@ export async function playbooksRoute(
         params: paramsOf(b.params),
         schedule: strOrUndef(b.schedule),
         tags: tagsOf(b.tags),
-        private: b.private === true,
+        private: priv,
         replace: b.replace === true,
       });
       return ok({ name: r.name, path: r.path, created: r.created });
@@ -193,14 +197,16 @@ export async function playbooksRoute(
     }
     if (path === "/api/playbooks/suggestion/accept") {
       if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
-      const id = Number(b.id);
-      if (!Number.isInteger(id)) return fail(400, "id must be a suggestion id");
+      const id = b.id;
+      if (typeof id !== "number" || !Number.isInteger(id) || id < 1)
+        return fail(400, "id must be a suggestion id");
       return ok(store.acceptSuggestion(ctx, db, id, { private: b.private === true }));
     }
     if (path === "/api/playbooks/suggestion/dismiss") {
       if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
-      const id = Number(b.id);
-      if (!Number.isInteger(id)) return fail(400, "id must be a suggestion id");
+      const id = b.id;
+      if (typeof id !== "number" || !Number.isInteger(id) || id < 1)
+        return fail(400, "id must be a suggestion id");
       return ok({ dismissed: store.dismissSuggestion(ctx, db, id) });
     }
     if (path === "/api/playbooks/scan") {
