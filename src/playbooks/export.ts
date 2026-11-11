@@ -1,13 +1,15 @@
 import {
   chmodSync,
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -17,7 +19,7 @@ import { within } from "../docs/manifest.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { oneLine, serializePlaybookFile } from "./frontmatter.js";
 import { gitIgnoredFor } from "./git.js";
-import { fillPrompt, type PlaybookFile, read } from "./store.js";
+import { assertAdding, fillPrompt, type PlaybookFile, read } from "./store.js";
 
 /**
  * Export a playbook as a Claude Code skill (`<dir>/<name>/SKILL.md`) and as a printable prompt
@@ -260,6 +262,7 @@ export function exportSkill(
   name: string,
   opts: ExportSkillOptions = {},
 ): ExportSkillResult {
+  assertAdding(ctx); // writes a file, so it follows the same switch as every other write
   assertSkillName(name);
   const file = read(ctx, db, name);
   if (!file) throw new Error(`no playbook named ${JSON.stringify(name)}`);
@@ -295,16 +298,53 @@ export function exportSkill(
     created = false;
   }
   mkdirSync(dir, { recursive: true });
-  if (dirname(realpathSync.native(dir)) !== realpathSync.native(target))
-    throw new Error(`refusing to write into ${dir}: it resolves outside the target directory`);
+  // A concurrent writer may swap a path component for a symlink between the checks above and the
+  // write. So: resolve the directory once, require the result to sit inside the project (not only
+  // below the target), write through that resolved name, and re-check where the temp file and the
+  // final file really are, removing them if they left the project.
+  let realRoot = resolve(ctx.root);
+  try {
+    realRoot = realpathSync.native(realRoot);
+  } catch {
+    /* keep root */
+  }
+  const escapes = (p: string): boolean => {
+    try {
+      const rd = realpathSync.native(dirname(p));
+      return dirname(rd) !== realpathSync.native(target) || (inProject && !within(rd, realRoot));
+    } catch {
+      return true;
+    }
+  };
+  const outside = `refusing to write into ${dir}: it resolves outside the target directory`;
+  if (escapes(path)) throw new Error(outside);
+  const realDir = realpathSync.native(dir);
   // A private playbook stays its owner's on disk too, as in the store: a 0700 folder (an
   // existing looser one is tightened) and a 0600 file (the rename replaces an older 0644 one).
-  if (file.private && (lstatSync(dir).mode & 0o077) !== 0) chmodSync(dir, 0o700);
-  const tmp = `${path}.${process.pid}.tmp`;
+  if (file.private && (lstatSync(realDir).mode & 0o077) !== 0) chmodSync(realDir, 0o700);
+  const rpath = join(realDir, "SKILL.md");
+  const tmp = `${rpath}.${process.pid}.tmp`;
+  let fd: number | undefined;
   try {
-    writeFileSync(tmp, content, { flag: "wx", ...(file.private ? { mode: 0o600 } : {}) });
-    renameSync(tmp, path);
+    fd = openSync(tmp, "wx", file.private ? 0o600 : 0o666);
+    if (escapes(tmp)) throw new Error(outside);
+    writeSync(fd, content);
+    closeSync(fd);
+    fd = undefined;
+    if (escapes(tmp)) throw new Error(outside);
+    renameSync(tmp, rpath);
+    if (escapes(path)) {
+      unlinkSync(rpath);
+      throw new Error(outside);
+    }
   } catch (e) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
     try {
       unlinkSync(tmp);
     } catch {

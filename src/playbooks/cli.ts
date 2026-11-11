@@ -446,7 +446,8 @@ export async function playbookCommand(
       }
 
       case "help":
-        io.out(PLAYBOOK_USAGE);
+        if (json) emit({ usage: PLAYBOOK_USAGE });
+        else io.out(PLAYBOOK_USAGE);
         return 0;
 
       default:
