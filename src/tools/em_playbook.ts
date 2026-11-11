@@ -9,12 +9,13 @@ import {
   dismissSuggestion,
   fillPrompt,
   list,
+  nowActiveNote,
   type PlaybookFile,
   PlaybookGateError,
   read,
   reconcile,
   recordRun,
-  remove,
+  removeReport,
   rowParams,
   rowTags,
   shadowedBy,
@@ -203,9 +204,13 @@ export const emPlaybook = defineTool({
         case "delete": {
           const name = need(args.name, "name");
           if (args.confirm !== true) return errorResult("delete needs confirm: true");
-          return remove(ctx, db, name)
-            ? text(`deleted playbook ${name}`)
-            : errorResult(`no playbook named "${name}"`);
+          const r = removeReport(ctx, db, name);
+          if (!r.removed) return errorResult(`no playbook named "${name}"`);
+          return text(
+            r.nowActive
+              ? `deleted the private playbook ${name}; ${nowActiveNote(r.nowActive)}`
+              : `deleted playbook ${name}`,
+          );
         }
         case "run": {
           const f = read(ctx, db, need(args.name, "name"));

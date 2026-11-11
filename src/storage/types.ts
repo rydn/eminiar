@@ -908,6 +908,11 @@ export interface PlaybookStore {
     status: PlaybookSuggestionStatus,
     playbook?: string | undefined,
   ): boolean;
+  /**
+   * Undo an accept claim: an `accepted` suggestion whose playbook is `playbook` goes back to
+   * pending. Returns false when the row is not in that state (another caller owns it now).
+   */
+  suggestionRelease(id: number, playbook: string): boolean;
 
   /** Drops the rows mirroring files (the files stay). */
   purgeMirror(): void;
