@@ -15,10 +15,11 @@ export type RoutingMode = z.infer<typeof RoutingMode>;
  * src/docs/manifest.ts, docs path sources by refuseOutside in src/index/indexer.ts, memory files
  * in reconcile in src/memory/store.ts). The `..` lookahead reads `[\s\S]` so a line break could
  * never hide a segment from it, and it also refuses `.. ` / `...` segments, which Windows trims
- * to `..` (trailing dots and spaces).
+ * to `..` (trailing dots and spaces). No leading `:` either (after any `./`): git reads one as
+ * pathspec magic (`:/x`, `:(top)x`), so a check on the folder would answer for another path.
  */
 export const PROJECT_RELATIVE_PATH_RE =
-  /^(?![/\\])(?![A-Za-z]:)(?!(?:[\s\S]*[/\\])?\.\.[. ]*(?:[/\\]|$))[^\p{Cc}]+$/u;
+  /^(?![/\\])(?![A-Za-z]:)(?!(?:\.[/\\])*:)(?!(?:[\s\S]*[/\\])?\.\.[. ]*(?:[/\\]|$))[^\p{Cc}]+$/u;
 
 /** Field names that look like they hold a credential; only `keyEnv` (an env var NAME) is allowed. */
 const SECRET_FIELD = /(api_?key|token|secret|password)/i;

@@ -1,18 +1,23 @@
 import {
-  chmodSync,
   closeSync,
   existsSync,
+  fchmodSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
+  type Stats,
+  statSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { redactSecrets } from "../adjudicator/redact.js";
 import type { ProjectContext } from "../context.js";
 import { within } from "../docs/manifest.js";
@@ -209,6 +214,10 @@ function resolveTarget(
   const root = resolve(ctx.root);
   const raw = targetDir ?? DEFAULT_SKILLS_DIR;
   if (raw.includes("\0")) throw new Error("invalid target directory");
+  // git reads a leading `:` as pathspec magic (`:/dist` is the top-level dist); git.ts already
+  // spells paths literally, and a folder named like that is refused before it gets that far
+  if (/^(?:\.[/\\])*:/.test(raw))
+    throw new Error("invalid target directory: it must not start with ':'");
   let realRoot = root;
   try {
     realRoot = realpathSync.native(root);
@@ -243,6 +252,91 @@ function assertGitIgnored(ctx: ProjectContext, path: string, name: string): void
   throw new Error(
     `refusing to export: ${why} (or git could not say). Add the folder to .gitignore, or make the playbook public; the CLI can override with --allow-private`,
   );
+}
+
+/** The same directory object (device and inode), and a real directory rather than a link. */
+const sameDir = (a: Stats | undefined, b: Stats): boolean =>
+  a?.isDirectory() === true && !a.isSymbolicLink() && a.dev === b.dev && a.ino === b.ino;
+
+/**
+ * `mkdir -p want` below `base` (both real paths, `base` an existing folder), one folder at a
+ * time. Each folder on the way must be a real directory when it is reached, and its parent the
+ * same directory object right before and right after a folder is made in it: a parent swapped for
+ * a link in between would have put the new folder somewhere else, so that is detected, the folder
+ * removed again, and the call refused. `leafMode` is the mode of the last folder when it is made.
+ * Node has no mkdirat, so this cannot rule a swap out, only detect it around each mkdir.
+ */
+function makeDirs(base: string, want: string, leafMode: number, fail: () => Error): void {
+  let cur = base;
+  let curSt = lstatSync(cur);
+  if (curSt.isSymbolicLink() || !curSt.isDirectory()) throw fail();
+  const rel = relative(base, want);
+  if (rel === "") return;
+  const parts = rel.split(sep);
+  if (isAbsolute(rel) || parts.some((p) => p === "" || p === "." || p === "..")) throw fail();
+  const parentStill = (): boolean => sameDir(lstatSync(cur, { throwIfNoEntry: false }), curSt);
+  for (const [i, part] of parts.entries()) {
+    const next = join(cur, part);
+    let st = lstatSync(next, { throwIfNoEntry: false });
+    if (!st) {
+      if (!parentStill()) throw fail();
+      let made = false;
+      try {
+        mkdirSync(next, i === parts.length - 1 ? leafMode : 0o777);
+        made = true;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
+      if (!parentStill()) {
+        if (made) {
+          try {
+            rmdirSync(next); // where the swapped link sent it, while the link is still there
+          } catch {
+            /* gone, or not empty: not ours to remove */
+          }
+        }
+        throw fail();
+      }
+      st = lstatSync(next, { throwIfNoEntry: false });
+    }
+    if (!st || st.isSymbolicLink() || !st.isDirectory() || !parentStill()) throw fail();
+    cur = next;
+    curSt = st;
+  }
+}
+
+/**
+ * chmod 0700 of the folder `dir` through a descriptor opened without following a final link, and
+ * only when the folder it names really is `dir` (same device and inode as the real path now) and
+ * that real path passes `ok`. A component swapped for a link makes the two differ, so the chmod
+ * can never reach a folder outside. Without O_DIRECTORY/O_NOFOLLOW (Windows, which has no such
+ * modes anyway) nothing is tightened.
+ */
+function tightenDir(dir: string, ok: (real: string) => boolean, fail: () => Error): void {
+  const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW } = fsConstants;
+  if (O_DIRECTORY === undefined || O_NOFOLLOW === undefined) return;
+  let fd: number;
+  try {
+    fd = openSync(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  } catch {
+    throw fail(); // a link, or no longer a folder
+  }
+  try {
+    const st = fstatSync(fd);
+    if ((st.mode & 0o077) === 0) return;
+    let real: string;
+    let rs: Stats;
+    try {
+      real = realpathSync.native(dir);
+      rs = statSync(real);
+    } catch {
+      throw fail();
+    }
+    if (rs.dev !== st.dev || rs.ino !== st.ino || !ok(real)) throw fail();
+    fchmodSync(fd, 0o700);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** True when the marker is the exact line eminiar writes: first body line after the front matter. */
@@ -297,31 +391,46 @@ export function exportSkill(
       );
     created = false;
   }
-  mkdirSync(dir, { recursive: true });
   // A concurrent writer may swap a path component for a symlink between the checks above and the
-  // write. So: resolve the directory once, require the result to sit inside the project (not only
-  // below the target), write through that resolved name, and re-check where the temp file and the
-  // final file really are, removing them if they left the project.
+  // write. So: make the folders one at a time, checking each parent around the mkdir; resolve the
+  // directory once, require the result to sit inside the project (not only below the target),
+  // write through that resolved name, and re-check where the temp file and the final file really
+  // are, removing them if they left the project. Nothing is made or chmodded through a link.
   let realRoot = resolve(ctx.root);
   try {
     realRoot = realpathSync.native(realRoot);
   } catch {
     /* keep root */
   }
+  const outside = `refusing to write into ${dir}: it resolves outside the target directory`;
+  const fail = (): Error => new Error(outside);
+  const dirOk = (rd: string): boolean =>
+    dirname(rd) === realpathSync.native(target) && (!inProject || within(rd, realRoot));
   const escapes = (p: string): boolean => {
     try {
-      const rd = realpathSync.native(dirname(p));
-      return dirname(rd) !== realpathSync.native(target) || (inProject && !within(rd, realRoot));
+      return !dirOk(realpathSync.native(dirname(p)));
     } catch {
       return true;
     }
   };
-  const outside = `refusing to write into ${dir}: it resolves outside the target directory`;
-  if (escapes(path)) throw new Error(outside);
+  // the folder as a real path: the real path of its nearest existing ancestor, plus the rest
+  let probe = dir;
+  while (!lstatSync(probe, { throwIfNoEntry: false }) && dirname(probe) !== probe)
+    probe = dirname(probe);
+  let realProbe: string;
+  try {
+    realProbe = realpathSync.native(probe);
+  } catch {
+    throw fail(); // a dangling link or a loop
+  }
+  const want = join(realProbe, relative(probe, dir));
+  if (inProject && !within(want, realRoot)) throw fail();
+  makeDirs(inProject ? realRoot : realProbe, want, file.private ? 0o700 : 0o777, fail);
+  if (escapes(path)) throw fail();
   const realDir = realpathSync.native(dir);
   // A private playbook stays its owner's on disk too, as in the store: a 0700 folder (an
   // existing looser one is tightened) and a 0600 file (the rename replaces an older 0644 one).
-  if (file.private && (lstatSync(realDir).mode & 0o077) !== 0) chmodSync(realDir, 0o700);
+  if (file.private) tightenDir(realDir, dirOk, fail);
   const rpath = join(realDir, "SKILL.md");
   const tmp = `${rpath}.${process.pid}.tmp`;
   let fd: number | undefined;
