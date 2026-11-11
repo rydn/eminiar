@@ -110,14 +110,14 @@ describe("known defects (flip it.fails to it when fixed)", () => {
 
   // src/playbooks/frontmatter.ts parsePlaybookFile: the header's last line keeps its "\r" in a
   // CRLF file and then fails the `key: value` pattern, so the last key is dropped silently.
-  it.fails("a CRLF playbook file keeps every header key", () => {
+  it("a CRLF playbook file keeps every header key", () => {
     const p = parsePlaybookFile("---\r\ntitle: T\r\ntags: [a]\r\n---\r\nbody\r\n");
     expect(p.meta).toEqual({ title: "T", tags: ["a"] });
   });
 
   // src/playbooks/frontmatter.ts parsePlaybookFile: a UTF-8 byte order mark before the opening
   // --- hides the header, so the header lines become the prompt.
-  it.fails("a byte order mark before the header does not turn the header into prompt text", () => {
+  it("a byte order mark before the header does not turn the header into prompt text", () => {
     const p = parsePlaybookFile("﻿---\ntitle: T\n---\nbody\n");
     expect(p.meta).toEqual({ title: "T" });
     expect(p.body.trim()).toBe("body");
@@ -149,7 +149,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
 
   // src/playbooks/store.ts closeRun: the run is looked up in the newest 1000 runs of the
   // playbook, so an older run that is still started cannot be closed by its id.
-  it.fails("a started run can be closed by id however many runs came after it", () => {
+  it("a started run can be closed by id however many runs came after it", () => {
     write(ctx, db, { name: "many", title: "M", prompt: "x" });
     const first = recordRun(ctx, db, { playbook: "many", trigger: "cli" }).id;
     for (let i = 0; i < 1001; i++)
@@ -212,7 +212,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
 
   // src/playbooks/store.ts clean: tags are free text but are not masked like the title,
   // prompt and schedule are.
-  it.fails("a secret in a tag is masked before it is saved", () => {
+  it("a secret in a tag is masked before it is saved", () => {
     write(ctx, db, { name: "tagged", title: "T", prompt: "x", tags: [SECRET] });
     expect(readFileSync(join(root, ".eminiar/playbooks/tagged.md"), "utf8")).not.toContain(SECRET);
     expect(JSON.stringify(read(ctx, db, "tagged"))).not.toContain(SECRET);

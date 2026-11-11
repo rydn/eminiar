@@ -887,6 +887,8 @@ export interface PlaybookStore {
    * false when there is no such run or it is not `started` any more; a closed run never changes.
    */
   runSetStatus(id: number, status: PlaybookRunStatus, note?: string | null | undefined): boolean;
+  /** One run by id, however old; undefined when there is none. */
+  getRun(id: number): PlaybookRunRow | undefined;
   /** Newest first. */
   runs(opts?: { playbook?: string | undefined; limit?: number | undefined }): PlaybookRunRow[];
   /** Number of runs and the newest run's timestamp per playbook name. */

@@ -130,6 +130,12 @@ export class SqlitePlaybookStore implements PlaybookStore {
     );
   }
 
+  getRun(id: number): PlaybookRunRow | undefined {
+    return this.prep("SELECT * FROM playbook_runs WHERE id = ?").get(id) as
+      | PlaybookRunRow
+      | undefined;
+  }
+
   runs(opts: { playbook?: string | undefined; limit?: number | undefined } = {}): PlaybookRunRow[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 50, 1000));
     return (
