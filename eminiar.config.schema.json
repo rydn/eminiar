@@ -210,6 +210,40 @@
         }
       }
     },
+    "playbooks": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "dir": {
+          "default": ".eminiar/playbooks",
+          "type": "string",
+          "pattern": "^(?![/\\\\])(?![A-Za-z]:)(?!(?:[\\s\\S]*[/\\\\])?\\.\\.[. ]*(?:[/\\\\]|$))[^\\p{Cc}]+$"
+        },
+        "privateDir": {
+          "default": ".eminiar/playbooks-private",
+          "type": "string",
+          "pattern": "^(?![/\\\\])(?![A-Za-z]:)(?!(?:[\\s\\S]*[/\\\\])?\\.\\.[. ]*(?:[/\\\\]|$))[^\\p{Cc}]+$"
+        },
+        "viewing": {
+          "default": true,
+          "type": "boolean"
+        },
+        "adding": {
+          "default": true,
+          "type": "boolean"
+        },
+        "extraction": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
     "recall": {
       "default": {},
       "type": "object",

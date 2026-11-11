@@ -412,6 +412,40 @@ const BaseConfigSchema = z.object({
         .default(".eminiar/memories"),
     })
     .prefault({}),
+  playbooks: z
+    .object({
+      /**
+       * Project-relative directory of playbook files (`<name>.md`: a stored recurring task, kept
+       * as markdown with a small header); commit it. Absolute paths and `..` segments are
+       * refused: eminiar writes the files there.
+       */
+      dir: z
+        .string()
+        .regex(PROJECT_RELATIVE_PATH_RE, "must be a path inside the project (no leading / or ..)")
+        .default(".eminiar/playbooks"),
+      /**
+       * Where private playbooks are kept: a folder git must ignore (eminiar adds it to the
+       * project's .gitignore before it writes the first one). Same path rules as `dir`.
+       */
+      privateDir: z
+        .string()
+        .regex(PROJECT_RELATIVE_PATH_RE, "must be a path inside the project (no leading / or ..)")
+        .default(".eminiar/playbooks-private"),
+      /** List and read playbooks (MCP tool, dashboard, CLI). */
+      viewing: z.boolean().default(true),
+      /** Create, edit and delete playbooks, and accept or dismiss suggestions. */
+      adding: z.boolean().default(true),
+      extraction: z
+        .object({
+          /**
+           * Suggest playbooks from recurring tasks seen in session history. Off by default:
+           * nothing is read for it and nothing is suggested until this is on.
+           */
+          enabled: z.boolean().default(false),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
   recall: z
     .object({
       /** Inject the memories and doc pages that match each prompt (UserPromptSubmit). */
@@ -920,6 +954,8 @@ function projectLayer(raw: Record<string, unknown>): Record<string, unknown> {
 const PROJECT_PATH_KEYS = [
   ["docs", "manifest"],
   ["memories", "dir"],
+  ["playbooks", "dir"],
+  ["playbooks", "privateDir"],
 ] as const;
 
 /**
