@@ -52,10 +52,14 @@ function WorkerCard({
         <code class="sw-wk-id" title={w.agent_id}>
           {shortAgent(w.agent_id)}
         </code>
-        <DecisionChip d={decision} />
         <span class="spacer" />
         <State s={w.status} />
       </div>
+      {decision && (
+        <div class="sw-wk-dec">
+          <DecisionChip d={decision} />
+        </div>
+      )}
       <div class={cls("sw-wk-task", !task && "none")} title={task?.title}>
         {task ? (
           <>

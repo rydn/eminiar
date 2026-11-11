@@ -6847,8 +6847,17 @@ table.adj-eval {
   white-space: nowrap;
   border: 0;
 }
-.sw-wk-head .sw-dec {
+.sw-wk-dec {
+  display: flex;
+  min-width: 0;
+  margin-top: 6px;
+}
+.sw-wk-dec .sw-dec {
   margin-left: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sw-dec-box {
   border: 1px solid var(--line);
