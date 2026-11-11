@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getContext, type ProjectContext, resetContextCache } from "../../src/context.js";
+import { playbookCommand } from "../../src/playbooks/cli.js";
 import { exportMarkdown, exportSkill, schedulePrompt } from "../../src/playbooks/export.js";
-import { PlaybookGateError, read, write } from "../../src/playbooks/store.js";
+import { PlaybookGateError, read, suggest, write } from "../../src/playbooks/store.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import { emPlaybook } from "../../src/tools/em_playbook.js";
@@ -112,5 +113,32 @@ describe("#274 the schedule instruction carries the run_id", () => {
     expect(t).toMatch(/run_id/);
     expect(t).toMatch(/run_id[^.]*(returns|returned)/i);
     expect(t).toMatch(/no run_id|without a run_id|have no/i);
+  });
+});
+
+describe("#268 small text fixes", () => {
+  it("dismiss does not promise 'not proposed again' without the purge caveat", async () => {
+    const c: ProjectContext = {
+      ...ctx,
+      config: {
+        ...ctx.config,
+        playbooks: { ...ctx.config.playbooks, extraction: { enabled: true } },
+      },
+    };
+    const { id } = suggest(c, db, { title: "Dismiss me", prompt: "a task to dismiss" });
+    const r = await emPlaybook.handler({ action: "dismiss", id }, c);
+    const t = r.content.map((x) => ("text" in x ? x.text : "")).join("\n");
+    expect(t).toContain("em_purge sessions");
+    expect(t).not.toMatch(/will not be proposed again(?! until)/);
+  });
+
+  it("playbook help --json prints JSON", async () => {
+    const out: string[] = [];
+    const code = await playbookCommand(["help", "--json"], ctx, {
+      out: (s) => out.push(s),
+      err: () => {},
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(out.join("\n")).usage).toContain("eminiar playbook");
   });
 });

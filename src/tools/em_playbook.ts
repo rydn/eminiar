@@ -281,7 +281,9 @@ export const emPlaybook = defineTool({
         case "dismiss": {
           if (args.id === undefined) throw new Error("dismiss needs `id`");
           return dismissSuggestion(ctx, db, args.id)
-            ? text(`dismissed suggestion ${args.id}; it will not be proposed again`)
+            ? text(
+                `dismissed suggestion ${args.id}; scan will not propose it again until em_purge sessions forgets it`,
+              )
             : errorResult(`no pending suggestion ${args.id}`);
         }
         case "schedule": {
