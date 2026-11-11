@@ -14,7 +14,7 @@ import {
 } from "../memory/store.js";
 import { getStorage } from "../storage/index.js";
 import type { MemoryRow } from "../storage/types.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 function firstLine(s: string, max = 140): string {
   const line = s.split("\n").find((l) => l.trim() && !l.trim().startsWith("#")) ?? s;
@@ -31,6 +31,7 @@ export function memoryLine(m: MemoryRow): string {
 
 export const emMemory = defineTool({
   name: "em_memory",
+  annotations: { ...LOCAL_WRITE, destructiveHint: true },
   description:
     "Manage the named markdown memories under .eminiar/memories (written by em_remember or by hand): list them (optionally one topic), read one, edit part of one, rename one (mem:<old> references follow), or delete one. Compact output; a read is trimmed to max_tokens.",
   schema: {

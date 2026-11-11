@@ -7,10 +7,51 @@ export type ToolResult = {
   isError?: boolean;
 };
 
+/** MCP behaviour hints, sent with the tool listing. See the classification note below. */
+export interface ToolAnnotations {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+}
+
+/*
+ * Classification rule: a tool is readOnlyHint only when none of its actions changes anything the
+ * user keeps: a memory, a document, the index on request, a setting, a file. Refreshing eminiar's
+ * own derived data on the way (the graph for em_symbols, usage rows for em_stats, stat counters)
+ * does not count: it is rebuilt from the project and the transcripts, and the read returns the
+ * same answer without it. A tool with both read and write actions (em_memory, em_swarm, em_docs, em_index, em_reindex,
+ * em_usage) takes the conservative value: not read-only, and destructive when any action can
+ * delete or overwrite (em_memory delete). Opt-out defaults in the MCP spec are the worst case,
+ * so each flag is set explicitly.
+ */
+export const READ_ONLY: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+/** Writes the local eminiar store only; repeating a call leaves the same state. */
+export const LOCAL_WRITE: ToolAnnotations = { ...READ_ONLY, readOnlyHint: false };
+/** Deletes data permanently. */
+export const DESTRUCTIVE: ToolAnnotations = {
+  ...LOCAL_WRITE,
+  destructiveHint: true,
+  idempotentHint: false,
+};
+/** Runs arbitrary code in the sandbox: it can change files and reach the network. */
+export const RUNS_CODE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
 export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   name: string;
   description: string;
   schema: S;
+  annotations: ToolAnnotations;
   handler: (args: z.infer<z.ZodObject<S>>, ctx: ProjectContext) => Promise<ToolResult>;
   /**
    * Whether the server lists the tool for the config loaded at start (default: always). An

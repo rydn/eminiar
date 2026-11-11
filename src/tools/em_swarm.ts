@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { adjudicatePlan, planAdviceBlock, planNextHint } from "../adjudicator/swarm.js";
 import { getContext, type ProjectContext } from "../context.js";
+import { memoriesRel } from "../memory/store.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import { planAgentSync, syncAgents } from "../swarm/agents.js";
@@ -46,7 +47,7 @@ import {
   workerStatus,
 } from "../swarm/runtime.js";
 import type { RunRow, SwarmConfig, SwarmSpec, TaskRow } from "../swarm/types.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export const SWARM_ACTIONS = [
   "list",
@@ -122,6 +123,8 @@ type Args = z.infer<z.ZodObject<typeof schema>>;
 
 export const emSwarm = defineTool({
   name: "em_swarm",
+  // sync deletes stale generated agent files, and with force overwrites hand-edited ones
+  annotations: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: false },
   description:
     'Agent swarms, opt-in via .eminiar/swarm.yaml. The coordinator (main session): start {swarm, goal} → plan {tasks} → spawn workers with the Agent tool (subagent_type swarm-<swarm>-<role>, a prompt naming "task #N"; the worker claims it) → status → finish {status, summary, remember}; release frees stuck workers. Workers: claim, update {task, status, result}, plan, post/read the blackboard. The em-swarm skill has the playbook.',
   schema,
@@ -498,7 +501,7 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
       }
       if (!r.task)
         return `Nothing to claim in run ${run.id}: ${sentence(r.reason ?? "no eligible task")}`;
-      const brief = await taskBrief(db, run, caller.role, r.task);
+      const brief = await taskBrief(db, run, caller.role, r.task, memoriesRel(ctx));
       return capOutput(
         [
           `${r.already ? "You already hold" : "Claimed"} task #${r.task.id} (run ${run.id}). Report it with em_swarm {action:"update", task:${r.task.id}, status:"done"|"failed"|"blocked", result}.`,

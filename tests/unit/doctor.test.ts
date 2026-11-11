@@ -6,6 +6,7 @@ import { ConfigSchema } from "../../src/config.js";
 import { resetContextCache } from "../../src/context.js";
 import {
   configWarnings,
+  dropRetiredKeys,
   frozenDefaultCount,
   fullDoctor,
   pruneDefaults,
@@ -32,17 +33,34 @@ describe("doctor config checks", () => {
     });
   });
 
-  it("flags graph lists that are a stale subset of the defaults", () => {
-    const stale = {
-      graph: { include: ["**/*.ts", "**/*.js"], exclude: ["**/node_modules/**", "**/dist/**"] },
-    };
-    const out = staleGraphLists(stale);
-    expect(out).toHaveLength(2);
+  it("flags a graph.include that is a stale subset of the defaults", () => {
+    const out = staleGraphLists({ graph: { include: ["**/*.ts", "**/*.js"] } });
+    expect(out).toHaveLength(1);
     expect(out[0]).toContain("**/*.py");
-    expect(staleGraphLists({ graph: { exclude: ["**/generated/**"] } })).toEqual([]);
     expect(staleGraphLists({ graph: { include: ConfigSchema.parse({}).graph.include } })).toEqual(
       [],
     );
+  });
+
+  it("does not flag graph.exclude: it adds to the defaults, so a short list loses nothing", () => {
+    expect(staleGraphLists({ graph: { exclude: ["**/node_modules/**", "**/dist/**"] } })).toEqual(
+      [],
+    );
+    expect(staleGraphLists({ graph: { exclude: [] } })).toEqual([]);
+    expect(staleGraphLists({ graph: { exclude: ["**/generated/**"] } })).toEqual([]);
+  });
+
+  it("drops the retired code.backend key and the section it leaves empty, nothing else", () => {
+    expect(dropRetiredKeys({ code: { backend: "tree-sitter" } })).toEqual({});
+    expect(dropRetiredKeys({ code: { backend: "tree-sitter", other: 1 }, routing: {} })).toEqual({
+      code: { other: 1 },
+      routing: {},
+    });
+    expect(dropRetiredKeys({ routing: { mode: "off" } })).toEqual({ routing: { mode: "off" } });
+    // what an older install wrote, once --fix prunes the defaults and the retired key
+    const old = { ...ConfigSchema.parse({}), code: { backend: "tree-sitter" } };
+    const { adjudicator: _a, ...frozen } = old;
+    expect(unknownConfigKeys(dropRetiredKeys(pruneDefaults(frozen)))).toEqual([]);
   });
 
   it("warns on unknown keys but not on schema keys or $schema", () => {
@@ -162,6 +180,21 @@ describe("doctor reports frozen defaults in ~/.eminiar/config.json", () => {
     expect(await warning()).toMatch(/1 key equals the current default.*doctor --fix/);
     expect(await warning({ fix: true })).toBe("");
     expect(JSON.parse(readFileSync(cfgFile, "utf8"))).toEqual({ search: { defaultLimit: 7 } });
+    expect(await warning()).toBe("");
+  });
+
+  it("--fix also removes a retired key, which the unknown-keys warning stops naming", async () => {
+    writeFileSync(
+      cfgFile,
+      JSON.stringify({ code: { backend: "tree-sitter" }, search: { defaultLimit: 7 } }),
+    );
+    expect(await warning()).toContain("unknown keys, ignored: code");
+    const checks = await fullDoctor({ fix: true });
+    expect(checks.map((c) => c.detail).join("\\n")).toContain(
+      "pruned of default values and retired keys",
+    );
+    expect(JSON.parse(readFileSync(cfgFile, "utf8"))).toEqual({ search: { defaultLimit: 7 } });
+    expect(JSON.parse(readFileSync(`${cfgFile}.eminiar.bak`, "utf8"))).toHaveProperty("code");
     expect(await warning()).toBe("");
   });
 

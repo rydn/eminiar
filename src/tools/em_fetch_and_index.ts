@@ -7,10 +7,11 @@ import { type SearchResponse, search } from "../search/pipeline.js";
 import { getCurrentSession } from "../session/current.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export const emFetchAndIndex = defineTool({
   name: "em_fetch_and_index",
+  annotations: { ...LOCAL_WRITE, idempotentHint: false, openWorldHint: true },
   description:
     "Fetch one or more URLs, convert to markdown, index them (24h cache) and optionally answer `queries` right away. Use instead of WebFetch for documentation, API references, issues and changelogs — the page never enters context, only the matching sections do.",
   schema: {

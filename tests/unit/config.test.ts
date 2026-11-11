@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -83,6 +83,49 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     expect([c.recall.maxMemories, c.sandbox.timeoutMs]).toEqual([3, 60_000]);
     expect(stderr()).toContain(`invalid config in ${join(home, "config.json")}, ignoring it`);
     expect(stderr()).not.toContain("using defaults");
+  });
+
+  it("a project file cannot list a variable the sandbox always withholds", () => {
+    project({
+      sandbox: {
+        envAllow: ["MY_TEAM_VAR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "FOO_*"],
+      },
+    });
+    const c = loadConfig(root);
+    // Only the withheld names go; ordinary names and globs stay.
+    expect(c.sandbox.envAllow).toEqual(["MY_TEAM_VAR", "FOO_*"]);
+    expect(stderr()).toContain(
+      'ignoring sandbox.envAllow ["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN"]',
+    );
+    expect(stderr()).toContain("eminiar.config.json");
+  });
+
+  it("the personal file may still list a withheld variable by its exact name", () => {
+    personal({ sandbox: { envAllow: ["ANTHROPIC_API_KEY"] } });
+    expect(loadConfig(root).sandbox.envAllow).toEqual(["ANTHROPIC_API_KEY"]);
+    expect(stderr()).not.toContain("ignoring sandbox.envAllow");
+  });
+
+  it("a personal config the repo plants (EMINIAR_HOME inside the project) gets the same cut", () => {
+    const planted = join(root, ".h");
+    mkdirSync(planted);
+    process.env.EMINIAR_HOME = planted;
+    writeFileSync(
+      join(planted, "config.json"),
+      JSON.stringify({ sandbox: { envAllow: ["MY_TEAM_VAR", "OPENAI_API_KEY"] } }),
+    );
+    expect(loadConfig(root).sandbox.envAllow).toEqual(["MY_TEAM_VAR"]);
+    expect(stderr()).toContain('ignoring sandbox.envAllow ["OPENAI_API_KEY"]');
+    expect(stderr()).toContain(join(planted, "config.json"));
+  });
+
+  it("names a bad entry of an additive list by its place in its own file", () => {
+    project({ graph: { exclude: ["**/ok/**", 5] } });
+    loadConfig(root);
+    // not graph.exclude.14: the defaults come first in the merged list
+    expect(stderr()).toContain("graph.exclude.1: ");
+    expect(stderr()).not.toMatch(/graph\.exclude\.1\d/);
+    expect(stderr()).toContain("invalid config in eminiar.config.json, ignoring it");
   });
 
   it("a bad project value drops only the project file, keeping the personal one", () => {

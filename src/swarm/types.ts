@@ -71,6 +71,8 @@ export interface RoleSpec {
   /** Set when the adjudicator may pick the model within these bounds; unset: `model` is fixed. */
   range?: ModelRange | undefined;
   tools?: string[] | undefined;
+  /** `readonly`: the agent file allowlists read-only tools only (see READONLY_BUILTINS). */
+  toolsProfile?: "readonly" | undefined;
   disallowedTools?: string[] | undefined;
   skills: string[];
   hooks?: RoleHooks | undefined;

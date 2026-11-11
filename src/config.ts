@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { z } from "zod";
 import { MODES, PROVIDER_IDS, TIERS } from "./adjudicator/types.js";
 import { paths } from "./paths.js";
+import { isAlwaysWithheld } from "./sandbox/env.js";
 
 export const RoutingMode = z.enum(["off", "annotate", "enforce", "auto"]);
 export type RoutingMode = z.infer<typeof RoutingMode>;
@@ -1007,18 +1008,51 @@ function withoutUnsafePaths(raw: Record<string, unknown>, source: string): Recor
   return out;
 }
 
+/** The sandbox.envAllow entries of a config layer that name a variable the sandbox withholds. */
+function withheldEnvAllow(raw: Record<string, unknown>): unknown[] {
+  const sb = raw.sandbox;
+  if (!isPlainObject(sb) || !Array.isArray(sb.envAllow)) return [];
+  return sb.envAllow.filter((e) => typeof e === "string" && isAlwaysWithheld(e));
+}
+
+/**
+ * A project layer without the sandbox.envAllow entries that name a variable the sandbox always
+ * withholds (ANTHROPIC_*, CLAUDE_*, OPENAI_*, *_API_KEY): listing one by its exact name is what
+ * lets it through, and a cloned repo must not hand its own scripts your API keys. Only those
+ * entries go; the personal file and EMINIAR_* env are not cut. `source` names the file.
+ */
+function withoutWithheldEnvAllow(
+  raw: Record<string, unknown>,
+  source: string,
+): Record<string, unknown> {
+  const dropped = withheldEnvAllow(raw);
+  const sb = raw.sandbox as Record<string, unknown>;
+  if (!dropped.length) return raw;
+  process.stderr.write(
+    `eminiar: ignoring sandbox.envAllow ${JSON.stringify(dropped)} in ${source}: the sandbox withholds these from a project file; list them in ~/.eminiar/config.json to pass them\n`,
+  );
+  const envAllow = (sb.envAllow as unknown[]).filter((e) => !dropped.includes(e));
+  return {
+    ...(ownJson(raw) as Record<string, unknown>),
+    sandbox: { ...(ownJson(sb) as Record<string, unknown>), envAllow },
+  };
+}
+
 /**
  * The personal layer: paths().configFile as it is, unless it sets adjudicator keys the project
- * layer drops (droppedProjectAdjudicatorKeys) from a location the project could have put there
- * (personalConfigTrusted, task #54); then it gets the project layer's cut.
+ * layer drops (droppedProjectAdjudicatorKeys) or lists a withheld variable in sandbox.envAllow
+ * (withheldEnvAllow), from a location the project could have put there (personalConfigTrusted,
+ * task #54: a committed .claude/settings.json can point EMINIAR_HOME into the repo); then it gets
+ * the project layer's cut.
  */
 function personalLayer(projectRoot: string): Record<string, unknown> {
   const file = paths().configFile;
   const raw = readJson(file);
   const layer =
-    !droppedProjectAdjudicatorKeys(raw).length || personalConfigTrusted(projectRoot, file)
-      ? raw
-      : projectLayer(raw);
+    (droppedProjectAdjudicatorKeys(raw).length || withheldEnvAllow(raw).length) &&
+    !personalConfigTrusted(projectRoot, file)
+      ? withoutWithheldEnvAllow(projectLayer(raw), file)
+      : raw;
   return withoutUnsafePaths(layer, file);
 }
 
@@ -1030,8 +1064,11 @@ function personalLayer(projectRoot: string): Record<string, unknown> {
 export function loadConfig(projectRoot: string): Config {
   const layers = [
     personalLayer(projectRoot),
-    withoutUnsafePaths(
-      projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
+    withoutWithheldEnvAllow(
+      withoutUnsafePaths(
+        projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
+        "eminiar.config.json",
+      ),
       "eminiar.config.json",
     ),
     envOverrides(),
@@ -1050,7 +1087,7 @@ export function loadConfig(projectRoot: string): Config {
     const alone = parseLayers([layer]);
     if (!alone.success) {
       process.stderr.write(
-        `eminiar: invalid config in ${sources[i]}, ignoring it: ${alone.error.message}\n`,
+        `eminiar: invalid config in ${sources[i]}, ignoring it: ${issueText(alone.error, [layer], layer)}\n`,
       );
       return;
     }
@@ -1064,12 +1101,12 @@ export function loadConfig(projectRoot: string): Config {
     if (trimmed && parseLayers([...acc, trimmed.layer]).success) {
       acc.push(trimmed.layer);
       process.stderr.write(
-        `eminiar: ignoring ${trimmed.removed.join(", ")} in ${sources[i]}: invalid together with the earlier config: ${merged.error.message}\n`,
+        `eminiar: ignoring ${trimmed.removed.join(", ")} in ${sources[i]}: invalid together with the earlier config: ${issueText(merged.error, [...acc, layer], layer)}\n`,
       );
       return;
     }
     process.stderr.write(
-      `eminiar: invalid config in ${sources[i]} together with the earlier config, ignoring it: ${merged.error.message}\n`,
+      `eminiar: invalid config in ${sources[i]} together with the earlier config, ignoring it: ${issueText(merged.error, [...acc, layer], layer)}\n`,
     );
   });
   const retry = parseLayers(acc);
@@ -1106,6 +1143,34 @@ function withoutPaths(
 }
 
 /** parseConfig of the merged layers. */
+/**
+ * A schema error as `path: message` lines. An index into an ADDITIVE_LISTS list counts the merged
+ * list (the defaults and earlier layers come first), so `graph.exclude.13` is the first entry of
+ * a file; the line names the entry's position in `layer`'s own list instead, found by its value.
+ */
+function issueText(
+  err: z.ZodError,
+  layers: Record<string, unknown>[],
+  layer: Record<string, unknown>,
+): string {
+  const merged = mergeLayers(layers);
+  return err.issues
+    .map((is) => {
+      const path = is.path.map(String);
+      const [section, key, idx] = path;
+      if (path.length === 3 && ADDITIVE_LISTS.some(([s, k]) => s === section && k === key)) {
+        const own = (layer[section!] as Record<string, unknown> | undefined)?.[key!];
+        const mergedList = (merged[section!] as Record<string, unknown> | undefined)?.[key!];
+        if (Array.isArray(own) && Array.isArray(mergedList)) {
+          const at = own.indexOf(mergedList[Number(idx)]);
+          if (at >= 0) path[2] = String(at);
+        }
+      }
+      return `${path.join(".")}: ${is.message}`;
+    })
+    .join("; ");
+}
+
 function parseLayers(layers: Record<string, unknown>[]) {
   // zod reads inherited properties: hand it a plain own-key copy, never the merged object.
   return parseConfig(ownJson(mergeLayers(layers)) as Record<string, unknown>);

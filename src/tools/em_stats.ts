@@ -10,10 +10,11 @@ import { usageBrief } from "../usage/brief.js";
 import { ingestSession, usageEnabled } from "../usage/ingest.js";
 import { formatUsd } from "../usage/pricing.js";
 import { rowSavedTokens, savingsKind, splitSavings } from "../usage/savings.js";
-import { defineTool, text } from "./types.js";
+import { defineTool, READ_ONLY, text } from "./types.js";
 
 export const emStats = defineTool({
   name: "em_stats",
+  annotations: READ_ONLY,
   description:
     "Show how much context eminiar has kept out of the conversation (estimated at 4 characters per token, split into measured execution savings and counterfactual knowledge-tool savings): tokens seen vs returned per tool for this session, this project, and lifetime across all projects, plus index/graph sizes, how often routing intercepted native Bash/Read/Grep calls (and by which rule), and how often proactive recall (memories, docs, history before prompts, reads and edits) fired versus stayed quiet, with the reasons.",
   schema: {
