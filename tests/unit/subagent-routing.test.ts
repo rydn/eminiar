@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,7 @@ const savedEnv = {
   EMINIAR_ROUTING_MODE: process.env.EMINIAR_ROUTING_MODE,
   EMINIAR_PROJECT_ROOT: process.env.EMINIAR_PROJECT_ROOT,
   CLAUDE_PROJECT_DIR: process.env.CLAUDE_PROJECT_DIR,
+  CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
 };
 let root: string;
 let unmark: () => void;
@@ -32,6 +34,8 @@ function agent(name: string, tools?: string): void {
 beforeAll(() => {
   process.env.EMINIAR_HOME = mkdtempSync(join(tmpdir(), "em-sar-home-"));
   process.env.EMINIAR_ROUTING_MODE = "enforce";
+  // The user's agents directory is looked in too: an empty one, never the real ~/.claude.
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "em-sar-claude-"));
   root = realpathSync(mkdtempSync(join(tmpdir(), "em-sar-")));
   writeFileSync(join(root, "package.json"), "{}");
   writeFileSync(
@@ -380,6 +384,80 @@ describe("finding the agent file by its frontmatter name", () => {
     );
     expect(agentLacksTool(root, "bare", "em_execute_file")).toBeUndefined();
     expect(agentLacksTool(root, "foreign", "em_execute_file")).toBeUndefined();
+  });
+});
+
+describe("agent file lookup: precedence, bounds and hostile files", () => {
+  const dirOf = (kind: "project" | "user") =>
+    kind === "project"
+      ? join(root, ".claude", "agents")
+      : join(process.env.CLAUDE_CONFIG_DIR!, "agents");
+  const put = (kind: "project" | "user", file: string, text: string): void => {
+    mkdirSync(dirOf(kind), { recursive: true });
+    writeFileSync(join(dirOf(kind), file), text);
+  };
+  const fm = (name: string, tools?: string) =>
+    `---\nname: ${name}\ndescription: x\n${tools === undefined ? "" : `tools: ${tools}\n`}---\nbody\n`;
+
+  it("a project agent beats a user agent of the same name, whichever file holds the name", () => {
+    put("project", "x.md", fm("shared", "Read"));
+    put("user", "shared.md", fm("shared")); // inherits every tool
+    expect(agentLacksTool(root, "shared", "em_symbols")).toBe("all");
+    // and the other way round: a project file named for the type, a user agent naming it too
+    put("project", "dup.md", fm("dup"));
+    put("user", "other.md", fm("dup", "Read"));
+    expect(agentLacksTool(root, "dup", "em_symbols")).toBeUndefined();
+  });
+
+  it("scans .md files only, and the cap counts only those", () => {
+    for (let i = 0; i < 300; i++) put("project", `note${String(i).padStart(3, "0")}.txt`, "x");
+    put("project", "zz-file.md", fm("zz-agent", "Read"));
+    expect(agentLacksTool(root, "zz-agent", "em_symbols")).toBe("all");
+    put("project", "txt-only.txt", fm("txt-agent", "Read"));
+    expect(agentLacksTool(root, "txt-agent", "em_symbols")).toBeUndefined();
+  });
+
+  it("stops after 200 .md files, in name order", () => {
+    for (let i = 0; i < 205; i++) put("user", `a${String(i).padStart(3, "0")}.md`, fm(`n${i}`));
+    put("user", "z-late.md", fm("late-agent", "Read"));
+    expect(agentLacksTool(root, "late-agent", "em_symbols")).toBeUndefined();
+    put("user", "a-first.md", fm("early-agent", "Read"));
+    expect(agentLacksTool(root, "early-agent", "em_symbols")).toBe("all");
+  });
+
+  it("skips a file over the size cap", () => {
+    put("project", "huge.md", `${fm("huge-agent", "Read")}${"x".repeat(300 * 1024)}`);
+    expect(agentLacksTool(root, "huge-agent", "em_symbols")).toBeUndefined();
+  });
+
+  it("reads a name line full of spaces in linear time", () => {
+    // Alone in a fresh project and user directory, so no scan cap can skip it.
+    const lone = realpathSync(mkdtempSync(join(tmpdir(), "em-sar-lone-")));
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "em-sar-lone-claude-"));
+    try {
+      mkdirSync(join(lone, ".claude", "agents"), { recursive: true });
+      writeFileSync(
+        join(lone, ".claude", "agents", "spacey.md"),
+        `---\nname: a${" ".repeat(120_000)}x\ntools: Read\n---\nbody\n`,
+      );
+      const t0 = performance.now();
+      expect(agentLacksTool(lone, "nope-agent", "em_symbols")).toBeUndefined();
+      expect(performance.now() - t0).toBeLessThan(1000);
+    } finally {
+      process.env.CLAUDE_CONFIG_DIR = saved;
+      rmSync(lone, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("does not block on a FIFO named like an agent", () => {
+    try {
+      execFileSync("mkfifo", [join(dirOf("project"), "pipe.md")]);
+    } catch {
+      return; // no mkfifo here
+    }
+    put("project", "real.md", fm("real-agent", "Read"));
+    expect(agentLacksTool(root, "real-agent", "em_symbols")).toBe("all");
   });
 });
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -104,6 +104,19 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     personal({ sandbox: { envAllow: ["ANTHROPIC_API_KEY"] } });
     expect(loadConfig(root).sandbox.envAllow).toEqual(["ANTHROPIC_API_KEY"]);
     expect(stderr()).not.toContain("ignoring sandbox.envAllow");
+  });
+
+  it("a personal config the repo plants (EMINIAR_HOME inside the project) gets the same cut", () => {
+    const planted = join(root, ".h");
+    mkdirSync(planted);
+    process.env.EMINIAR_HOME = planted;
+    writeFileSync(
+      join(planted, "config.json"),
+      JSON.stringify({ sandbox: { envAllow: ["MY_TEAM_VAR", "OPENAI_API_KEY"] } }),
+    );
+    expect(loadConfig(root).sandbox.envAllow).toEqual(["MY_TEAM_VAR"]);
+    expect(stderr()).toContain('ignoring sandbox.envAllow ["OPENAI_API_KEY"]');
+    expect(stderr()).toContain(join(planted, "config.json"));
   });
 
   it("a bad project value drops only the project file, keeping the personal one", () => {

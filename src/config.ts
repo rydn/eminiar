@@ -1008,6 +1008,13 @@ function withoutUnsafePaths(raw: Record<string, unknown>, source: string): Recor
   return out;
 }
 
+/** The sandbox.envAllow entries of a config layer that name a variable the sandbox withholds. */
+function withheldEnvAllow(raw: Record<string, unknown>): unknown[] {
+  const sb = raw.sandbox;
+  if (!isPlainObject(sb) || !Array.isArray(sb.envAllow)) return [];
+  return sb.envAllow.filter((e) => typeof e === "string" && isAlwaysWithheld(e));
+}
+
 /**
  * A project layer without the sandbox.envAllow entries that name a variable the sandbox always
  * withholds (ANTHROPIC_*, CLAUDE_*, OPENAI_*, *_API_KEY): listing one by its exact name is what
@@ -1018,14 +1025,13 @@ function withoutWithheldEnvAllow(
   raw: Record<string, unknown>,
   source: string,
 ): Record<string, unknown> {
-  const sb = raw.sandbox;
-  if (!isPlainObject(sb) || !Array.isArray(sb.envAllow)) return raw;
-  const dropped = sb.envAllow.filter((e) => typeof e === "string" && isAlwaysWithheld(e));
+  const dropped = withheldEnvAllow(raw);
+  const sb = raw.sandbox as Record<string, unknown>;
   if (!dropped.length) return raw;
   process.stderr.write(
     `eminiar: ignoring sandbox.envAllow ${JSON.stringify(dropped)} in ${source}: the sandbox withholds these from a project file; list them in ~/.eminiar/config.json to pass them\n`,
   );
-  const envAllow = sb.envAllow.filter((e) => !dropped.includes(e));
+  const envAllow = (sb.envAllow as unknown[]).filter((e) => !dropped.includes(e));
   return {
     ...(ownJson(raw) as Record<string, unknown>),
     sandbox: { ...(ownJson(sb) as Record<string, unknown>), envAllow },
@@ -1034,16 +1040,19 @@ function withoutWithheldEnvAllow(
 
 /**
  * The personal layer: paths().configFile as it is, unless it sets adjudicator keys the project
- * layer drops (droppedProjectAdjudicatorKeys) from a location the project could have put there
- * (personalConfigTrusted, task #54); then it gets the project layer's cut.
+ * layer drops (droppedProjectAdjudicatorKeys) or lists a withheld variable in sandbox.envAllow
+ * (withheldEnvAllow), from a location the project could have put there (personalConfigTrusted,
+ * task #54: a committed .claude/settings.json can point EMINIAR_HOME into the repo); then it gets
+ * the project layer's cut.
  */
 function personalLayer(projectRoot: string): Record<string, unknown> {
   const file = paths().configFile;
   const raw = readJson(file);
   const layer =
-    !droppedProjectAdjudicatorKeys(raw).length || personalConfigTrusted(projectRoot, file)
-      ? raw
-      : projectLayer(raw);
+    (droppedProjectAdjudicatorKeys(raw).length || withheldEnvAllow(raw).length) &&
+    !personalConfigTrusted(projectRoot, file)
+      ? withoutWithheldEnvAllow(projectLayer(raw), file)
+      : raw;
   return withoutUnsafePaths(layer, file);
 }
 

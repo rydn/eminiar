@@ -183,6 +183,21 @@ describe("doctor reports frozen defaults in ~/.eminiar/config.json", () => {
     expect(await warning()).toBe("");
   });
 
+  it("--fix also removes a retired key, which the unknown-keys warning stops naming", async () => {
+    writeFileSync(
+      cfgFile,
+      JSON.stringify({ code: { backend: "tree-sitter" }, search: { defaultLimit: 7 } }),
+    );
+    expect(await warning()).toContain("unknown keys, ignored: code");
+    const checks = await fullDoctor({ fix: true });
+    expect(checks.map((c) => c.detail).join("\\n")).toContain(
+      "pruned of default values and retired keys",
+    );
+    expect(JSON.parse(readFileSync(cfgFile, "utf8"))).toEqual({ search: { defaultLimit: 7 } });
+    expect(JSON.parse(readFileSync(`${cfgFile}.eminiar.bak`, "utf8"))).toHaveProperty("code");
+    expect(await warning()).toBe("");
+  });
+
   it("--fix prunes a frozen config once, keeps the original as .bak and leaves a bad file alone", async () => {
     const d = ConfigSchema.parse({});
     // the pre-fix shape: defaults frozen in, with graph lists lacking a later default entry

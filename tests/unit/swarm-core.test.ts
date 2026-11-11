@@ -43,7 +43,7 @@ import {
   toolHead,
   updateTask,
 } from "../../src/swarm/runtime.js";
-import type { SwarmConfig } from "../../src/swarm/types.js";
+import type { RoleSpec, SwarmConfig } from "../../src/swarm/types.js";
 import { ENFORCE_FORMS } from "./swarm-enforce-forms.js";
 
 const parse = (yaml: string) =>
@@ -740,24 +740,49 @@ swarms:
     description: readonly swarm
     agents:
       scout: { description: scouts, tools_profile: readonly, memory_tags: [decision] }
+      blind: { description: greps, tools_profile: readonly, tools: [Grep], memory_tags: [decision] }
       maker: { description: makes, memory_tags: [decision] }
 `);
     const swarm = roCfg.swarms[0]!;
+    const [scout, blind, maker] = swarm.roles as [RoleSpec, RoleSpec, RoleSpec];
     db.memoryUpsertByName({
       name: "decision/pick-a-map",
       kind: "decision",
+      status: "accepted",
       content: "Use a map for the lookup table.",
     });
     const run = startRun(db, roCfg, { swarm: "ro", goal: "scout it", sessionId: "RO" });
     const [task] = addTasks(db, { root }, run, swarm, callerOf(roCfg, {}), [
-      { title: "look around", role: "scout" },
+      { title: "pick a map for the lookup table", role: "scout" },
     ]);
-    const ro = await taskBrief(db, run, swarm.roles[0], db.swarm.taskGet(task!.id)!);
+    const row = db.swarm.taskGet(task!.id)!;
+    const WITH = 'em_memory {action:"read", name} for the full text';
+
+    // taskBrief: the claim reply
+    const ro = await taskBrief(db, run, scout, row);
     expect(ro).toContain("decision/pick-a-map");
     expect(ro).toContain("Read .eminiar/memories/<name>.md for the full text");
     expect(ro).not.toContain("em_memory");
-    const rw = await taskBrief(db, run, swarm.roles[1], db.swarm.taskGet(task!.id)!);
-    expect(rw).toContain('em_memory {action:"read", name} for the full text');
+    // the configured memories.dir, not a fixed one
+    expect(await taskBrief(db, run, scout, row, "notes/mem")).toContain(
+      "Read notes/mem/<name>.md for the full text",
+    );
+    // a readonly role that has no Read tool gets no pointer at all
+    const grep = await taskBrief(db, run, blind, row);
+    expect(grep).toContain("Memories and docs:\n");
+    expect(grep).not.toContain("em_memory");
+    expect(grep).not.toContain("<name>.md");
+    // a role with em_memory keeps the tool
+    expect(await taskBrief(db, run, maker, row)).toContain(WITH);
+
+    // workerBrief: the start brief, project section included
+    const wb = await workerBrief(getContext(root), db, { run, swarm, role: scout });
+    expect(wb).toContain("Read .eminiar/memories/<name>.md for the full text");
+    expect(wb).not.toContain("em_memory");
+    expect(wb).toContain("Accepted decisions: pick-a-map");
+    const mb = await workerBrief(getContext(root), db, { run, swarm, role: maker });
+    expect(mb).toContain(WITH);
+    expect(mb).toContain('Accepted decisions (em_memory {action:"read", name}): pick-a-map');
     finishRun(getContext(root), db, run, callerOf(roCfg, {}), { status: "cancelled" });
   });
 

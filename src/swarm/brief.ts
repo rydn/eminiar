@@ -1,5 +1,6 @@
 import type { ProjectContext } from "../context.js";
 import { readBriefSummary, readFileRisk } from "../history/model.js";
+import { memoriesRel } from "../memory/store.js";
 import { renderProjectBrief } from "../session/brief.js";
 import { memoriesForFile, recallForText } from "../session/recall.js";
 import type { StorageAdapter } from "../storage/adapter.js";
@@ -91,6 +92,22 @@ function taggedMemories(
   return out;
 }
 
+const MEMORY_READ_HINT = ' (em_memory {action:"read", name} for the full text)';
+
+/**
+ * How a role reads a memory in full. A role without em_memory (a readonly profile) reads the
+ * memory file at `dir` with Read, and gets no pointer at all when it has no Read either.
+ */
+function memoryReadHint(
+  role: Parameters<typeof roleHasEmTool>[0] | undefined,
+  dir: string,
+): string {
+  if (!role || roleHasEmTool(role, "em_memory")) return MEMORY_READ_HINT;
+  return !role.tools || role.tools.includes("Read")
+    ? ` (Read ${dir}/<name>.md for the full text)`
+    : "";
+}
+
 /**
  * Memories and doc pages for a brief. Recall runs on each short text separately (goal,
  * task, role): one long concatenation has so many terms that nothing clears recall's bar.
@@ -102,7 +119,7 @@ async function memorySection(
   spec: ContextSpec,
   tags: string[],
   files: string[] = [],
-  canReadMemory = true,
+  readHint = MEMORY_READ_HINT,
 ): Promise<string | undefined> {
   const lines: string[] = [];
   const shown = new Set<string>();
@@ -147,11 +164,7 @@ async function memorySection(
   }
   lines.push(...taggedMemories(db, tags, Math.max(1, spec.memories), shown));
   if (!lines.length) return undefined;
-  // A role without em_memory (a readonly profile) reads the memory file itself.
-  const more = canReadMemory
-    ? 'em_memory {action:"read", name}'
-    : "Read .eminiar/memories/<name>.md";
-  return `Memories and docs (${more} for the full text):\n${lines.slice(0, spec.memories + spec.docs + 3).join("\n")}`;
+  return `Memories and docs${readHint}:\n${lines.slice(0, spec.memories + spec.docs + 3).join("\n")}`;
 }
 
 /** Bug-prone files among `paths` (or in `scope`), from the persisted history risk table. */
@@ -208,10 +221,11 @@ function structureSection(
   ctx: ProjectContext,
   db: StorageAdapter,
   budget: number,
+  memoryTool: boolean,
 ): string | undefined {
   try {
     // Hot files and history have their own sections in a swarm brief.
-    const b = renderProjectBrief(ctx, db, budget)
+    const b = renderProjectBrief(ctx, db, budget, { memoryTool })
       .split("\n")
       .filter((l) => !l.startsWith("Hot files") && !l.startsWith("History (em_history)"))
       .join("\n")
@@ -315,12 +329,17 @@ export async function workerBrief(
       spec,
       w.role.memoryTags,
       files,
-      roleHasEmTool(w.role, "em_memory"),
+      memoryReadHint(w.role, memoriesRel(ctx)),
     ),
     spec.history ? historySection(db, files, w.role.scope) : undefined,
     spec.insights ? hotSection(db, files.length ? files : w.role.scope) : undefined,
     spec.structure
-      ? structureSection(ctx, db, Math.min(1200, Math.floor(spec.maxChars / 3)))
+      ? structureSection(
+          ctx,
+          db,
+          Math.min(1200, Math.floor(spec.maxChars / 3)),
+          roleHasEmTool(w.role, "em_memory"),
+        )
       : undefined,
     'Before acting: em_recall {query} for decisions, em_history {action:"file", path} before editing a file, em_graph_impact {node} before changing a symbol, em_symbols / em_search {source:"code"} instead of grepping.',
   ];
@@ -333,6 +352,7 @@ export async function taskBrief(
   run: RunRow,
   role: RoleSpec | undefined,
   task: TaskRow,
+  memoriesDir = ".eminiar/memories",
 ): Promise<string> {
   const spec = role?.context ?? {
     memories: 3,
@@ -354,7 +374,7 @@ export async function taskBrief(
       spec,
       role?.memoryTags ?? [],
       task.files,
-      !role || roleHasEmTool(role, "em_memory"),
+      memoryReadHint(role, memoriesDir),
     ),
     spec.history
       ? historySection(db, task.files, task.files.length ? [] : (role?.scope ?? []))
@@ -434,7 +454,7 @@ export async function coordinatorBrief(
       await memorySection(db, [run.goal, swarm.description], spec, tags),
       spec.history ? historySection(db, [], scope) : undefined,
       spec.insights ? hotSection(db, scope) : undefined,
-      spec.structure ? structureSection(ctx, db, 1200) : undefined,
+      spec.structure ? structureSection(ctx, db, 1200, true) : undefined,
     ],
     Math.max(1500, spec.maxChars),
   );
