@@ -14,7 +14,7 @@ import {
 } from "../history/narrate.js";
 import { fileBytes, recordStat } from "../stats/record.js";
 import { ensureGraph } from "./em_graph.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, READ_ONLY, text } from "./types.js";
 
 function parseWhen(s: string | undefined): number | undefined {
   if (!s) return undefined;
@@ -31,6 +31,7 @@ function parseWhen(s: string | undefined): number | undefined {
 
 export const emHistory = defineTool({
   name: "em_history",
+  annotations: READ_ONLY,
   description:
     "Understand the project's git history instead of running git log/blame/show (the hooks route those here): commits classified by kind (feat/fix/refactor/…), branches with ahead/behind and merge state, and a fix-origin trace that blames each fix's removed lines back to the commit that wrote them, so changes that later needed fixing are flagged. Use `overview` to orient (it also builds the table the hooks use to flag bug-prone files), `file` before editing a file (its fixes, what broke after past changes, who knows it), `risk` for the files in the working tree (or given paths), `commit` for one change, `branch` to compare a branch with the base, `symbol` for a function's line history, `timeline`/`search` to find when and why something happened. Commit messages are also indexed for em_search (source `git`).",
   schema: {

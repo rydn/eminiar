@@ -5,7 +5,7 @@ import { formatResults } from "../search/format.js";
 import { type SearchResponse, search } from "../search/pipeline.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, text } from "./types.js";
+import { defineTool, RUNS_CODE, text } from "./types.js";
 
 /** Per-output inline cap when `queries`/`intent` are given: the query hits carry the content. */
 const INLINE_LIMIT_WITH_QUERIES = 1024;
@@ -34,6 +34,7 @@ export function chooseInline(lengths: number[], perOutputCap: number, budgetChar
 
 export const emBatchExecute = defineTool({
   name: "em_batch_execute",
+  annotations: RUNS_CODE,
   description:
     "Run several labelled commands in parallel, index every output under its label, and answer `queries` against all of them in the same round trip. Ideal for research: git status + recent commits + test output + dependency list in one call. Without `queries`/`intent`, each output up to the index threshold (5 KB) is returned inline, within `max_tokens` overall; with them, only outputs up to 1 KB are inlined and the query hits carry the rest. Every output is indexed; an elided one is fetched with em_search {document_ids: [N]}.",
   schema: {

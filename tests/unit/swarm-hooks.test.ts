@@ -569,6 +569,71 @@ describe("routing for a swarm worker without Bash", () => {
     expect(await spawned("Explore")).toMatch(/^Use the eminiar tools \(em_execute, /);
     sessionRoot();
   });
+
+  it("lets a readonly worker's big Read and WebFetch through: it has neither em_execute_file nor em_fetch_and_index", async () => {
+    const root = project(
+      "readonly",
+      `swarms:
+  s:
+    description: test swarm
+    agents:
+      r: { description: reviews, tools_profile: readonly }
+      w: { description: writes }
+`,
+    );
+    sessionRoot(root);
+    resetSwarmConfigCache();
+    unmarks.push(markServerAlive(getContext(root)));
+    writeFileSync(join(root, "big.txt"), "x".repeat(300 * 1024));
+    const call = (agent_type: string, tool_name: string, tool_input: Record<string, unknown>) =>
+      handlers.PreToolUse!(
+        input(root, {
+          hook_event_name: "PreToolUse",
+          tool_name,
+          tool_input,
+          agent_id: `a-${agent_type}`,
+          agent_type,
+        }),
+      );
+    const bigRead = { file_path: join(root, "big.txt") };
+    const fetch = { url: "https://example.com/x" };
+    for (const [tool, args] of [
+      ["Read", bigRead],
+      ["WebFetch", fetch],
+    ] as const) {
+      const r = await call("swarm-s-r", tool, args);
+      expect(r?.hookSpecificOutput?.permissionDecision, tool).toBeUndefined();
+      expect(String(r?.hookSpecificOutput?.additionalContext ?? ""), tool).not.toMatch(
+        /em_execute_file|em_fetch_and_index/,
+      );
+      // a role with every tool is still routed
+      expect((await call("swarm-s-w", tool, args))?.hookSpecificOutput?.permissionDecision).toBe(
+        "deny",
+      );
+    }
+    // the routing prefix of its spawn names neither tool; a full role's prefix names both
+    const spawned = async (type: string) =>
+      String(
+        (
+          await handlers.PreToolUse!(
+            input(root, {
+              hook_event_name: "PreToolUse",
+              tool_name: "Agent",
+              tool_input: { subagent_type: type, prompt: "go" },
+              tool_use_id: `toolu_ro_${type}`,
+            }),
+          )
+        )?.hookSpecificOutput?.updatedInput?.prompt,
+      );
+    const ro = await spawned("swarm-s-r");
+    expect(ro).toMatch(/^Use the eminiar tools \(em_search, em_symbols, em_history\)/);
+    expect(ro).not.toMatch(/em_fetch_and_index|em_docs|em_execute/);
+    expect(ro).toContain("em_recall");
+    const full = await spawned("swarm-s-w");
+    expect(full).toContain("em_fetch_and_index");
+    expect(full).toContain("em_docs");
+    sessionRoot();
+  });
 });
 
 describe("swarm hooks with an invalid swarm file", () => {

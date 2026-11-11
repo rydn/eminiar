@@ -2,10 +2,11 @@ import { z } from "zod";
 import { ASPECTS, architecture, formatArchitecture } from "../graph/architecture.js";
 import { fileBytes, recordStat } from "../stats/record.js";
 import { ensureGraph } from "./em_graph.js";
-import { defineTool, text } from "./types.js";
+import { defineTool, READ_ONLY, text } from "./types.js";
 
 export const emArchitecture = defineTool({
   name: "em_architecture",
+  annotations: READ_ONLY,
   description:
     "One-screen picture of the project from the knowledge graph: languages and coverage, folders with size and heat, entry points (package.json bin/main/exports, orphan files), HTTP routes with handlers, hotspots (fan-in × churn × complexity), module clusters, import cycles and accepted decisions. Ask for specific aspects to keep it short. Use at the start of a task instead of listing directories and reading files.",
   schema: {

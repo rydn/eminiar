@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import type { ProjectContext } from "../context.js";
@@ -20,6 +21,7 @@ import { type RoutingEvent, recordRouting } from "../session/routing-stats.js";
 import { serverAlive } from "../session/server-alive.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
+import { EM_MCP_PREFIXES, isEmServerEntry, namesEmTool } from "../swarm/agents.js";
 import {
   isSwarmTool,
   spawnType,
@@ -1356,10 +1358,17 @@ export function suggest(
   }
 }
 
-/** The prompt prefix for a subagent; without `shell` it leaves out the command runners. */
-function subagentPrefix(shell: boolean): string {
+/**
+ * The prompt prefix for a subagent; `shell` false leaves out the command runners, `fetch` and
+ * `docs` false leave out em_fetch_and_index and em_docs (a readonly swarm worker has neither).
+ */
+function subagentPrefix(shell: boolean, fetch = true, docs = true): string {
   const runners = shell ? "em_execute, em_batch_execute, em_execute_file, " : "";
-  return `Use the eminiar tools (${runners}em_fetch_and_index, em_search, em_symbols, em_history) instead of ${shell ? "Bash/" : ""}Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, em_history {action:"file", path} before editing a file, em_symbols / em_search {source:"code"} before grepping for an identifier, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on.\n\n`;
+  const fetcher = fetch ? "em_fetch_and_index, " : "";
+  const lookup = docs
+    ? `, and em_docs {action:"lookup", query} before WebFetch/WebSearch for anything the project depends on`
+    : "";
+  return `Use the eminiar tools (${runners}${fetcher}em_search, em_symbols, em_history) instead of ${shell ? "Bash/" : ""}Read/Grep/WebFetch whenever output may be large; return only derived answers. Check em_recall {query} for project decisions and constraints before proposing changes, em_history {action:"file", path} before editing a file, em_symbols / em_search {source:"code"} before grepping for an identifier${lookup}.\n\n`;
 }
 
 /** Project-relative path of a tool's file_path, or undefined when it is outside the project. */
@@ -1616,10 +1625,11 @@ async function route(
 
   if (mode === "enforce") {
     if (s.prefixPrompt) {
-      // A swarm worker without Bash has no em_execute*: do not point it at them.
+      // A swarm worker lacking em_execute*, em_fetch_and_index or em_docs: do not point it at them.
+      const lacks = (tool: string) => swarmWorker && workerLacksTool(input, spawnType(input), tool);
       const prefix =
-        swarmWorker && workerLacksTool(input, spawnType(input), "em_execute")
-          ? subagentPrefix(false)
+        lacks("em_execute") || lacks("em_fetch_and_index") || lacks("em_docs")
+          ? subagentPrefix(!lacks("em_execute"), !lacks("em_fetch_and_index"), !lacks("em_docs"))
           : s.prefixPrompt;
       const prompt = String(input.tool_input.prompt ?? "");
       if (prompt.startsWith(prefix)) return undefined;
@@ -1651,11 +1661,26 @@ async function route(
         hint,
       );
     }
-    // Nor if the caller cannot call it: a swarm worker without Bash has no em_execute*, so
-    // the native call is its only way and the suggestion would be noise.
-    if (input.agent_id && workerLacksTool(input, input.agent_type, s.tool)) {
-      record("allow", "no-shell");
-      return withContext(undefined, hint);
+    // Nor if the subagent cannot call the suggested tool: a denial would be a dead end. A
+    // swarm worker's role config decides (no Bash: no em_execute*; readonly: read-only em_*
+    // only), else the agent file's own `tools` / `disallowedTools`.
+    if (input.agent_id) {
+      const lacks = workerLacksTool(input, input.agent_type, s.tool)
+        ? "tool"
+        : agentLacksTool(ctx.root, input.agent_type, s.tool);
+      // No em_* tool at all: say so, so it carries on with the native tool.
+      if (lacks === "all") {
+        record("annotate", "no-em-tools");
+        return withContext(
+          annotate(s, " This agent has no em_* tools, so the call is allowed."),
+          hint,
+        );
+      }
+      // Some em_* tools but not this one: pointing at it would be noise.
+      if (lacks === "tool") {
+        record("allow", "no-tool");
+        return withContext(undefined, hint);
+      }
     }
     record("deny");
     hookLog("info", `deny ${input.tool_name} → ${s.tool} [${s.rule ?? "?"}]: ${callHead(input)}`);
@@ -1674,6 +1699,128 @@ async function route(
       ? joinHints((await briefFor(ctx, String(input.tool_input.prompt ?? ""))).trim(), hint)
       : hint;
   return withContext(annotate(s), extra);
+}
+
+interface AgentTools {
+  /** The `tools:` allowlist; undefined: every tool is inherited. */
+  tools: string[] | undefined;
+  disallowed: string[];
+}
+
+const agentToolsCache = new Map<string, { mtimeMs: number; tools: AgentTools | undefined }>();
+
+/** Is `entry` one of eminiar's full MCP tool names (either install form)? */
+const isEmFullName = (entry: string): boolean => EM_MCP_PREFIXES.some((p) => entry.startsWith(p));
+
+/**
+ * Does the `tools:` entry `entry` grant the em_* tool `tool` under the MCP name prefix `prefix`?
+ * Its full name or a server-wide entry for that server does. A bare name or another server's
+ * tool of that name is unsure, so it counts for every form (keep denying); the other install
+ * form's full name does not.
+ */
+function grantsUnder(entry: string, prefix: string, tool: string): boolean {
+  if (entry === prefix + tool || isEmServerEntry(entry, prefix)) return true;
+  return !isEmFullName(entry) && (entry === tool || entry.endsWith(`__${tool}`));
+}
+
+/** Does the `tools:` entry `entry` grant some em_* tool under `prefix` (unsure forms included)? */
+function grantsSomeUnder(entry: string, prefix: string): boolean {
+  if (entry.startsWith(`${prefix}em_`) || isEmServerEntry(entry, prefix)) return true;
+  return !isEmFullName(entry) && /(^|__)em_[a-z_]+$/.test(entry);
+}
+
+/**
+ * Can the subagent `agentType` not call the em_* tool `tool`, by the project's
+ * `.claude/agents/<type>.md` frontmatter? The agent may reach eminiar under either MCP name
+ * form (plugin or settings install), so it lacks the tool only when no form reaches it: its
+ * `tools:` allowlist does not grant that form, or `disallowedTools` removes it by full name or a
+ * server-wide entry. Bare names and other servers' tools never remove one (Claude Code does not
+ * match them to eminiar's tool). "all": no form reaches any em_* tool; "tool": it lacks this
+ * one only. Only asked on the deny path. An agent without a file or without a `tools:` key
+ * inherits every tool. Cached by file mtime. Never throws: any error answers undefined (keep
+ * denying).
+ */
+export function agentLacksTool(
+  root: string,
+  agentType: string | undefined,
+  tool: string,
+): "all" | "tool" | undefined {
+  if (!agentType || !/^[A-Za-z0-9][\w.-]*$/.test(agentType)) return undefined;
+  if (!/^em_[a-z_]+$/.test(tool)) return undefined;
+  try {
+    const file = join(root, ".claude", "agents", `${agentType}.md`);
+    const mtimeMs = statSync(file).mtimeMs;
+    let hit = agentToolsCache.get(file);
+    if (!hit || hit.mtimeMs !== mtimeMs) {
+      hit = { mtimeMs, tools: frontmatterAgentTools(readFileSync(file, "utf8")) };
+      agentToolsCache.set(file, hit);
+    }
+    const a = hit.tools;
+    if (!a) return undefined;
+    const { tools, disallowed } = a;
+    const reaches = (p: string) =>
+      !namesEmTool(disallowed, p, tool) && (!tools || tools.some((t) => grantsUnder(t, p, tool)));
+    if (EM_MCP_PREFIXES.some(reaches)) return undefined;
+    const reachesSome = (p: string) =>
+      !disallowed.some((t) => isEmServerEntry(t, p)) &&
+      (!tools || tools.some((t) => grantsSomeUnder(t, p)));
+    return EM_MCP_PREFIXES.some(reachesSome) ? "tool" : "all";
+  } catch {
+    return undefined;
+  }
+}
+
+/** Does the subagent's tools allowlist have no em_* tool at all? (agentLacksTool "all") */
+export function agentLacksEmTools(root: string, agentType: string | undefined): boolean {
+  return agentLacksTool(root, agentType, "em_search") === "all";
+}
+
+/** `yaml` is loaded on first use: only the subagent deny path ever parses an agent file. */
+let yamlLib: typeof import("yaml") | undefined;
+function yaml(): typeof import("yaml") {
+  yamlLib ??= createRequire(import.meta.url)("yaml") as typeof import("yaml");
+  return yamlLib;
+}
+
+/** Agent frontmatter is under 2 KB in practice; past these caps routing keeps denying. */
+const FRONTMATTER_MAX_CHARS = 16 * 1024;
+const FRONTMATTER_MAX_LINES = 400;
+
+/** Does `text` have more than `max` lines? Stops counting at the cap. */
+function lineCountOver(text: string, max: number): boolean {
+  let lines = 1;
+  for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1))
+    if (++lines > max) return true;
+  return false;
+}
+
+/**
+ * `tools` and `disallowedTools` of a markdown file's YAML frontmatter, parsed with the yaml
+ * package (flow and block lists, folded scalars, comments). Undefined, which keeps denying,
+ * without a frontmatter, when it does not parse, or when either key holds anything but a
+ * comma-separated string or a list of strings. An empty `tools` also answers undefined, and so
+ * does a frontmatter over FRONTMATTER_MAX_CHARS or FRONTMATTER_MAX_LINES: yaml's duplicate-key
+ * check is quadratic in the keys, and a synchronous parse cannot be cut short by the hook's
+ * time budget (each hook call is a new process, so the mtime cache does not help either).
+ */
+function frontmatterAgentTools(text: string): AgentTools | undefined {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(text)?.[1];
+  if (fm === undefined || fm.length > FRONTMATTER_MAX_CHARS) return undefined;
+  if (lineCountOver(fm, FRONTMATTER_MAX_LINES)) return undefined;
+  const doc: unknown = yaml().parse(fm); // throws on invalid YAML: the caller keeps denying
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return undefined;
+  const { tools, disallowedTools } = doc as Record<string, unknown>;
+  const allow = tools === undefined ? undefined : toolList(tools);
+  const deny = disallowedTools === undefined ? [] : toolList(disallowedTools);
+  if ((tools !== undefined && !allow?.length) || !deny) return undefined;
+  return { tools: allow, disallowed: deny };
+}
+
+/** A frontmatter tool list: "A, B" or [A, B]; undefined for any other shape. */
+function toolList(v: unknown): string[] | undefined {
+  const items = typeof v === "string" ? v.split(",") : Array.isArray(v) ? v : undefined;
+  if (!items?.every((t) => typeof t === "string")) return undefined;
+  return items.map((t: string) => t.trim()).filter(Boolean);
 }
 
 /** Native tools routing may redirect; their every call is counted, denied or not. */

@@ -1,6 +1,6 @@
 import { indexFreshness } from "../graph/reindex.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, text } from "./types.js";
+import { defineTool, READ_ONLY, text } from "./types.js";
 
 export interface IndexStatus {
   freshness: ReturnType<typeof indexFreshness>;
@@ -76,6 +76,7 @@ export function formatIndexStatus(s: IndexStatus): string {
 
 export const emIndexStatus = defineTool({
   name: "em_index_status",
+  annotations: READ_ONLY,
   description:
     "Is the code graph fresh? Reports HEAD vs indexed commit, files edited since they were indexed, the reindex queue, files by index status (indexed/partial/skipped/unsupported) with reasons, metrics age and recent index runs. Check before trusting absence claims (e.g. 'nothing calls X').",
   schema: {},

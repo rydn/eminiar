@@ -3,7 +3,7 @@ import { describeRun, execute } from "../sandbox/execute.js";
 import { cleanStderr, processOutput } from "../sandbox/output.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, RUNS_CODE, text } from "./types.js";
 
 export const LANG_ENUM = z
   .string()
@@ -13,6 +13,7 @@ export const LANG_ENUM = z
 
 export const emExecute = defineTool({
   name: "em_execute",
+  annotations: RUNS_CODE,
   description:
     "Run code in a sandbox inside the project root and return its stdout, then its stderr after a `--- stderr ---` line. Output over the index threshold (5 KB) is indexed; pass `intent` to get back just the matching sections plus a vocabulary of searchable terms. Use this instead of Bash for anything that prints a lot: git log/diff, test runs, dependency trees, logs, API calls. Shell snippets honour Claude Code's Bash deny rules. javascript and typescript run as ES modules; `import` and `require` both work.",
   schema: {

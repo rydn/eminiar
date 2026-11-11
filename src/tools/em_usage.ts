@@ -49,7 +49,7 @@ import { ingestProject, ingestSession, usageEnabled } from "../usage/ingest.js";
 import { detectInsights, type Insight, loadInsightInput, type Score } from "../usage/insights.js";
 import { formatUsd } from "../usage/pricing.js";
 import { type PricedSavings, pricedSavings } from "../usage/savings.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export const USAGE_VIEWS = [
   "summary",
@@ -935,6 +935,7 @@ export function usageCsv(view: UsageView, payload: UsagePayload): string | undef
 
 export const emUsage = defineTool({
   name: "em_usage",
+  annotations: LOCAL_WRITE,
   description:
     "Token, cache and cost insights for Claude Code sessions, from the transcripts on this machine: cost today / 7d / 30d, cache hit rate, per-model and per-session breakdowns, 5-hour billing blocks with burn rate, the context timeline of a session with compactions, which tools put the most into context, detected insights with scores, and what eminiar's own tools saved. Cost is an estimate at list prices; everything stays local.",
   schema: {
