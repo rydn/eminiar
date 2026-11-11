@@ -302,7 +302,12 @@ const mask = (s: string): string => redactSecrets(s);
  * Validate and mask the fields. `strict` (writes) throws on bad input; lenient (importing a
  * hand-edited file) drops what is unusable so one bad line never hides the playbook.
  */
-function clean(f: PlaybookFields, strict: boolean, fallbackTitle: string): Clean {
+function clean(
+  f: PlaybookFields,
+  strict: boolean,
+  fallbackTitle: string,
+  unchangedPrompt?: string | undefined,
+): Clean {
   const bad = (msg: string): never => {
     throw new Error(msg);
   };
@@ -310,7 +315,7 @@ function clean(f: PlaybookFields, strict: boolean, fallbackTitle: string): Clean
   if (strict && !oneLine(f.title ?? "")) bad("a playbook needs a title");
   const prompt = mask((f.prompt ?? "").replace(/\r\n/g, "\n")).trim();
   if (strict && !prompt) bad("a playbook needs a prompt");
-  if (strict && prompt.length > MAX_PROMPT)
+  if (strict && prompt.length > MAX_PROMPT && prompt !== unchangedPrompt)
     bad(`prompt is ${prompt.length} characters; the limit is ${MAX_PROMPT}`);
   const params: PlaybookParam[] = [];
   for (const p of f.params ?? []) {
@@ -494,6 +499,37 @@ function locate(ctx: ProjectContext, name: string): boolean | undefined {
 }
 
 /**
+ * The project-relative path of a file in either folder whose name equals `name` only when case
+ * is ignored (`Review-PRs.md` for `review-prs`). A case-insensitive disk holds one file for both
+ * spellings, so a second playbook that differs only in case must not be created.
+ */
+function caseVariant(ctx: ProjectContext, name: string): string | undefined {
+  const exact = `${name}.md`;
+  for (const priv of [true, false]) {
+    const rel = relDir(ctx, priv);
+    let entries: string[];
+    try {
+      assertInside(ctx, join(ctx.root, rel, "x.md"));
+      entries = readdirSync(join(ctx.root, rel));
+    } catch {
+      continue; // no such folder, a link out of the project, or unreadable
+    }
+    const hit = entries.find((f) => f !== exact && f.toLowerCase() === exact);
+    if (hit) return `${rel}/${hit}`;
+  }
+  return undefined;
+}
+
+/** A name a new playbook cannot take: mirrored, on disk, or on disk in another case. */
+function nameTaken(ctx: ProjectContext, db: StorageAdapter, name: string): boolean {
+  return (
+    !!db.playbooks.get(name) ||
+    locate(ctx, name) !== undefined ||
+    caseVariant(ctx, name) !== undefined
+  );
+}
+
+/**
  * The project-relative path of a committed playbook that a private one of the same name hides,
  * or undefined when `name` is not in both folders.
  */
@@ -535,7 +571,8 @@ export function reconcile(ctx: ProjectContext, db: StorageAdapter): ReconcileSum
       continue;
     }
     for (const f of entries) {
-      const name = f.slice(0, -3);
+      // names are compared without case: on a case-insensitive disk Review-PRs.md is review-prs
+      const name = f.slice(0, -3).toLowerCase();
       const relFile = `${rel}/${f}`;
       if (!isValidName(name) || seen.has(name)) {
         out.skipped.push(relFile);
@@ -613,11 +650,10 @@ export interface WriteInput extends PlaybookFields {
 /** `slug of the title`, suffixed -2, -3… while taken. */
 function freeName(ctx: ProjectContext, db: StorageAdapter, title: string): string {
   const base = slugify(title);
-  const taken = (n: string) => !!db.playbooks.get(n) || locate(ctx, n) !== undefined;
-  if (!taken(base)) return base;
+  if (!nameTaken(ctx, db, base)) return base;
   for (let i = 2; i < 1000; i++) {
     const n = `${base.slice(0, 58)}-${i}`;
-    if (!taken(n)) return n;
+    if (!nameTaken(ctx, db, n)) return n;
   }
   return `${base.slice(0, 48)}-${Date.now()}`;
 }
@@ -629,11 +665,22 @@ export function write(
 ): { name: string; path: string; created: boolean; row: PlaybookRow } {
   assertAdding(ctx);
   assertFolders(ctx);
-  const c = clean(input, true, "");
+  // The prompt limit applies when the prompt changes: a hand-written file over it stays editable.
+  const c = clean(
+    input,
+    true,
+    "",
+    input.name ? db.playbooks.get(input.name.trim())?.prompt : undefined,
+  );
   const name = input.name?.trim() || freeName(ctx, db, c.title);
   assertValidName(name);
   const priv = input.private === true;
   const where = locate(ctx, name);
+  const variant = input.replace ? undefined : caseVariant(ctx, name);
+  if (variant)
+    throw new Error(
+      `playbook "${name}" clashes with ${variant}: names are compared without case, and a case-insensitive disk holds one file for both; rename or remove that file first`,
+    );
   const exists = where !== undefined || !!db.playbooks.get(name);
   if (exists && !input.replace)
     throw new Error(`playbook "${name}" already exists; pass replace: true to overwrite it`);
@@ -732,7 +779,10 @@ export function recordRun(
   assertValidName(input.playbook);
   if (!(PLAYBOOK_TRIGGERS as readonly string[]).includes(input.trigger))
     throw new Error(`invalid trigger "${input.trigger}": use ${PLAYBOOK_TRIGGERS.join(" | ")}`);
-  if (input.status && !(PLAYBOOK_RUN_STATUSES as readonly string[]).includes(input.status))
+  if (
+    input.status !== undefined &&
+    !(PLAYBOOK_RUN_STATUSES as readonly string[]).includes(input.status)
+  )
     throw new Error(`invalid status "${input.status}": use ${PLAYBOOK_RUN_STATUSES.join(" | ")}`);
   if (!db.playbooks.get(input.playbook)) throw new Error(`no playbook named "${input.playbook}"`);
   const note = input.note ? mask(oneLine(input.note)).slice(0, MAX_NOTE) : undefined;
@@ -749,7 +799,10 @@ export function recordRun(
 
 export interface CloseRunInput {
   playbook: string;
-  /** The id `run` returned; without one the newest run of the playbook still started is closed. */
+  /**
+   * The id `run` returned. Without one the newest started run opened through em_playbook (trigger
+   * mcp, what the schedule text produces) is closed, never a CLI or dashboard run.
+   */
   runId?: number | undefined;
   status: PlaybookRunStatus;
   note?: string | undefined;
@@ -776,8 +829,11 @@ export function closeRun(
   if (input.runId === undefined) {
     run = db.playbooks
       .runs({ playbook: input.playbook, limit: 1000 })
-      .find((r) => r.status === "started");
-    if (!run) throw new Error(`playbook ${input.playbook} has no started run to report on`);
+      .find((r) => r.status === "started" && r.trigger === "mcp");
+    if (!run)
+      throw new Error(
+        `playbook ${input.playbook} has no started run from em_playbook to report on; pass the run id (run_id) to close a CLI or dashboard run`,
+      );
   } else {
     run = db.playbooks.getRun(input.runId);
     if (run?.playbook !== input.playbook) run = undefined;
@@ -859,10 +915,7 @@ export function acceptSuggestion(
   const w = write(ctx, db, {
     // a taken name gets a numbered one: accepting must not overwrite a playbook
     name:
-      overrides.name ??
-      (isValidName(s.name) && !db.playbooks.get(s.name) && locate(ctx, s.name) === undefined
-        ? s.name
-        : undefined),
+      overrides.name ?? (isValidName(s.name) && !nameTaken(ctx, db, s.name) ? s.name : undefined),
     title: overrides.title ?? s.title,
     prompt: overrides.prompt ?? s.prompt,
     params: overrides.params ?? rowParams(s),
@@ -871,7 +924,12 @@ export function acceptSuggestion(
     private: overrides.private,
     source: "suggested",
   });
-  db.playbooks.suggestionSetStatus(id, "accepted", w.name);
+  // The update only applies to a pending row. Losing the race (another process accepted it
+  // after our check) means that process owns the playbook: take ours back out.
+  if (!db.playbooks.suggestionSetStatus(id, "accepted", w.name)) {
+    remove(ctx, db, w.name);
+    throw new Error(`suggestion ${id} is already accepted or dismissed`);
+  }
   return { name: w.name, path: w.path };
 }
 

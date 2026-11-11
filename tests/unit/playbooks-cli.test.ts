@@ -163,7 +163,7 @@ describe("eminiar playbook", () => {
     expect(rows[0]).toMatchObject({ trigger: "cli", status: "started" });
     expect((await run(["runs", "--limit", "1"])).out.split("\n")).toHaveLength(1);
     expect((await run(["run", "ghost"])).code).toBe(1);
-    expect((await run(["run", "r", "--set", "bad"])).code).toBe(1);
+    expect((await run(["run", "r", "--set", "bad"])).code).toBe(2);
   });
 
   it("export prints markdown by default, writes a skill with --skill, prints a schedule prompt with --schedule", async () => {

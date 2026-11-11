@@ -27,7 +27,8 @@ let ctx: ProjectContext;
 let db: Db;
 let n = 0;
 
-const lexical = { embeddings: false } as const;
+// days are local calendar days; the thresholds below are written in UTC
+const lexical = { embeddings: false, timeZone: "UTC" } as const;
 
 function fresh(): void {
   closeAllStorage();

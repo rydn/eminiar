@@ -407,7 +407,7 @@ describe("eminiar playbook exit codes", () => {
       [["add", "pb", "--title", "T", "--prompt", "dup"], 1],
       [["add", "Bad Name", "--title", "T", "--prompt", "p"], 1],
       [["add", "nofile", "--title", "T", "--file", join(root, "missing.txt")], 1],
-      [["run", "pb", "--set", "novalue"], 1],
+      [["run", "pb", "--set", "novalue"], 2],
       [["export", "pb", "--skill", "--target", "../out"], 1],
       [["bogus"], 2],
       [["show"], 2],

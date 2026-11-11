@@ -197,6 +197,7 @@ eminiar playbook add <name> --title T (--prompt P | --file F | stdin) [--param n
 eminiar playbook edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t]
 eminiar playbook rm <name>
 eminiar playbook run <name> [--set k=v] [--note N]   # print the filled prompt and record a run
+eminiar playbook report <name> --status done|failed|skipped [--run ID] [--note N]   # close a run (default: the newest started CLI run)
 eminiar playbook runs [name] [--limit N]       # recorded runs
 eminiar playbook export <name> [--skill [--target DIR] [--model-invocable]] [--schedule] [--set k=v]
 eminiar playbook scan [--dry-run]              # opt-in: suggest playbooks from recurring tasks

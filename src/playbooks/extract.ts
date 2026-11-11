@@ -21,7 +21,6 @@ export const MIN_SESSIONS = 3;
 export const MIN_DAYS = 2;
 /** A tool call belongs to a prompt when it follows it in the same session within this window. */
 const WINDOW_MS = 30 * 60_000;
-const DAY_MS = 86_400_000;
 const EVENT_LIMIT = 20_000;
 const EMBED_SIM = 0.82;
 const LEXICAL_SIM = 0.5;
@@ -57,6 +56,8 @@ export interface ScanOptions {
   embeddings?: EmbeddingProvider | false | undefined;
   /** Only events at or after this time (ms). */
   since?: number | undefined;
+  /** IANA time zone whose calendar days are counted. Default: this machine's. */
+  timeZone?: string | undefined;
 }
 
 export interface Candidate {
@@ -380,7 +381,18 @@ interface Mined {
   members: Item[];
 }
 
-function toCandidate(members: Item[]): Mined | undefined {
+/** The calendar day of `ts` in `timeZone` (default: the machine's), as a sortable string. */
+function dayCounter(timeZone: string | undefined): (ts: number) => string {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    ...(timeZone ? { timeZone } : {}),
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return (ts) => fmt.format(ts);
+}
+
+function toCandidate(members: Item[], dayOf: (ts: number) => string): Mined | undefined {
   const withServers = members.filter((m) => m.servers.size > 0);
   const count = new Map<string, number>();
   for (const m of withServers) for (const s of m.servers) count.set(s, (count.get(s) ?? 0) + 1);
@@ -392,7 +404,7 @@ function toCandidate(members: Item[]): Mined | undefined {
   // only prompts whose tool window shares the server set count as evidence
   const evidence = members.filter((m) => servers.every((s) => m.servers.has(s)));
   const sessions = new Set(evidence.map((m) => m.session));
-  const days = new Set(evidence.map((m) => Math.floor(m.ts / DAY_MS)));
+  const days = new Set(evidence.map((m) => dayOf(m.ts)));
   if (sessions.size < MIN_SESSIONS || days.size < MIN_DAYS) return undefined;
   const tokens = topTokens(evidence, 6);
   if (!tokens.length) return undefined;
@@ -520,8 +532,9 @@ export async function scan(
   const errors: string[] = [];
   let knownCount = 0;
   let suggested = 0;
+  const dayOf = dayCounter(opt.timeZone);
   for (const c of clusters) {
-    const mined = toCandidate(c);
+    const mined = toCandidate(c, dayOf);
     if (!mined) continue;
     const { cand } = mined;
     if (known.has(mined)) {

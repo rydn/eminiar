@@ -106,7 +106,8 @@ export function parsePlaybookFile(text: string): {
   const meta: PlaybookMeta = {};
   // The close marker starts at its "\n", so a CRLF header's last line still ends in "\r".
   for (const line of header.replace(/\r$/, "").split(/\r?\n/)) {
-    const m = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
+    // `[^\n\r]*`, not `.*`: a value holding U+2028 / U+2029 must not drop the whole line.
+    const m = /^([A-Za-z0-9_-]+):\s*([^\n\r]*)$/.exec(line);
     // `__proto__: [a]` would set meta's prototype (a playbook file can come with the repo).
     if (!m || UNSAFE_KEYS.has(m[1]!)) continue;
     meta[m[1]!] = parseValue(m[2]!);
@@ -114,10 +115,13 @@ export function parsePlaybookFile(text: string): {
   return { meta, body, hadFrontmatter: true };
 }
 
-/** One line, no control characters (a newline in a header value would start a new key). */
+/**
+ * One line, no control characters (a newline in a header value would start a new key) and no
+ * Unicode line or paragraph separators (U+2028, U+2029, NEL): a JS regex treats them as line ends.
+ */
 export function oneLine(s: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
-  return s.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  return s.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ").trim();
 }
 
 /** A header value, quoted as JSON unless it reads back as itself bare. */

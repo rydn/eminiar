@@ -209,11 +209,10 @@ export class SqlitePlaybookStore implements PlaybookStore {
     playbook?: string | undefined,
   ): boolean {
     return (
-      this.prep("UPDATE playbook_suggestions SET status = ?, playbook = ? WHERE id = ?").run(
-        status,
-        playbook ?? null,
-        id,
-      ).changes > 0
+      // only a pending suggestion changes: two processes cannot both accept (or accept and dismiss)
+      this.prep(
+        "UPDATE playbook_suggestions SET status = ?, playbook = ? WHERE id = ? AND status = 'pending'",
+      ).run(status, playbook ?? null, id).changes > 0
     );
   }
 

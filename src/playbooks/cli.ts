@@ -6,6 +6,7 @@ import type { PlaybookParam } from "../storage/types.js";
 import { exportMarkdown, exportSkill, schedulePrompt } from "./export.js";
 import { scan } from "./extract.js";
 import {
+  closeRun,
   fillPrompt,
   list,
   read,
@@ -19,7 +20,7 @@ import {
 } from "./store.js";
 
 /**
- * `eminiar playbook <list|show|add|edit|rm|run|runs>`. Playbooks are stored recurring tasks;
+ * `eminiar playbook <list|show|add|edit|rm|run|report|runs>`. Playbooks are stored recurring tasks;
  * nothing here executes or schedules one. `run` prints the filled prompt and records a run.
  * Kept out of src/cli.ts so it can be tested without process.exit. Returns the exit code.
  */
@@ -35,7 +36,7 @@ const defaultIO: CliIO = {
 };
 
 export const PLAYBOOK_USAGE =
-  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR | --user] [--model-invocable] [--allow-private]] [--schedule] [--set k=v] | scan [--dry-run]> [--json]";
+  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | report <name> --status done|failed|skipped [--run ID] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR | --user] [--model-invocable] [--allow-private]] [--schedule] [--set k=v] | scan [--dry-run]> [--json]";
 
 async function storage(ctx: ProjectContext): Promise<StorageAdapter> {
   const { getStorage } = await import("../storage/index.js");
@@ -49,11 +50,49 @@ function parseParams(specs: string[]): PlaybookParam[] {
   });
 }
 
+/** A mistake in how the command was typed: exit code 2, like the other usage errors. */
+class UsageError extends Error {}
+
+/** `--tag a,b --tag c` is three tags, as in the dashboard. */
+const splitTags = (specs: string[]): string[] =>
+  specs
+    .flatMap((t) => t.split(","))
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+const REPORT_STATUSES = ["done", "failed", "skipped"];
+
+/** `schedule` takes a value for add and edit and is a plain switch for export. */
+function optionSpec(scheduleSwitch: boolean) {
+  return {
+    json: { type: "boolean" },
+    title: { type: "string" },
+    prompt: { type: "string" },
+    file: { type: "string" },
+    param: { type: "string", multiple: true },
+    set: { type: "string", multiple: true },
+    tag: { type: "string", multiple: true },
+    schedule: { type: scheduleSwitch ? "boolean" : "string" },
+    note: { type: "string" },
+    limit: { type: "string" },
+    status: { type: "string" },
+    run: { type: "string" },
+    private: { type: "boolean" },
+    replace: { type: "boolean" },
+    skill: { type: "boolean" },
+    "model-invocable": { type: "boolean" },
+    target: { type: "string" },
+    user: { type: "boolean" },
+    "allow-private": { type: "boolean" },
+    "dry-run": { type: "boolean" },
+  } as const;
+}
+
 function parseSets(specs: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const s of specs) {
     const i = s.indexOf("=");
-    if (i <= 0) throw new Error(`--set expects name=value, got "${s}"`);
+    if (i <= 0) throw new UsageError(`--set expects name=value, got "${s}"`);
     out[s.slice(0, i).trim()] = s.slice(i + 1);
   }
   return out;
@@ -75,41 +114,39 @@ export async function playbookCommand(
   io: CliIO = defaultIO,
   stdin: () => Promise<string> = readStdin,
 ): Promise<number> {
-  // `--schedule` takes a value for add/edit but is a plain switch for export
-  const exporting = args[0] === "export";
-  const scheduleFlag = exporting && args.includes("--schedule");
+  // `--schedule` takes a value for add/edit but is a plain switch for export, so find the
+  // subcommand first (it need not come first: `--json export a --schedule`).
+  const exporting =
+    parseArgs({ args, options: optionSpec(true), allowPositionals: true, strict: false })
+      .positionals[0] === "export";
+  const spec = optionSpec(exporting);
   const { values, positionals } = parseArgs({
-    args: exporting ? args.filter((a) => a !== "--schedule") : args,
-    options: {
-      json: { type: "boolean" },
-      title: { type: "string" },
-      prompt: { type: "string" },
-      file: { type: "string" },
-      param: { type: "string", multiple: true },
-      set: { type: "string", multiple: true },
-      tag: { type: "string", multiple: true },
-      schedule: { type: "string" },
-      note: { type: "string" },
-      limit: { type: "string" },
-      private: { type: "boolean" },
-      replace: { type: "boolean" },
-      skill: { type: "boolean" },
-      "model-invocable": { type: "boolean" },
-      target: { type: "string" },
-      user: { type: "boolean" },
-      "allow-private": { type: "boolean" },
-      "dry-run": { type: "boolean" },
-    },
+    args,
+    options: spec,
     allowPositionals: true,
     strict: false,
   });
   const [sub = "list", name] = positionals;
   const json = !!values.json;
-  for (const o of ["title", "prompt", "file", "schedule", "note", "limit", "target"] as const)
+  const unknown = Object.keys(values).find((k) => !(k in spec));
+  if (unknown) {
+    io.err(`unknown option --${unknown}\n${PLAYBOOK_USAGE}`);
+    return 2;
+  }
+  if (exporting && typeof values.schedule === "string") {
+    io.err("--schedule takes no value for export");
+    return 2;
+  }
+  const scheduleFlag = exporting && values.schedule === true;
+  for (const o of ["title", "prompt", "file", "note", "limit", "target", "status", "run"] as const)
     if (values[o] === true) {
       io.err(`--${o} needs a value`);
       return 2;
     }
+  if (!exporting && values.schedule === true) {
+    io.err("--schedule needs a value");
+    return 2;
+  }
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   const strs = (v: unknown): string[] =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
@@ -132,7 +169,7 @@ export async function playbookCommand(
     switch (sub) {
       case "list": {
         reconcile(ctx, db);
-        const rows = list(ctx, db, { tag: strs(values.tag)[0], limit });
+        const rows = list(ctx, db, { tag: splitTags(strs(values.tag))[0], limit });
         if (json) {
           emit(
             rows.map((r) => ({
@@ -178,18 +215,20 @@ export async function playbookCommand(
         }
         io.out(
           [
-            `${f.name}: ${f.title}`,
-            `path: ${f.path}${f.private ? " (private)" : ""}  source: ${f.source}`,
-            f.schedule ? `schedule: ${f.schedule} (a note; eminiar does not run it)` : "",
-            f.tags.length ? `tags: ${f.tags.join(", ")}` : "",
-            f.params.length
-              ? `params: ${f.params.map((p) => (p.default !== undefined ? `${p.name}=${p.default}` : p.name)).join(", ")}`
-              : "",
+            [
+              `${f.name}: ${f.title}`,
+              `path: ${f.path}${f.private ? " (private)" : ""}  source: ${f.source}`,
+              f.schedule ? `schedule: ${f.schedule} (a note; eminiar does not run it)` : "",
+              f.tags.length ? `tags: ${f.tags.join(", ")}` : "",
+              f.params.length
+                ? `params: ${f.params.map((p) => (p.default !== undefined ? `${p.name}=${p.default}` : p.name)).join(", ")}`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
             "",
             f.prompt,
-          ]
-            .filter((l, i) => l !== "" || i > 0)
-            .join("\n"),
+          ].join("\n"),
         );
         return 0;
       }
@@ -214,7 +253,7 @@ export async function playbookCommand(
           return 2;
         }
         const params = strs(values.param);
-        const tags = strs(values.tag);
+        const tags = splitTags(strs(values.tag));
         const r = write(ctx, db, {
           name: n,
           title,
@@ -268,8 +307,44 @@ export async function playbookCommand(
         return 0;
       }
 
+      case "report": {
+        if (!needName()) return 2;
+        const status = str(values.status);
+        if (!status || !REPORT_STATUSES.includes(status)) {
+          io.err(`playbook report needs --status ${REPORT_STATUSES.join("|")}`);
+          return 2;
+        }
+        let runId: number | undefined;
+        if (str(values.run) !== undefined) {
+          runId = Number(values.run);
+          if (!Number.isInteger(runId) || runId < 1) {
+            io.err("--run needs a run id (a positive whole number)");
+            return 2;
+          }
+        }
+        reconcile(ctx, db);
+        // without --run: the newest run `playbook run` started here and nobody has closed yet
+        runId ??= runs(ctx, db, { playbook: name, limit: 1000 }).find(
+          (r) => r.status === "started" && r.trigger === "cli",
+        )?.id;
+        if (runId === undefined) {
+          io.err(`playbook ${name} has no started CLI run to report on; pass --run ID`);
+          return 1;
+        }
+        const { id } = closeRun(ctx, db, {
+          playbook: name as string,
+          runId,
+          status: status as "done" | "failed" | "skipped",
+          note: str(values.note),
+        });
+        if (json) emit({ name, run: id, status });
+        else io.out(`closed run ${id} of ${name} as ${status}`);
+        return 0;
+      }
+
       case "export": {
         if (!needName()) return 2;
+        const sets = parseSets(strs(values.set));
         if (values.skill && scheduleFlag) {
           io.err("choose one of --skill and --schedule");
           return 2;
@@ -286,7 +361,7 @@ export async function playbookCommand(
             userScope: !!values.user,
             allowPrivate: !!values["allow-private"],
             sideEffecting: !values["model-invocable"],
-            values: parseSets(strs(values.set)),
+            values: sets,
           });
           if (json)
             emit({
@@ -306,7 +381,7 @@ export async function playbookCommand(
           return 0;
         }
         if (scheduleFlag) {
-          const t = schedulePrompt(ctx, db, n, parseSets(strs(values.set)));
+          const t = schedulePrompt(ctx, db, n, sets);
           if (json) emit({ name: n, prompt: t });
           else io.out(t);
           return 0;
@@ -375,6 +450,6 @@ export async function playbookCommand(
     }
   } catch (e) {
     io.err(e instanceof Error ? e.message : String(e));
-    return 1;
+    return e instanceof UsageError ? 2 : 1;
   }
 }

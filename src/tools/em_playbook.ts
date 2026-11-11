@@ -96,7 +96,9 @@ export const emPlaybook = defineTool({
       .number()
       .int()
       .optional()
-      .describe("report: the id run returned (omitted: the newest started run)"),
+      .describe(
+        "report: the id run returned (omitted: the newest started run that em_playbook run opened)",
+      ),
     tag: z.string().optional().describe("list: only this tag"),
     id: z.number().int().optional().describe("accept/dismiss: the suggestion id"),
     dry_run: z.boolean().optional().describe("scan: report candidates without storing them"),
