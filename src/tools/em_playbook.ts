@@ -20,7 +20,7 @@ import {
 import { getCurrentSession } from "../session/current.js";
 import { getStorage } from "../storage/index.js";
 import { PLAYBOOK_RUN_STATUSES, type PlaybookRow } from "../storage/types.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 function line(r: PlaybookRow): string {
   const tags = rowTags(r);
@@ -45,6 +45,9 @@ function describe(f: PlaybookFile): string {
 
 export const emPlaybook = defineTool({
   name: "em_playbook",
+  // delete removes a playbook, edit and export skill overwrite files, and run/report/scan add a
+  // row on every call; nothing reaches the network.
+  annotations: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: false },
   description:
     "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export (format markdown|skill|schedule: skill writes a Claude Code SKILL.md, schedule returns text to paste into a Desktop or cloud scheduled task); run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it for good.",
   schema: {
