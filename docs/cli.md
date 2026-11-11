@@ -180,6 +180,28 @@ eminiar adjudicator exchanges purge [--yes]       # delete this project's captur
 Exit codes: 2 for a usage error (unknown provider, preset or mode, a key on the command line),
 1 when consent is declined or a key or provider call fails. See [Adjudicator](adjudicator.md).
 
+## Playbooks
+
+```sh
+eminiar playbook list [--tag t] [--limit N]    # stored recurring tasks
+eminiar playbook show <name>                   # one playbook with its prompt
+eminiar playbook add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace]
+eminiar playbook edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t]
+eminiar playbook rm <name>
+eminiar playbook run <name> [--set k=v] [--note N]   # print the filled prompt and record a run
+eminiar playbook runs [name] [--limit N]       # recorded runs
+eminiar playbook export <name> [--skill [--target DIR] [--model-invocable]] [--schedule] [--set k=v]
+eminiar playbook scan [--dry-run]              # opt-in: suggest playbooks from recurring tasks
+```
+
+`--json` works for every subcommand. `run` only prints the prompt (and warns about parameters
+left unfilled): eminiar never runs a playbook; you paste the prompt into Claude. `export` prints
+the markdown file; `--skill` writes `<target>/<name>/SKILL.md` (default `.claude/skills`) with
+`disable-model-invocation` unless you pass `--model-invocable`; `--schedule` prints text for a
+scheduled task. `scan` exits 1 until `playbooks.extraction.enabled` is true, and only saves
+suggestions, which you accept or dismiss in the dashboard or with `em_playbook`. See
+[Tools](tools.md#playbooks).
+
 ## Dashboard and status line
 
 ```sh

@@ -300,6 +300,25 @@ The dashboard's shared building blocks live in `src/ui/web/ds.tsx`: `Hero`, `Sta
 Runs and Configure views use them, so tones, spacing and the glyph-plus-word state cues stay
 the same everywhere.
 
+### Playbooks
+
+The library of [playbooks](tools.md#playbooks): stored recurring tasks. The dashboard shows and
+edits them; it never runs one.
+
+- **Playbooks** lists each one with its title, tags, schedule hint, a private or suggested badge
+  and how often it was used. Show prompt reveals the prompt, with a field per parameter.
+  **Copy run prompt** copies the filled prompt to paste into Claude and records one use. Edit and
+  Delete appear when `playbooks.adding` is on; New playbook creates one.
+- **Run history** lists the recorded runs: when, which playbook, the status and how it started.
+- **Suggested** (only with `playbooks.extraction.enabled`) is the inbox of tasks eminiar found
+  you repeat. Each shows its evidence and prompt, with Accept and Dismiss. Nothing becomes a
+  playbook until you accept it, and a dismissed suggestion is not proposed again.
+- **Scan history** looks through your session history for recurring tasks and lists what it
+  found without saving anything. Save as suggestions files them in the inbox; Cancel discards.
+
+With `playbooks.viewing` off the tab says playbooks are turned off. The tab changes files in
+`.eminiar/playbooks/`, so review them in version control like any other change.
+
 ### Adjudicator
 
 What the opt-in [adjudicator](adjudicator.md) decided, whether its advice was followed, and what

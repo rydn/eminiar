@@ -2,7 +2,7 @@
 
 [← Docs index](README.md)
 
-eminiar adds 24 MCP tools, plus `em_adjudicate` while the opt-in adjudicator is on. In Claude
+eminiar adds 25 MCP tools, plus `em_adjudicate` while the opt-in adjudicator is on. In Claude
 Code their full names are `mcp__plugin_eminiar_eminiar__em_*`. This page uses the short names.
 
 You do not normally call these tools yourself. Claude calls them, and the hooks remind Claude to
@@ -10,7 +10,7 @@ use them. This page helps you understand what Claude does and what to ask for.
 
 **Contents:** [Run code](#run-code) · [Search and fetch](#search-and-fetch) ·
 [Memory](#memory) · [Documentation](#documentation) · [Code graph](#code-graph) ·
-[History](#history) · [Agent swarms](#agent-swarms) · [Adjudicator](#adjudicator) ·
+[History](#history) · [Agent swarms](#agent-swarms) · [Playbooks](#playbooks) · [Adjudicator](#adjudicator) ·
 [Housekeeping](#housekeeping) · [Slash commands](#slash-commands)
 
 ## Run code
@@ -159,6 +159,31 @@ that are not swarm workers can only `list`, `status`, `read` and `post`. See
 
 With the adjudicator on and `adjudicator.surfaces.plan` set, `plan` also appends a suggested
 agent, model and effort for each new task. See [Adjudicator](adjudicator.md#swarm-plans).
+
+## Playbooks
+
+A playbook is a stored recurring task: a prompt with optional `{{params}}` and a schedule hint,
+kept as a markdown file. eminiar stores and lists them and hands the prompt to Claude. It does not
+run or schedule anything. Playbooks are not Claude Code Skills; `export` can write one as a skill.
+
+| Tool | Parameters | Use for |
+|---|---|---|
+| `em_playbook` | `action`, `name`, `title`, `prompt`, `params`, `schedule`, `tags`, `private`, `values`, `status`, `note`, `run_id`, `tag`, `id`, `dry_run`, `confirm`, `format`, `target`, `side_effecting` | Keep, run and export recurring tasks |
+
+| `action` | What it does |
+|---|---|
+| `list`, `read` | Playbooks (`list` takes `tag`), or one in full |
+| `add`, `edit` | Store a playbook (`add` needs `title` and `prompt` and derives `name` from the title; `private: true` keeps it in the git-ignored folder). `edit` changes only the fields you pass |
+| `delete` | Remove a playbook. Needs `confirm: true` |
+| `run` | Returns the prompt with `values` filled in, and records a run as started. Claude carries the task out |
+| `report` | Closes a run: `status` is `done`, `failed` or `skipped`, with a `note`. `run_id` defaults to the newest started run |
+| `schedule` | Returns an instruction to turn the playbook's schedule hint into a `/loop` or cron job. Errors when the playbook has no schedule |
+| `export` | `format`: `markdown` (default, returns the file), `skill` (writes `<target>/<name>/SKILL.md`, default `.claude/skills`; `side_effecting` defaults to true and adds `disable-model-invocation`, so only you start it) or `schedule` (text to paste into a Desktop or cloud scheduled task) |
+| `scan`, `suggestions`, `accept`, `dismiss` | Opt-in extraction: `scan` mines your session history for recurring tasks (`dry_run` stores nothing), `suggestions` lists the pending ones, `accept` (`id`, optionally `name`, `title`, `prompt`, `private`) turns one into a playbook, `dismiss` rejects it for good. All need `playbooks.extraction.enabled` |
+
+Secrets are masked in everything stored: titles, prompts, defaults, schedules and run notes.
+`playbooks.viewing` and `playbooks.adding` can switch reading and writing off. See
+[Configuration](configuration.md#playbooks).
 
 ## Adjudicator
 
