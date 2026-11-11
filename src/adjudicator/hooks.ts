@@ -53,8 +53,12 @@ import {
 import {
   appliedTier,
   dispatchRule,
+  EFFORT_ENV_FIELD,
+  EFFORT_ENV_OTHER,
   effortForced,
+  effortLevel,
   keptModelOf,
+  PASSED_EFFORT_FIELD,
   type PlanRange,
   pinnedPart,
   ROLE_NOTE_MIN,
@@ -654,6 +658,12 @@ export async function onPreAgent(
         ...withPin(db, a.rowId, pin, kept, {
           ...(ranged ? { [RANGED_FLAG]: true, [FALLBACK_PIN_FIELD]: ranged.fallback } : {}),
           ...(advised ? { [ADVISED_PICK_FIELD]: advised } : {}),
+          // What the call passed for effort (never injected), for the swarm decision view.
+          ...(effortLevel(ti.effort) ? { [PASSED_EFFORT_FIELD]: effortLevel(ti.effort) } : {}),
+          // A level outside EFFORTS (e.g. "auto") still outranks the call: stored as "other".
+          ...(effortForced(env)
+            ? { [EFFORT_ENV_FIELD]: effortLevel(env.CLAUDE_CODE_EFFORT_LEVEL) ?? EFFORT_ENV_OTHER }
+            : {}),
         }),
       });
     } catch {

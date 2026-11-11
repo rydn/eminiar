@@ -59,6 +59,19 @@ equivalents are [below](#cursor)):
 Hooks are fast by design. They never run `git log` and never load the embedding model. Recall
 is a few FTS queries against the project database.
 
+Every hook uses the project the session started in: `CLAUDE_PROJECT_DIR`, walked up to the
+nearest project marker. Claude Code sets it for every hook and for the MCP server, and keeps it
+when Claude runs `cd`; Cursor sets it to the workspace root. So after `cd backend && npm test` in
+a multi-repo folder, events, decisions, snapshots and usage still go to the database that
+`em_search` and `em_recall` read, and a repository's own memories and config apply only to a
+session started in it. The payload's `cwd` still resolves relative paths in a Bash command and
+decides where a commit hint runs `git`, and swarm tracking tries the `cwd`'s repository after the
+session's ([Agent swarms](#agent-swarms)). An edit inside a git worktree of the project
+(`.claude/worktrees/…`) is recorded too, but only files a full scan with `graph.include` and
+`graph.exclude` would list are re-parsed, so the graph never holds the worktree's copy.
+`EMINIAR_PROJECT_ROOT` binds the MCP server and the CLI, not these hooks (see
+[Configuration](configuration.md#environment-variables)).
+
 Claude Code discards the output of a hook that outlasts its `timeout` in `hooks/hooks.json`, so
 every run also has a time budget below that timeout (3.5 s for the 5 s hooks, 8 s for
 `SessionStart`, `PostToolUse` and `SubagentStart`, 12 s for `PreCompact`). Three rules keep a
@@ -149,9 +162,9 @@ Routing decides what happens when Claude calls a native tool that an `em_*` tool
 
 | Native call | Suggested tool | Trigger |
 |---|---|---|
-| `Bash` | `em_history` | `git log`, `git blame`, `git show <sha>`, `git shortlog`, mapped to the matching action (`-- path` → `file`, `A..B` → `branch`, `--grep` → `search`, `-L :fn:file` → `symbol`). A one-commit `git log -1 --format=…` and `git show REF:path` are left alone |
-| `Bash` | `em_execute` | A simple command that usually prints a lot (`npm test`, `git diff`, `find`, `grep -r`, `curl` …) or streams an unknown output through `grep`, `sort`, `jq` … |
-| `Read` | `em_execute_file` | Files over 200 KB, or data files (`.log`, `.json`, `.csv`, `.xml`, `.sql`, `.har` …) over 20 KB |
+| `Bash` | `em_history` | `git log`, `git blame`, `git show <sha>`, `git shortlog`, mapped to the matching action (`-- path` → `file`, `A..B` → `branch`, `--grep` → `search`, `-L :fn:file` → `symbol`). A one-commit `git log -1 --format=…` and `git show REF:path` are left alone, and so is a read of another repository (`git -C`, `--git-dir`, a `cd` out of the project or into a nested repository) or in a project that is not a git repository (one with no commits yet reaches `em_history`, which says so) |
+| `Bash` | `em_execute` | A simple command that usually prints a lot (`npm test`, `git diff`, `find`, `grep -r`, `curl -s <url>`, `kubectl logs` …) or streams a read-only command's output (`ls`, `cat`, `ps`, `git ls-files`, `gh pr view` …) through filters (`grep`, `sort`, `jq` …) |
+| `Read` | `em_execute_file` | Files over 200 KB, or data files (`.log`, `.json`, `.csv`, `.xml`, `.sql`, `.har` …) over 20 KB, read whole (no `offset` / `limit`) from inside the project |
 | `Grep` | `em_symbols` / `em_search` | The pattern's identifier is a symbol the graph defines. Files-only grep: annotated with the matching symbols. Content-mode grep: denied |
 | `Grep` | `em_execute` | Content-mode grep without a `head_limit` for anything else |
 | `WebFetch` | `em_fetch_and_index` / `em_docs` | Always. Names the docs source if the site is already indexed |
@@ -181,9 +194,21 @@ is bounded by construction stays native:
 - `head` / `tail` of a file, a `sed -n 'A,Bp'` range, `du -s`, `grep -l` / `-c`, `git log -1`;
 - `cat` or `grep` over named files small enough for the native `Read` (200 KB in total, 20 KB
   for data files): the same read through Bash;
-- a command that changes something (`git commit`, `git checkout`, `npm install`, `rm`, `mv`,
-  `sed -i`, a `>` redirection into a file …): its output is secondary, and the native tool is
-  where Claude Code's permission prompts live.
+- a command it recognises as changing something (`git commit`, `npm install`, `rm`, `sed -i`,
+  a `>` redirection into a file, `kubectl delete`, `curl -X POST`, `gh api -f …`,
+  `terraform apply`, `npm run deploy`, `find … -delete`, `… | xargs rm`, `… | sh` …), in any
+  stage of a pipe or inside `$(…)`, after `sudo`, `env`, `time`, `timeout`, `{`, `!`, `then`,
+  `do` and similar: its output is secondary, and the native tool is where Claude Code's
+  permission prompts live. Tools with read-only forms are routed only in those: `kubectl get` /
+  `logs`, `docker ps` / `logs`, `curl` with no method other than `GET` / `HEAD`, body, upload or
+  output file, `wget -O -`, and test, lint or check scripts or `make` targets not asked to fix
+  or update;
+- a follow or a watch (`tail -f`, `kubectl logs -f`, `kubectl get -w`, `docker logs -f`,
+  `--watch`): it never finishes, so `em_execute` would only time out on it;
+- a pipe into anything but a known filter (`git diff | patch -p1`, `cat dump.sql | psql`,
+  `ls | xargs ./x.sh | sort`), or from a command it does not know (`ssh host … | grep`): either
+  may change something, so only known filters after the first stage, and a known read-only
+  source for a pipe that is routed for its filter, are sent to `em_execute`.
 
 Every routing decision is recorded as a `routing` session event: `em_stats` reports how many
 native calls were denied or annotated per tool, which `em_*` tool they were sent to and which
@@ -192,9 +217,10 @@ rule did it, and `~/.eminiar/hook.log` has one line per denial.
 **Safety rule:** `enforce` denies a call only while an eminiar MCP server runs for the project.
 The server writes a pid marker under `~/.eminiar/projects/<id>/servers/`. With no server, the
 hook annotates instead. Claude is never told to retry with a tool that it cannot reach. For
-the same reason, a big `Read` that a `Read` deny or `ask` rule matches is not redirected:
-`em_execute_file` would refuse it, so the native `Read` goes ahead under Claude Code's own
-permission check.
+the same reason, a big `Read` that `em_execute_file` would refuse is not redirected (a file
+outside the project, Claude Code's own saved tool outputs among them, or one a `Read` deny or
+`ask` rule matches): the native `Read` goes ahead under Claude Code's own permission check. A
+`git log` that `em_history` cannot answer is judged like any other command.
 
 **Project knowledge is not routing.** Memories, fix history, fan-in and doc notes are attached
 in every mode, including `off`. Every such decision is recorded, fired or quiet; `em_stats` and
@@ -211,23 +237,50 @@ root.
   as ES modules; a snippet that calls `require(...)` gets one that resolves packages and
   relative paths from the project root, as a script of the project would.
 - **Output:** output over `sandbox.indexThreshold` (5 KB) is indexed. Claude gets back only the
-  sections that match its `intent`, plus a list of searchable terms.
+  sections that match its `intent`, plus a list of searchable terms. Secrets are masked in the
+  stored copy (see [Privacy and data](#privacy-and-data)). Output shown inline, and the head and
+  tail preview, are as printed; sections found for an `intent` or `queries` come from the masked
+  copy.
 - **Permissions:** shell snippets are checked against Claude Code's `permissions.deny` and `ask`
   Bash rules, one chained segment at a time. An `ask` rule counts as deny.
 - **Files:** the `path` given to `em_execute_file` must be inside the project root, or outside it
   with a `Read(<path>)` allow rule. A matching `Read` deny or `ask` rule refuses the path, inside
   the root or out, even when an allow rule matches. The path as written, its symlink target and
   (on macOS) its on-disk letter case are all checked. This guards the `path` only: the code you
-  pass is checked against Bash rules like any snippet, and can still open other files.
-- **Read rule forms:** a `Read` pattern is matched as a `*` / `**` glob against the absolute
-  path, after a leading `~` becomes your home folder, so `Read(**/.env)` and `Read(~/.ssh/**)`
-  match. These do not match yet: Claude Code's relative forms (`./.env`, `.env`, `/path` from the
-  settings file, `//path`), `?` and `[...]`, and a `/**/` that should match no folder
-  (`~/.aws/**/credentials` does not cover `~/.aws/credentials`).
+  pass is checked against Bash rules like any snippet, and can still open other files. `em_index`
+  applies the same check to its `path`, and skips (and lists) the files under a directory that
+  a rule matches.
+- **Read rule forms:** `Read` patterns resolve as Claude Code resolves them: `//path` is an
+  absolute path, `~/path` is under your home folder, `./path`, `path/with/slash` and `/path` are
+  under the project root (`/path` also matches the absolute `/path`, as earlier versions read
+  it), and a name without a slash (`.env`, `*.pem`) matches at any depth under the project root.
+  A pattern that starts with `**` matches anywhere. `*` stays within one folder, `**` crosses
+  folders, `/**/` also matches no folder (`~/.aws/**/credentials` covers `~/.aws/credentials`),
+  `?` is one character, and a matched folder covers the files below it. `[...]` is not supported.
+  A file a rule denies is skipped by the indexers and also removed from the index when an earlier
+  run had indexed it; files that no longer exist leave the index on the next sync too.
 - **Environment:** the process gets a stripped environment. Credentials for `gh`, `aws`,
   `gcloud`, `kubectl` and `docker` pass through. Add more names with `sandbox.envAllow`.
 - **Speed:** these are the hot paths. They are designed to add about 1 ms over a raw process
   spawn. `npm run bench` measures them (see [Development](development.md#benchmarks)).
+
+### What the sandbox enforces
+
+The sandbox keeps output out of context. It is not an isolation boundary. Beyond the
+permission and file checks above:
+
+- Code in languages other than shell is not checked against any rule. `sandbox.disabledLanguages`
+  turns languages off.
+- Your own `PreToolUse` hooks on `Bash` do not see these calls, and Claude Code asks for
+  permission, if at all, for the tool call as a whole, not for each command in it.
+- There is no filesystem or network isolation: code runs as you, in the project root.
+
+To check these calls yourself, add a `PreToolUse` hook with the matcher
+`mcp__.*__em_(execute|batch_execute|execute_file)` (plugin installs name the tools
+`mcp__plugin_eminiar_eminiar__em_*`, settings installs `mcp__eminiar__em_*`). It receives the
+code in `tool_input.code` (`em_execute`, `em_execute_file`), each command in
+`tool_input.commands[].command` (`em_batch_execute`), and the file in `tool_input.path`
+(`em_execute_file`).
 
 ## Search
 
@@ -276,6 +329,36 @@ for a shared team knowledge base.
 | `~/.eminiar/plugin/` | The stable plugin copy |
 | `<project>/.eminiar/memories/` | Memory files (commit them) |
 | `<project>/.eminiar/docs.json` | Documentation sources manifest (commit it) |
+
+On macOS and Linux, `~/.eminiar` is readable by you alone (mode 0700), and each database with its
+`-wal` and `-shm` files is 0600. An existing `~/.eminiar` is tightened the next time eminiar opens
+it; a folder that `EMINIAR_HOME` points at is tightened only when it holds nothing but eminiar's
+own files, so a project or shared folder keeps its mode. Files in your project (memories,
+`eminiar.config.json`) keep the modes git gives them.
+
+Command and page output (`em_execute`, `em_batch_execute`, `em_execute_file`,
+`em_fetch_and_index`) is stored with its secrets masked, and so is the short error text of a
+failed tool call that session history keeps. Masked are tokens and keys with a known shape
+(`sk-…`, `ghp_…`, `ya29.…`, `hvs.…`, AWS, Slack, Stripe, JWTs, private key blocks), `Authorization`
+and cookie values, credentials in URLs, password flags on command lines, and `name=value` pairs
+whose name is a secret's (`AWS_SECRET_ACCESS_KEY`, `db_password`, `apiKey`). So `env` is stored as
+`GH_TOKEN=***`. Git SHAs, checksums, emails and base64 are kept, as is a lone `key` whose value
+reads as a name or a path (S3's `"Key": "photos/a.jpg"`, `key: string`), so the output stays
+searchable. The masking is best effort: a secret with no known shape and no secret name (an
+opaque token printed on its own line, a password in prose) is stored as printed.
+
+Stored as written: your prompts, Claude's replies, subagent reports and the command line that
+session events record for each tool call (session history indexes some of these for `em_recall`),
+pages indexed by `em_docs`, and the fetch cache in the global database. Command and page
+output stored by an older version is masked in place, each document as one text, by the server in
+the background after it starts (in short slices, resuming where it stopped); each later start goes
+over what was stored since, which catches output from an older eminiar still running. Error text that session history kept before
+then stays as it was until `em_purge {scope: "sessions"}`. Text that a mask or a delete replaces
+can stay in free database pages until SQLite reuses them; `eminiar purge <scope> --yes` runs a
+VACUUM.
+
+`em_purge {scope: "sessions"}` deletes the captured events with the session history `em_recall`
+searches; command output belongs to the `index` scope.
 
 eminiar uses the network only to download the embedding model, to fetch pages and documentation
 that you ask it to index, and to read package metadata from the npm, PyPI and Go registries. The

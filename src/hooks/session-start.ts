@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { getContext } from "../context.js";
+import { sessionContext } from "../context.js";
 import { DOCS_PREFIX, readManifest } from "../docs/manifest.js";
 import { memoriesDir } from "../memory/store.js";
 import { renderProjectBrief } from "../session/brief.js";
@@ -45,7 +45,7 @@ export function routingGuidance(mode: string): string {
 }
 
 export const sessionStart: HookHandler = async (input) => {
-  const ctx = getContext(input.cwd);
+  const ctx = sessionContext(input.cwd);
   const sessionId = input.session_id || "unknown";
   setCurrentSession(ctx, sessionId);
   const db = getStorage(ctx, { vectors: false });

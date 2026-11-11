@@ -1,10 +1,22 @@
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ProjectContext } from "../context.js";
 import { kickEmbedding } from "../embeddings/queue.js";
 import { type Fetched, fetchMarkdown } from "../fetch/fetcher.js";
-import { indexContent, indexPath } from "../index/indexer.js";
+import { indexContent, indexPath, refuseOutside } from "../index/indexer.js";
+import { checkRead, loadPermissionRules, type ReadCheck } from "../permissions/settings.js";
+import { readRefusal } from "../sandbox/file.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { syncDocsGraphQuietly } from "./graph.js";
-import { type DocSource, docsTag, readManifest, setSyncState } from "./manifest.js";
+import {
+  clearSyncState,
+  type DocSource,
+  docsTag,
+  manifestPath,
+  probeManifestAt,
+  setSyncState,
+  within,
+} from "./manifest.js";
 import { looksLikeSpec, specToMarkdown } from "./specs.js";
 
 export interface SyncResult {
@@ -187,19 +199,66 @@ async function syncUrlSource(
   }
 }
 
+/**
+ * An IndexPathOptions.refuse for committed or configured doc globs: files must stay inside the
+ * project once symlinks are resolved, and Claude Code's Read deny/ask rules apply per file as
+ * they do for em_index, so a denied `.env` is never indexed.
+ */
+export function refuseUnreadable(ctx: ProjectContext): (file: string) => string | undefined {
+  const rules = loadPermissionRules(ctx.root);
+  const realRoot = realpathSync.native(ctx.root);
+  const denied = (c: ReadCheck) => `refused by permission rule ${c.rule} (${c.kind})`;
+  return (file) => {
+    // The path as written first: a pure regex test, no syscalls, and the common refusal.
+    const asWritten = checkRead(rules, [file]);
+    if (!asWritten.allowed) return denied(asWritten);
+    let real: string;
+    let native: string;
+    try {
+      real = realpathSync(file);
+      native = realpathSync.native(file);
+    } catch {
+      return undefined; // gone since the walk: the reader reports it
+    }
+    if (!within(native, realRoot)) return "refused, it resolves outside the project";
+    // Then its symlink target and on-disk letter case, when they differ (see checkReadPath).
+    const more = [real, native].filter((p, i, a) => p !== file && a.indexOf(p) === i);
+    if (!more.length) return undefined;
+    const c = checkRead(rules, more);
+    return c.allowed ? undefined : denied(c);
+  };
+}
+
+/** Returns false when the source was refused (its sync state is cleared, not recorded). */
 function syncPathSource(
   ctx: ProjectContext,
   db: StorageAdapter,
   src: DocSource,
   r: SyncResult,
   opts: SyncOptions,
-): void {
+): boolean {
   const tag = docsTag(src.name);
+  // The manifest is committed: its path, and every file a directory walk finds, must stay
+  // inside the project once symlinks are resolved and pass the Read rules.
+  const refuse = refuseUnreadable(ctx);
+  const target = src.path as string;
+  const abs = resolve(ctx.root, target);
+  const refused =
+    refuseOutside(ctx.root)(abs) ?? readRefusal(loadPermissionRules(ctx.root), abs, target);
+  if (refused) {
+    // What this source indexed before (e.g. by a version without this check) goes too.
+    db.deleteDocumentsBySource(tag);
+    clearSyncState(db, src.name);
+    r.skipped = 1;
+    r.errors.push(`${target}: ${refused}`);
+    return false;
+  }
   if (opts.force) db.deleteDocumentsBySource(tag);
-  const s = indexPath(db, ctx.root, src.path as string, {
+  const s = indexPath(db, ctx.root, target, {
     source: tag,
     globs: src.glob ?? ctx.config.index.docs,
     recursive: true,
+    refuse,
     transform: (content, rel) => {
       const max = ctx.config.docs.crawl.maxPageBytes;
       if (!looksLikeSpec(rel, content))
@@ -216,6 +275,7 @@ function syncPathSource(
   r.chunks = s.chunks;
   r.skipped = s.skipped.length;
   r.errors.push(...s.skipped.slice(0, 5).map((k) => `${k.path}: ${k.reason}`));
+  return true;
 }
 
 /** Fetch/scan one source and (re)index it under `docs:<name>`; records the outcome in the DB. */
@@ -240,14 +300,16 @@ export async function syncSource(
     errors: [],
     ms: 0,
   };
+  let recorded = true;
   try {
     if (src.kind === "url") await syncUrlSource(ctx, db, src, r, opts);
-    else syncPathSource(ctx, db, src, r, opts);
+    else recorded = syncPathSource(ctx, db, src, r, opts);
   } catch (err) {
     r.errors.push((err as Error).message);
   }
   if (!ctx.config.docs.embed) skipEmbedding(db, docsTag(src.name));
   r.ms = Date.now() - started;
+  if (!recorded) return r;
   setSyncState(db, src.name, {
     at: Date.now(),
     pages: r.pages,
@@ -268,25 +330,37 @@ export async function syncSources(
   names?: string[] | undefined,
   opts: SyncOptions = {},
 ): Promise<SyncResult[]> {
-  const m = readManifest(ctx);
+  // readManifest, plus the entries it dropped for a path outside the project.
+  const p = probeManifestAt(manifestPath(ctx), { root: ctx.root });
+  const m = p.state === "ok" ? p.manifest : { version: 1 as const, sources: [] };
+  const outside = new Set(p.state === "ok" ? (p.outside ?? []) : []);
+  const registered = (name: string) => m.sources.some((s) => s.name === name);
   const wanted = names?.length ? m.sources.filter((s) => names.includes(s.name)) : m.sources;
   const out: SyncResult[] = [];
-  for (const name of names ?? []) {
-    if (!m.sources.some((s) => s.name === name))
-      out.push({
-        name,
-        kind: "url",
-        pages: 0,
-        indexed: 0,
-        unchanged: 0,
-        cached: 0,
-        chunks: 0,
-        skipped: 0,
-        specs: 0,
-        truncated: 0,
-        errors: ["not registered"],
-        ms: 0,
-      });
+  const failed = (name: string, kind: DocSource["kind"], error: string): SyncResult => ({
+    name,
+    kind,
+    pages: 0,
+    indexed: 0,
+    unchanged: 0,
+    cached: 0,
+    chunks: 0,
+    skipped: 0,
+    specs: 0,
+    truncated: 0,
+    errors: [error],
+    ms: 0,
+  });
+  for (const name of names ?? [])
+    if (!registered(name) && !outside.has(name)) out.push(failed(name, "url", "not registered"));
+  // Such an entry indexes nothing, and what an earlier version indexed for it goes too, so a
+  // hand-edited `../docs` is reported on every sync rather than served from old pages.
+  for (const name of outside) {
+    if (registered(name) || (names?.length && !names.includes(name))) continue;
+    const removed = db.deleteDocumentsBySource(docsTag(name));
+    if (removed) clearSyncState(db, name);
+    const note = removed ? `; ${removed} earlier page(s) removed` : "";
+    out.push(failed(name, "path", `ignored: its path is outside the project${note}`));
   }
   for (const src of wanted) out.push(await syncSource(ctx, db, src, opts));
   // Pages just (re)indexed may name different code files: refresh the doc nodes' edges.

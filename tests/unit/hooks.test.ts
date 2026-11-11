@@ -1,11 +1,19 @@
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { classifyPrompt, classifyToolCall } from "../../src/capture/classify.js";
 import { getContext, resetContextCache } from "../../src/context.js";
 import { handlers } from "../../src/hooks/index.js";
-import { commandSegments, literalOf, suggest } from "../../src/hooks/routing.js";
+import { commandSegments, literalOf, suggest, withoutHeredocs } from "../../src/hooks/routing.js";
 import type { HookInput } from "../../src/hooks/types.js";
 import { search } from "../../src/search/pipeline.js";
 import { renderWithin } from "../../src/session/guide.js";
@@ -23,6 +31,26 @@ const base = (over: Partial<HookInput>): HookInput => ({
   ...over,
 });
 
+/** A git repository: routing sends history reads to em_history only inside one. */
+function gitRepo(dir: string): void {
+  spawnSync("git", ["init", "-q"], { cwd: dir });
+}
+
+/** A new folder with no git repository at or above it, or undefined when no temp base has none. */
+function outsideAnyRepo(prefix: string): string | undefined {
+  const inRepo = (d: string): boolean =>
+    existsSync(join(d, ".git")) || (dirname(d) !== d && inRepo(dirname(d)));
+  for (const base of [tmpdir(), "/tmp", "/var/tmp"]) {
+    try {
+      const real = realpathSync(base);
+      if (!inRepo(real)) return mkdtempSync(join(real, prefix));
+    } catch {
+      // that base does not exist here
+    }
+  }
+  return undefined;
+}
+
 beforeAll(() => {
   process.env.EMINIAR_HOME = mkdtempSync(join(tmpdir(), "em-home-"));
   process.env.EMINIAR_ROUTING_MODE = "enforce";
@@ -34,6 +62,7 @@ beforeAll(() => {
     JSON.stringify({ routing: { mode: "enforce", deferToContextMode: false } }),
   );
   writeFileSync(join(root, "big.log"), "x".repeat(30 * 1024));
+  gitRepo(root);
   resetContextCache();
   // enforce only denies while a server is marked live for the project; this process stands in
   unmark = markServerAlive(getContext(root));
@@ -76,6 +105,58 @@ describe("classify", () => {
       root,
     });
     expect(slowFail.map((d) => d.category)).toEqual(expect.arrayContaining(["latency", "error"]));
+  });
+
+  describe("secrets in what is stored", () => {
+    const token = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    const payloads = (drafts: ReturnType<typeof classifyToolCall>, category: string) =>
+      drafts.filter((d) => d.category === category).map((d) => JSON.stringify(d.payload));
+
+    it("masks a token in the tool_call and latency summaries", () => {
+      const drafts = classifyToolCall({
+        toolName: "Bash",
+        toolInput: { command: `curl -H "Authorization: Bearer ${token}" https://api.example.com` },
+        durationMs: 9000,
+        root,
+      });
+      for (const category of ["tool_call", "latency"]) {
+        const [p] = payloads(drafts, category);
+        expect(p, category).toBeDefined();
+        expect(p).toContain("Bearer ***");
+        expect(p).not.toContain("ghp_");
+        expect(p).not.toContain(token.slice(4));
+      }
+    });
+
+    it("masks a token in the error summary and text", () => {
+      const drafts = classifyToolCall({
+        toolName: "Bash",
+        toolInput: { command: `GH_TOKEN=${token} gh api /user` },
+        toolResponse: { stdout: "", stderr: `fatal: bad credentials ${token}`, exit_code: 1 },
+        root,
+      });
+      const [p] = payloads(drafts, "error");
+      expect(p).toContain("GH_TOKEN=***");
+      expect(p).toContain("bad credentials ghp_***");
+      expect(p).not.toContain(token.slice(4));
+    });
+
+    it("masks before it cuts an error to 400 characters", () => {
+      // 385 characters, then a whole token: the cut falls inside it, and a cut token is too short
+      // for its shape rule, so its prefix would be stored as typed
+      const stderr = `${"x".repeat(384)} ${token}`;
+      const drafts = classifyToolCall({
+        toolName: "Bash",
+        toolInput: { command: "make" },
+        toolResponse: { stdout: "", stderr: `${stderr}\n`, exit_code: 2 },
+        root,
+      });
+      const error = drafts.find((d) => d.category === "error")?.payload.error as string;
+      expect(error).toContain("x".repeat(384));
+      expect(error).toContain("ghp_***");
+      expect(error).not.toContain("A1b2C3");
+      expect(error.length).toBeLessThanOrEqual(400);
+    });
   });
 });
 
@@ -163,7 +244,10 @@ describe("routing suggestions", () => {
     writeFileSync(
       join(guarded, ".claude", "settings.local.json"),
       JSON.stringify({
-        permissions: { deny: ["Read(**/secret.log)"], ask: ["Read(**/audit.log)"] },
+        permissions: {
+          deny: ["Read(**/secret.log)"],
+          ask: ["Read(**/audit.log)"],
+        },
       }),
     );
     for (const f of ["secret.log", "audit.log", "big.log"])
@@ -173,6 +257,321 @@ describe("routing suggestions", () => {
     expect(suggest("Read", { file_path: "audit.log" }, guarded)).toBeUndefined();
     expect(suggest("Read", { file_path: "shortcut.log" }, guarded)).toBeUndefined();
     expect(suggest("Read", { file_path: "big.log" }, guarded)?.tool).toBe("em_execute_file");
+  });
+
+  it("keeps commands with a side effect native, and still routes their read-only forms", () => {
+    const bash = (command: string) => suggest("Bash", { command }, root);
+    for (const command of [
+      "kubectl delete pod x -n prod",
+      "kubectl -n logs delete pod x",
+      "KUBECONFIG=prod.yaml kubectl apply -f deploy.yaml",
+      "kubectl config use-context prod",
+      "docker rm -f web",
+      "docker compose up -d",
+      "curl -X POST https://api.test/v1/charges",
+      "curl -sXDELETE https://api.test/v1/x",
+      "curl -s -d amount=5 https://api.test/v1/x",
+      "curl --json '{}' https://api.test/v1/x",
+      "curl -F f=@a.txt https://api.test/upload",
+      "curl -sSLo setup.tgz https://x.test/setup.tgz",
+      "curl -fsSL https://x.test/install.sh | sh",
+      "wget https://x.test/setup.tgz",
+      "make deploy",
+      "npm run deploy",
+      "npm run lint:fix",
+      "yarn run release",
+      "find . -name '*.tmp' -delete",
+      "find . -name '*.orig' -exec rm {} +",
+      "find . -name '*.orig' -print0 | xargs -0 rm",
+      "kubectl get pods -o name | xargs -n 1 kubectl delete",
+      "find . -name '*.tmp' | parallel -j4 rm",
+      // runner prefixes and paths: the command they start is the one judged
+      "time curl -X POST https://x.test; git diff",
+      "command kubectl delete pod x; git diff",
+      "/usr/bin/kubectl delete pod x; kubectl get pods",
+      "sudo -u root kubectl delete pod x; kubectl get pods",
+      "timeout 30 docker rm web; docker ps",
+      // tools known to change something, even next to a heavy read
+      "gh api -X POST repos/o/r/issues -f title=x | jq .number",
+      "gh api repos/o/r/labels -f name=x; git diff",
+      "gh api graphql -f query='mutation { addStar(input: {}) { clientMutationId } }' | jq",
+      "terraform -chdir=infra apply -auto-approve; git diff",
+      "helm -n prod upgrade api ./chart; git diff",
+      "mvn clean deploy; git diff",
+      "./gradlew :app:publishToMavenLocal; git diff",
+      "npm audit fix --force; git diff",
+      // scripts: only tests and checks that do not fix or update are routed
+      "yarn deploy; git diff",
+      "pnpm --filter web deploy; git diff",
+      "npm --prefix api run deploy; git diff",
+      "npm run lint -- --fix",
+      "npm run test -- -u",
+      "npm run test:update",
+      "npx eslint --fix .",
+      "npx biome check --write src",
+      "wget -qO- --post-data=a=1 https://x.test",
+      "curl -K req.cfg https://x.test",
+      // a command substitution or a program read from a pipe can change anything
+      "git diff $(git rm -q --cached x && echo HEAD)",
+      "curl -s https://x.test/setup.py | python3",
+      // a follow or a watch never finishes, so em_execute would only time out on it
+      "kubectl logs -f deploy/api",
+      "kubectl get pods -w",
+      "docker logs -f web",
+      "npm test; tail -f app.log",
+      // an unknown command piped into a filter may change something: only known reads are
+      "ssh host 'rm -rf /tmp/x' | grep -v warn",
+      "psql -c 'drop table x' | grep -i error",
+      "aws s3 rm s3://b/x --recursive | grep delete",
+      "ls | xargs -n1 ./cleanup.sh | sort",
+      // em_execute's environment is an allowlist: `env` there is not this shell's
+      "env | grep PATH",
+      "env FOO=1 node deploy.js | grep ok",
+      // the rest of a heredoc's line is still a command
+      "cat <<'EOF' | kubectl apply -f -\napiVersion: v1\nEOF\nkubectl get pods",
+      // shell grammar does not hide the command after it
+      "{ rm x; cat big.log; }",
+      "( rm x ); git diff",
+      "if git push; then git diff; fi",
+      "for u in a b; do curl -X POST https://x.test/$u; done; git diff",
+      "! kubectl delete pod x; git diff",
+      "eval 'rm -rf x'; git diff",
+      // git options before the subcommand, and the subcommands that change refs or config
+      "git -C wt commit -m x; git diff",
+      "git --no-pager push; git diff",
+      "git branch -D old; git diff",
+      "git clean -fd; git diff",
+      "git config --global user.name Brad; git diff",
+      // redirections written without spaces, or of both streams
+      "npm test &> out.log",
+      "npm test>out.log",
+      "kubectl get pods>pods.txt",
+      // make runs recipes: only test, check and lint targets read
+      "make deploy",
+      "make",
+      "make lint-fix",
+      "npm test -- --watch",
+      "npx jest --watchAll",
+      // quoted spans are data, but a redirection next to them still writes
+      "ls >'a b'",
+      "rg 'Promise<string>' src>hits.txt",
+      // a later stage that does something with the output, wherever the route came from
+      "git diff | patch -p1",
+      "curl -s https://x.test/dump.sql | psql db",
+      "cat big.log | psql db",
+      "curl -s https://x.test/a.json | python3 -c 'import json, sys; json.load(sys.stdin)'",
+      // process substitutions run too
+      "diff a.txt <(git rm -q --cached x); git diff",
+    ])
+      expect(bash(command), command).toBeUndefined();
+    for (const command of [
+      "kubectl -n prod logs deploy/api",
+      "kubectl get pods -A",
+      "docker -H tcp://h ps -a",
+      "docker stats --no-stream",
+      "curl -s https://api.test/v1/x",
+      "curl -X GET https://api.test/v1/x | jq .",
+      "wget -qO- https://x.test/feed",
+      "npm run test:unit",
+      "pnpm run typecheck",
+      "yarn test",
+      "npx vitest run",
+      "find . -name '*.ts'",
+      "curl -sXGET https://api.test/v1/x",
+      "gh api -X GET search/issues -f q=bug; git diff",
+      "gh api graphql -f query='query { viewer { login } }'; git diff",
+      "mvn test",
+      "git diff $(git merge-base HEAD main)",
+      "curl -s https://api.test/v1/x | python3 -m json.tool",
+      "ls -la | grep foo",
+      "git ls-files | sort",
+      "ls | grep x | sort",
+      "git branch -a | grep feat",
+      "git config --get user.name; git diff",
+      "echo 'a => a'; git diff",
+      "gh pr view 12 --comments | grep LGTM",
+      "gh run view 1 --log | grep error",
+      "gh api repos/o/r/pulls | jq .",
+      "make test",
+      "make -j4 test",
+      "make -j 4 test",
+      "rg 'Promise<string>' src",
+      "grep -rn 'Array<string>' src",
+      "rg '<div>'",
+      "kubectl get pods -o json | jq '.items[] | select(.restartCount>3)'",
+      "npm test | grep FAIL",
+      "curl -s https://api.test/v1/x | jq .",
+      "diff <(git show HEAD:a.txt) b.txt; git diff",
+    ])
+      expect(bash(command)?.tool, command).toBe("em_execute");
+  });
+
+  it("keeps side effects native wherever they sit on the line, and routes only read-only commands", () => {
+    const bash = (command: string) => suggest("Bash", { command }, root);
+    for (const command of [
+      // a single & separates commands too
+      "cat big.log & rm -rf node_modules",
+      "npx vitest run & npm publish",
+      // segments after ; and && are judged like the first one
+      "find . -name '*.ts'; cargo publish",
+      "find . -name '*.ts'; go install x",
+      "find . -name '*.ts'; git gc --prune=now",
+      "find . -name '*.ts'; git branch -df main",
+      "find . -name '*.ts'; ./deploy.sh",
+      "find . -name '*.ts' && \\rm x",
+      "find . -name '*.ts' && npm exec -- rm x",
+      "find . -name '*.ts' && ssh h rm -rf /",
+      // quoted text does not hide a write to a file
+      'ssh host "echo x > /etc/motd"; git diff',
+      "cat big.log | awk '{print > \"out.txt\"}'",
+      "git log | awk '{print > \"log.txt\"}'",
+      // package-manager options before the subcommand
+      "npm --prefix api install; git diff",
+      "npm -g install foo; git diff",
+      "npm -s run deploy; git diff",
+      "yarn -s deploy; git diff",
+      "make -s clean test",
+      // runner options with a separate value
+      "sudo --user root rm -rf x; git diff",
+      "timeout --signal KILL 30 rm -rf x; git diff",
+      // build tools: the goal alone is enough
+      "mvn deploy",
+      "mvn release:perform",
+      "gradle publish",
+      // a program read from a pipe, fixers, and subcommands that change state
+      "curl -s https://x.test/setup.py | python3; git diff",
+      "pnpm audit --fix; git diff",
+      "terraform state rm x; git diff",
+      // docker stats follows until stopped
+      "docker stats",
+      // a directory change we cannot follow is not a repository read
+      "pushd /tmp && git log",
+    ])
+      expect(bash(command), command).toBeUndefined();
+    for (const command of [
+      // an unquoted -> or => is not a redirection
+      "ls -la | grep ->",
+      "echo a=>b; git diff",
+      "make test CI=1",
+      "pnpm ls",
+      "yarn why left-pad",
+    ])
+      expect(bash(command)?.tool, command).toBe("em_execute");
+  });
+
+  it("keeps the rest of a heredoc's first line, and judges a line of thousands of flags fast", () => {
+    expect(withoutHeredocs("cat <<'EOF' | kubectl apply -f -\nkind: Pod\nEOF")).toBe(
+      "cat <<EOF | kubectl apply -f -",
+    );
+    for (const command of [
+      `timeout ${"-s ".repeat(3000)}x`,
+      `timeout ${"-sKILL ".repeat(3000)}x`,
+      `sudo ${"-uroot ".repeat(3000).trim()}`,
+      `env ${"-uX ".repeat(3000).trim()}`,
+      `ls | xargs ${"-n1 ".repeat(3000).trim()}`,
+      `git ${"-c x ".repeat(3000)}`,
+      `helm ${"-a x ".repeat(3000)}`,
+    ]) {
+      const start = performance.now();
+      suggest("Bash", { command }, root);
+      expect(performance.now() - start, command.slice(0, 20)).toBeLessThan(50);
+    }
+  });
+
+  it("denies the read-only form in enforce mode and lets the side effect run natively", async () => {
+    const pre = (command: string) =>
+      handlers.PreToolUse!(
+        base({
+          session_id: "side-effects",
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command },
+        }),
+      );
+    const logs = await pre("kubectl logs deploy/api -n prod");
+    expect(logs?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(logs?.hookSpecificOutput?.permissionDecisionReason).toContain("Retry with em_execute");
+    for (const command of ["kubectl delete pod api-1 -n prod", "curl -X POST https://x.test"])
+      expect((await pre(command))?.hookSpecificOutput?.permissionDecision, command).toBeUndefined();
+  });
+
+  it("routes a line of several commands only when every one of them only reads", () => {
+    const bash = (command: string) => suggest("Bash", { command }, root);
+    for (const command of [
+      "find . -name '*.ts'; cargo publish",
+      "find . -name '*.ts' && go install x",
+      "find . -name '*.ts'; git gc --prune=now",
+      "find . -name '*.ts'; git branch -df main",
+      "find . -name '*.ts'; ./deploy.sh",
+      "find . -name '*.ts'; \\rm x",
+      "find . -name '*.ts'; npm exec -- rm",
+      "find . -name '*.ts' & rm -rf node_modules",
+      "cat big.log & npm publish",
+      "find . -name '*.ts'; npm --prefix api install",
+      "find . -name '*.ts'; npm -g install foo",
+      "find . -name '*.ts'; npm -s run deploy",
+      "find . -name '*.ts'; yarn -s deploy",
+      "find . -name '*.ts'; make -s clean test",
+      "find . -name '*.ts'; sudo --user root rm -rf x",
+      "find . -name '*.ts'; timeout --signal KILL 30 rm -rf x",
+      "find . -name '*.ts'; nice --adjustment=5 rm -rf x",
+      "find . -name '*.ts'; mvn deploy",
+      "find . -name '*.ts'; mvn release:perform",
+      "find . -name '*.ts'; gradle publish",
+      "find . -name '*.ts'; gh workflow run x",
+      "find . -name '*.ts'; git diff --output=f",
+      'ssh host "echo x > /etc/motd"; git diff',
+      "cat big.log | awk '{print > \"out.txt\"}'",
+      "git log | awk '{print > \"log.txt\"}'",
+    ]) {
+      expect(bash(command), command).toBeUndefined();
+    }
+    for (const command of [
+      "find . -name '*.ts'; git diff",
+      "find . -name '*.ts' && git status",
+      "cat big.log & git diff",
+      "find . -name '*.ts'; npm -s test",
+      "find . -name '*.ts'; make -s test",
+      "find . -name '*.ts'; sudo --user root cat x",
+    ]) {
+      expect(bash(command)?.tool, command).toBe("em_execute");
+    }
+  });
+
+  it("sends a git history read to em_history only when it reads the root's own repository", () => {
+    const bash = (command: string, at = root) => suggest("Bash", { command }, at);
+    mkdirSync(join(root, "src"), { recursive: true });
+    mkdirSync(join(root, "vendor", "lib"), { recursive: true });
+    gitRepo(join(root, "vendor", "lib"));
+    expect(bash("git log --oneline -20")?.tool).toBe("em_history");
+    expect(bash("git log --oneline | head -50")?.tool).toBe("em_history");
+    expect(bash("cd src && git log -5")?.tool).toBe("em_history");
+    expect(bash("git -C src log -5")?.tool).toBe("em_history");
+    // `git log -C` is copy detection, not a directory
+    expect(bash("git log -C --stat")?.tool).toBe("em_history");
+    // another repository, or one only the shell can name: judged like any other command
+    expect(bash("git -C /tmp/other log -5")).toBeUndefined();
+    expect(bash("git --git-dir=/tmp/other/.git log -5")).toBeUndefined();
+    // another repository's working directory stays native: em_execute runs in the root
+    expect(bash(`cd ${tmpdir()} && git log -5`)).toBeUndefined();
+    expect(bash("cd vendor/lib && git log -5")).toBeUndefined();
+    expect(bash("cd $REPO && git log -5")?.tool).toBe("em_execute");
+    // a root that is not a git repository: nothing for em_history to classify. The temp folder
+    // can itself sit in a checkout (TMPDIR inside a repository or worktree): then any folder
+    // made there is in that repository, so this is checked only where no repository is above.
+    const plain = outsideAnyRepo("em-root-nogit-");
+    if (plain) expect(bash("git log --oneline -20", plain)?.tool).toBe("em_execute");
+  });
+
+  it("leaves a big Read native when em_execute_file would refuse it or a window is asked", () => {
+    const outside = mkdtempSync(join(tmpdir(), "em-outside-"));
+    writeFileSync(join(outside, "tool-output.txt"), "x".repeat(300 * 1024));
+    expect(suggest("Read", { file_path: join(outside, "tool-output.txt") }, root)).toBeUndefined();
+    expect(suggest("Read", { file_path: "big.log", offset: 100 }, root)).toBeUndefined();
+    expect(suggest("Read", { file_path: "big.log", limit: 50 }, root)).toBeUndefined();
+    expect(suggest("Read", { file_path: join(root, "big.log") }, root)?.tool).toBe(
+      "em_execute_file",
+    );
   });
 });
 
@@ -225,7 +624,11 @@ describe("hook handlers end to end", () => {
     );
     expect(deny?.hookSpecificOutput?.permissionDecision).toBe("deny");
     const agent = await handlers.PreToolUse!(
-      base({ hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: { prompt: "do x" } }),
+      base({
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_input: { prompt: "do x" },
+      }),
     );
     expect(agent?.hookSpecificOutput?.updatedInput?.prompt).toMatch(/^Use the eminiar tools/);
 
@@ -241,11 +644,20 @@ describe("hook handlers end to end", () => {
     await handlers.PreCompact!(base({ hook_event_name: "PreCompact", trigger: "auto" }));
     const db = getStorage(getContext(root), { vectors: false });
     // every routed native call leaves one routing event: the denial and the allowed one
-    const routing = db
-      .eventsBySession("s1", { categories: ["routing"] })
-      .map((e) => JSON.parse(e.payload) as { tool: string; decision: string; target?: string });
+    const routing = db.eventsBySession("s1", { categories: ["routing"] }).map(
+      (e) =>
+        JSON.parse(e.payload) as {
+          tool: string;
+          decision: string;
+          target?: string;
+        },
+    );
     expect(routing).toContainEqual(
-      expect.objectContaining({ tool: "Bash", decision: "deny", target: "em_history" }),
+      expect.objectContaining({
+        tool: "Bash",
+        decision: "deny",
+        target: "em_history",
+      }),
     );
     expect(routing).toContainEqual(expect.objectContaining({ tool: "Bash", decision: "allow" }));
     expect(formatRoutingStats("routing", routingStats(db.eventsBySession("s1")))).toContain(
@@ -366,7 +778,11 @@ describe("graph context in hooks", () => {
     expect(readOk).toBeUndefined();
 
     const agent = await handlers.PreToolUse!(
-      base({ hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: { prompt: "do y" } }),
+      base({
+        hook_event_name: "PreToolUse",
+        tool_name: "Agent",
+        tool_input: { prompt: "do y" },
+      }),
     );
     const prompt = String(agent?.hookSpecificOutput?.updatedInput?.prompt);
     expect(prompt).toMatch(/^Use the eminiar tools/);
@@ -392,7 +808,10 @@ describe("subagent findings", () => {
       }),
     );
     const db = getStorage(getContext(root), { vectors: false });
-    const r = await search(db, "pool leak", { mode: "lexical", filters: { source: ["session"] } });
+    const r = await search(db, "pool leak", {
+      mode: "lexical",
+      filters: { source: ["session"] },
+    });
     expect(r.hits.some((h) => h.chunk.body.includes("pool.ts"))).toBe(true);
     expect(r.hits[0]?.chunk.document.title).toBe("agent_findings");
   });
@@ -413,8 +832,11 @@ describe("server liveness", () => {
     writeFileSync(join(other, "package.json"), "{}");
     writeFileSync(
       join(other, "eminiar.config.json"),
-      JSON.stringify({ routing: { mode: "enforce", deferToContextMode: false } }),
+      JSON.stringify({
+        routing: { mode: "enforce", deferToContextMode: false },
+      }),
     );
+    gitRepo(other);
     const out = await handlers.PreToolUse!(
       base({
         hook_event_name: "PreToolUse",
@@ -442,10 +864,25 @@ describe("routing stats", () => {
       document_id: null,
     });
     const s = routingStats([
-      ev({ tool: "Bash", decision: "deny", target: "em_execute", rule: "heavy" }),
+      ev({
+        tool: "Bash",
+        decision: "deny",
+        target: "em_execute",
+        rule: "heavy",
+      }),
       ev({ tool: "Bash", decision: "allow" }),
-      ev({ tool: "Read", decision: "deny", target: "em_execute_file", rule: "big-read" }),
-      ev({ tool: "Grep", decision: "annotate", target: "em_symbols", rule: "symbol" }),
+      ev({
+        tool: "Read",
+        decision: "deny",
+        target: "em_execute_file",
+        rule: "big-read",
+      }),
+      ev({
+        tool: "Grep",
+        decision: "annotate",
+        target: "em_symbols",
+        rule: "symbol",
+      }),
       { ...ev({}), category: "recall" },
     ]);
     expect(s.decisions).toBe(4);

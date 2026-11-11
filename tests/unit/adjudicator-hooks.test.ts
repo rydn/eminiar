@@ -1170,6 +1170,11 @@ describe("onPreAgent", () => {
       );
       expect(own?.note).toMatch(/suggested effort \w+/);
       expect(own?.note).not.toMatch(/pass effort/);
+      // The row records the effort the call passed (never injected), for the swarm decision view.
+      expect(JSON.parse(db().adjudicator.get(own!.rowId!)!.scores!).passedEffort).toBe("high");
+      expect(
+        JSON.parse(db().adjudicator.get(first.a!.rowId!)!.scores!).passedEffort,
+      ).toBeUndefined();
       process.env.CLAUDE_CODE_EFFORT_LEVEL = "low";
       try {
         const env = await onPreAgent(
@@ -1182,6 +1187,7 @@ describe("onPreAgent", () => {
         );
         expect(env?.note).toMatch(/suggested effort \w+/);
         expect(env?.note).not.toMatch(/pass effort/);
+        expect(JSON.parse(db().adjudicator.get(env!.rowId!)!.scores!).effortEnv).toBe("low");
       } finally {
         delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
       }
@@ -1597,6 +1603,21 @@ describe("Cursor, SessionStart and SessionEnd", () => {
     expect(db().metaGet("adjudicator:main:other-session")).toBe('{"n":1}');
     expect(db().metaDelete("adjudicator:main:other-session")).toBe(true);
     expect(db().metaDelete("adjudicator:main:other-session")).toBe(false);
+  });
+
+  it("gets the session's project on every surface after a cd into a nested repo", async () => {
+    configure({ enabled: true, promptMode: "heuristic" });
+    const sub = join(root, "sub");
+    mkdirSync(join(sub, ".git"), { recursive: true });
+    const afterCd = { cwd: sub };
+    await prompt("Where is the function parseConfig defined in src/config.ts?", afterCd);
+    await preTool("Agent", { ...AGENT_INPUT }, afterCd);
+    await postAgent("toolu_cd", { agentId: "acd" }, afterCd);
+    await handlers.SessionEnd!(base({ hook_event_name: "SessionEnd", reason: "exit", ...afterCd }));
+    const m = await hooksModule();
+    const want = getContext(root).root;
+    for (const fn of [m.onPrompt, m.afterRouting, m.onPostAgent, m.onSessionEnd])
+      expect(vi.mocked(fn).mock.calls.at(-1)?.[0].root).toBe(want);
   });
 
   it("SessionStart says one line only when degraded, and warms ollama up asynchronously", async () => {

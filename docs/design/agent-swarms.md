@@ -97,9 +97,13 @@ swarms:
 ```
 
 Validation (zod) rejects unknown topology, bad names (`^[a-z][a-z0-9-]{0,31}$`), stages that
-name missing roles, malformed hooks (events limited to `PreToolUse`, `PostToolUse`, `Stop`;
-each hook `{type:"command", command, timeout?}`), and agent names longer than 64 characters.
-Errors carry the YAML path (`swarms.feature.agents.coder.count`).
+name missing roles, malformed hooks (each hook `{type:"command", command, timeout?}`), and agent
+names longer than 64 characters. Errors carry the YAML path (`swarms.feature.agents.coder.count`).
+A key the schema does not know (including a hook event other than `PreToolUse`, `PostToolUse`
+and `Stop`) is ignored with a note unless it is a typo of a known key, which is an error; while
+any are ignored, sync only creates missing agent files. A typo is one edit from a known key (two
+for keys of 7+ characters), so give a new key a name further than that from existing ones
+(`min_turns` next to `max_turns` would read as a typo, and older versions would reject it).
 
 ## Generated agents
 

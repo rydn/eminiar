@@ -5,7 +5,7 @@ import { defineTool, errorResult, text } from "./types.js";
 export const emPurge = defineTool({
   name: "em_purge",
   description:
-    "Permanently delete eminiar data for this project. scope: index (documents/chunks/vectors/caches), sessions (events, snapshots, stats), graph, memories (the database mirror only; the markdown files under .eminiar/memories stay and are re-imported on the next memory call — delete files with em_memory), usage (API calls, tool uses, context events, transcript offsets, statusline snapshots), adjudicator (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests), or all. Requires confirm: true.",
+    "Permanently delete eminiar data for this project. scope: index (documents/chunks/vectors/caches), sessions (events and the session history em_recall searches, snapshots, stats), graph, memories (the database mirror only; the markdown files under .eminiar/memories stay and are re-imported on the next memory call — delete files with em_memory), usage (API calls, tool uses, context events, transcript offsets, statusline snapshots), adjudicator (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests), or all. Requires confirm: true.",
   schema: {
     scope: z.enum(["index", "sessions", "graph", "memories", "usage", "adjudicator", "all"]),
     confirm: z.boolean().describe("Must be true; this cannot be undone"),
