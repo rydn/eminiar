@@ -8,6 +8,7 @@ import { exportMarkdown, exportSkill, schedulePrompt } from "../../src/playbooks
 import { PlaybookGateError, read, write } from "../../src/playbooks/store.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
+import { emPlaybook } from "../../src/tools/em_playbook.js";
 
 /** Round 2 fixes to the skill export (swarm run 20261111-e068a8, tasks #262 #267 #274 #268). */
 
@@ -100,5 +101,16 @@ describe("#267 playbooks.adding off refuses export skill only", () => {
     expect(f).toBeTruthy();
     expect(exportMarkdown(f as NonNullable<typeof f>)).toContain("do the thing");
     expect(schedulePrompt(off(), db, "pub")).toContain("do the thing");
+  });
+});
+
+describe("#274 the schedule instruction carries the run_id", () => {
+  it("tells the job to report with the run_id its own run call returned", async () => {
+    write(ctx, db, { name: "daily", title: "Daily", prompt: "check", schedule: "every day" });
+    const r = await emPlaybook.handler({ action: "schedule", name: "daily" }, ctx);
+    const t = r.content.map((c) => ("text" in c ? c.text : "")).join("\n");
+    expect(t).toMatch(/run_id/);
+    expect(t).toMatch(/run_id[^.]*(returns|returned)/i);
+    expect(t).toMatch(/no run_id|without a run_id|have no/i);
   });
 });
