@@ -47,8 +47,8 @@ function paramItems(f: PlaybookFile): string[] {
 
 function describe(f: PlaybookFile): string {
   const head = [
-    `${f.name} — ${f.title}${f.private ? " (private)" : ""} · ${f.path}`,
-    f.schedule ? `schedule: ${f.schedule}` : "",
+    `${f.name} — ${oneLine(f.title)}${f.private ? " (private)" : ""} · ${f.path}`,
+    f.schedule ? `schedule: ${oneLine(f.schedule)}` : "",
     f.params.length ? `params: ${paramItems(f).join(", ")}` : "",
     f.tags.length ? `tags: ${f.tags.join(", ")}` : "",
   ].filter(Boolean);
