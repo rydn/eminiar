@@ -1375,11 +1375,15 @@ function projectRel(ctx: ProjectContext, fp: string): string | undefined {
   return rel.startsWith("..") ? undefined : rel;
 }
 
+const GRAPH_HINT_TOOLS = new Set(["Grep", "Glob", "Read"]);
+
 /**
  * Non-blocking context for navigation tools: matching graph symbols for Grep/Glob
  * patterns, coverage gaps for files about to be read. Never denies anything.
  */
 function graphContext(ctx: ProjectContext, input: HookInput): string | undefined {
+  // Only these tools get a graph hint: any other call must not open the database.
+  if (!GRAPH_HINT_TOOLS.has(input.tool_name ?? "")) return undefined;
   try {
     const db = getStorage(ctx, { vectors: false });
     if (!db.graphCounts().nodes) return undefined;
@@ -1583,11 +1587,12 @@ async function route(
   const mode = effectiveRoutingMode(ctx.config);
   if (mode === "off") return withContext(undefined, memo);
   const coexisting = contextModeInstalled() && ctx.config.routing.deferToContextMode;
-  // context-mode already routes these; adding a second opinion only confuses the model.
-  if (coexisting && ["Bash", "Read", "Grep", "WebFetch"].includes(input.tool_name))
-    return withContext(undefined, memo);
-
   const graph = graphContext(ctx, input);
+  // context-mode already routes these: drop the routing suggestion, keep what only eminiar
+  // knows (symbol hints, coverage warnings, the file memo).
+  if (coexisting && ["Bash", "Read", "Grep", "WebFetch"].includes(input.tool_name))
+    return withContext(undefined, joinHints(graph, memo));
+
   const hint = joinHints(graph, memo);
   // graphContext names matching symbols only when the graph has them: that is the signal
   // to route a Grep for the identifier to em_symbols / em_search instead of rg.

@@ -64,6 +64,8 @@ interface Stats {
 
 const ONBOARDING = ["overview", "structure", "commands", "conventions"];
 const tokens = (chars: number): number => Math.ceil(chars / 4);
+/** A saved-token figure: an estimate (4 characters per token), hence the ≈. */
+const est = (n: number): string => `≈${fmt(n)}`;
 
 // --- skeleton -------------------------------------------------------------------------
 
@@ -141,7 +143,7 @@ function ToolTable({ rows }: { rows: ToolRow[] }): JSX.Element {
                       <span class="ds-meter-track ds-t-ok">
                         <i style={{ width: `${s ? Math.max(3, (100 * s) / max) : 0}%` }} />
                       </span>
-                      <b>{fmt(s)}</b>
+                      <b>{est(s)}</b>
                     </span>
                   </td>
                 </tr>
@@ -343,7 +345,7 @@ export function Overview(): JSX.Element {
         title={
           savedAll > 0 ? (
             <>
-              <GradientText>{fmt(savedAll)} tokens</GradientText> kept out of context
+              <GradientText>{est(savedAll)} tokens</GradientText> kept out of context
             </>
           ) : (
             "Nothing kept out of context yet"
@@ -351,7 +353,7 @@ export function Overview(): JSX.Element {
         }
         sub={
           savedAll > 0
-            ? `${s.lifetime.calls} tool calls compacted to ${pct(1 - s.lifetime.efficiency)} of their raw size. ${s.session.savedTokens > 0 ? `${fmt(s.session.savedTokens)} saved this session.` : ""}`
+            ? `${s.lifetime.calls} tool calls compacted to ${pct(1 - s.lifetime.efficiency)} of their raw size. ${s.session.savedTokens > 0 ? `${est(s.session.savedTokens)} saved this session.` : ""} Token figures are estimates (4 characters per token).`
             : "Run tools through the eminiar sandbox and the savings will show up here."
         }
         meta={
@@ -386,7 +388,7 @@ export function Overview(): JSX.Element {
               title={`lifetime efficiency ${pct(s.lifetime.efficiency)}`}
             />
             <div class="ov-hero-kpi">
-              <b>{fmt(s.session.savedTokens)}</b>
+              <b>{est(s.session.savedTokens)}</b>
               <span>saved this session</span>
               <span>{s.session.calls} calls</span>
             </div>
@@ -397,27 +399,27 @@ export function Overview(): JSX.Element {
       <StatRow>
         <Stat
           label="session saved"
-          value={fmt(s.session.savedTokens)}
+          value={est(s.session.savedTokens)}
           sub={`${pct(s.session.efficiency)} efficient · ${s.session.calls} calls`}
         >
           <SegBar total={1} segments={[{ value: s.session.efficiency, tone: "accent" }]} />
         </Stat>
         <Stat
           label="project saved"
-          value={fmt(s.projectTotals.savedTokens)}
+          value={est(s.projectTotals.savedTokens)}
           sub={`${pct(s.projectTotals.efficiency)} efficient · ${s.projectTotals.calls} calls`}
         >
           <SegBar total={1} segments={[{ value: s.projectTotals.efficiency, tone: "purple" }]} />
         </Stat>
         <Stat
           label="lifetime saved"
-          value={fmt(savedAll)}
+          value={est(savedAll)}
           sub={`${pct(s.lifetime.efficiency)} efficient · ${s.lifetime.calls} calls`}
           onClick={() => navigate("usage")}
           title="open Usage"
         >
           {dailyTokens.length > 1 ? (
-            <Sparkline values={dailyTokens} title="tokens saved per day" />
+            <Sparkline values={dailyTokens} title="tokens saved per day (estimated)" />
           ) : (
             <SegBar total={1} segments={[{ value: s.lifetime.efficiency, tone: "ok" }]} />
           )}
@@ -456,14 +458,14 @@ export function Overview(): JSX.Element {
 
       <div class="ds-grid main-side">
         <Card
-          title="Tokens saved per day"
+          title="Tokens saved per day (estimated)"
           right={first && lastDay ? `${first.day} → ${lastDay.day}` : undefined}
         >
           {s.daily.length ? (
             <ColumnChart
               data={s.daily.map((d) => ({
                 value: d.saved_chars,
-                tip: `${d.day}: ${fmt(tokens(d.saved_chars))} tokens · ${d.calls} calls`,
+                tip: `${d.day}: ${est(tokens(d.saved_chars))} tokens · ${d.calls} calls`,
               }))}
               startLabel={first?.day}
               endLabel={lastDay?.day}
@@ -549,7 +551,7 @@ export function Overview(): JSX.Element {
                       <div class="ov-prompt">{(x.last_prompt ?? "").slice(0, 90)}</div>
                     </td>
                     <td class="num">{x.calls}</td>
-                    <td class="num">{fmt(x.savedTokens)}</td>
+                    <td class="num">{est(x.savedTokens)}</td>
                   </tr>
                 ))
               ) : (

@@ -175,10 +175,15 @@ Set the mode with `routing.mode` in `eminiar.config.json`:
 
 | Mode | Behaviour |
 |---|---|
-| `auto` (default) | `annotate` while the context-mode plugin is installed, otherwise `enforce` |
+| `auto` (default) | `annotate` while the context-mode plugin is installed, otherwise `enforce`. With `routing.deferToContextMode` on, `Bash`, `Read`, `Grep` and `WebFetch` get no routing hint while it is installed (see below) |
 | `enforce` | Denies the native call and tells Claude which `em_*` tool to use |
 | `annotate` | Allows the call and adds a hint |
 | `off` | No routing hints |
+
+While the context-mode plugin is installed and `routing.deferToContextMode` is `true` (the default),
+every mode except `off` stops suggesting `em_*` tools for `Bash`, `Read`, `Grep` and `WebFetch`,
+because context-mode already routes them. eminiar still adds the hints only it has: symbol matches,
+coverage warnings and file memos.
 
 **Bash is judged one simple command at a time.** A line is split at `;`, `&&`, `||` and
 newlines (heredoc bodies and quoted text are skipped), and each part is classified on its own, so

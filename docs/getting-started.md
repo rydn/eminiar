@@ -154,7 +154,10 @@ Add this to `~/.claude/settings.json` (`$CLAUDE_CONFIG_DIR/settings.json` when y
 { "statusLine": { "type": "command", "command": "eminiar statusline" } }
 ```
 
-It shows: `eminiar · 12.3k saved · 1.1M lifetime · 87% efficient`.
+It shows: `eminiar · ≈12.3k saved (≈8.1k measured) · ≈1.1M lifetime · 87% efficient`.
+Token figures are estimates (4 characters per token), hence the `≈`. The measured part is
+execution output that was produced and kept out of context; the rest is counterfactual, what
+native calls might have returned (see [`em_stats`](tools.md)).
 
 ## Upgrade
 
@@ -178,8 +181,9 @@ repositories are not deleted.
 ## Migrate from context-mode
 
 eminiar started as a clean-room reimplementation of the context-mode plugin. Both can be
-installed at the same time. While context-mode is installed, eminiar only *annotates* tool calls,
-so the two plugins never block each other (see [routing](how-it-works.md#routing)).
+installed at the same time. While context-mode is installed, eminiar stops suggesting `em_*` tools for
+`Bash`, `Read`, `Grep` and `WebFetch` (in every routing mode except `off`), but keeps its own symbol,
+coverage and file-memo hints, so the two plugins never block each other (see [routing](how-it-works.md#routing)).
 
 When you are satisfied with eminiar, remove context-mode:
 

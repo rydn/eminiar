@@ -227,8 +227,10 @@ Restart Claude Code (or Cursor). Then, in your project:
 /em-onboard             # writes onboarding memories and builds the docs knowledge base
 ```
 
-That is all. Use Claude Code or Cursor as usual. To see how much context eminiar saves, run
-`/em-stats` or open the dashboard with `eminiar ui`. One flag covers Cursor because the hook
+That is all. Use Claude Code or Cursor as usual. To see an estimate of how much context eminiar
+saves, run `/em-stats` or open the dashboard with `eminiar ui`; execution output kept out of
+context is measured, search and graph savings are counted against what native calls might have
+returned ([details](docs/tools.md#housekeeping)). One flag covers Cursor because the hook
 runner speaks both dialects; see [Cursor](docs/getting-started.md#cursor) for what differs.
 
 **For a team:** run `npx eminiar install --team` once and commit `eminiar.config.json` and
