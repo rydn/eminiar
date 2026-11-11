@@ -1170,6 +1170,11 @@ describe("onPreAgent", () => {
       );
       expect(own?.note).toMatch(/suggested effort \w+/);
       expect(own?.note).not.toMatch(/pass effort/);
+      // The row records the effort the call passed (never injected), for the swarm decision view.
+      expect(JSON.parse(db().adjudicator.get(own!.rowId!)!.scores!).passedEffort).toBe("high");
+      expect(
+        JSON.parse(db().adjudicator.get(first.a!.rowId!)!.scores!).passedEffort,
+      ).toBeUndefined();
       process.env.CLAUDE_CODE_EFFORT_LEVEL = "low";
       try {
         const env = await onPreAgent(
@@ -1182,6 +1187,7 @@ describe("onPreAgent", () => {
         );
         expect(env?.note).toMatch(/suggested effort \w+/);
         expect(env?.note).not.toMatch(/pass effort/);
+        expect(JSON.parse(db().adjudicator.get(env!.rowId!)!.scores!).effortEnv).toBe("low");
       } finally {
         delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
       }

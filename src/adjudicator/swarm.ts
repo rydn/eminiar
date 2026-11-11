@@ -41,6 +41,8 @@ import {
   type AdjudicationRequest,
   type AdjudicatorProvider,
   AGENT_EFFORT_SINCE,
+  EFFORTS,
+  type Effort,
   TIERS,
   type Tier,
 } from "./types.js";
@@ -531,6 +533,19 @@ export function planAdviceBlock(
   if (!advice.length) return "";
   const nudge = advice.every((a) => a.allRolesPinned) ? [ALL_PINNED_NOTE] : [];
   return [planAdviceHead(advice, env), ...nudge, ...planLines(advice)].join("\n");
+}
+
+/** Scores-JSON key of an agent row: the `effort` the Agent call passed (a known level only). */
+export const PASSED_EFFORT_FIELD = "passedEffort";
+/** Scores-JSON key of an agent row: the CLAUDE_CODE_EFFORT_LEVEL in force (a known level only). */
+export const EFFORT_ENV_FIELD = "effortEnv";
+/** EFFORT_ENV_FIELD value when CLAUDE_CODE_EFFORT_LEVEL is set to something outside EFFORTS. */
+export const EFFORT_ENV_OTHER = "other";
+
+/** A known effort level (EFFORTS), lower-cased, or undefined: free text is never stored. */
+export function effortLevel(v: unknown): Effort | undefined {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return (EFFORTS as readonly string[]).includes(s) ? (s as Effort) : undefined;
 }
 
 /** CLAUDE_CODE_EFFORT_LEVEL outranks the Agent call's `effort` (and the agent file's). */

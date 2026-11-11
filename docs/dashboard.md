@@ -198,6 +198,13 @@ invalid, disabled, agent files out of date, or enabled and in sync. The state is
   per kind. You can filter by role or kind (tool calls, tasks, blackboard, workers, run, errors).
 - **Blackboard.** The shared notes with key, author, version and age. Click a note to read its
   value.
+- **Adjudicator decisions.** Each task card and worker card shows a `model · effort` chip for what
+  actually ran, with a `≠` and an amber outline when it differs from the adjudicator's suggestion.
+  An effort of `default` means the agent file's own setting ran and the level is not known (older
+  rows, or no effort passed). The worker drawer has a **Decision** section: ran at, suggested
+  (model, effort, confidence), the outcome (followed, overrode, pinned, forced, fork or none) in a
+  sentence, and the top reasons. The run snapshot carries `decisions` keyed by task id. With the
+  adjudicator off, or before a task is dispatched, the chip is absent and the drawer says so.
 - **Left rail.** A **Swarms** card lists the configured swarms: topology, role count, slots
   against `max_agents`, and role chips in a colour per role. A badge shows how many agent files
   need a sync. Click a swarm, or the **Configure** link, to edit it. **Sync agent files**
@@ -221,6 +228,7 @@ API (JSON, loopback only):
 |---|---|
 | `GET /api/swarm` | state (`absent`, `invalid` or `ok`), swarms and roles with agent-file state, issues, recent runs with counts, the starter YAML when absent |
 | `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments |
+| `GET /api/swarm/task?id=` | one whole task and, with it, the adjudicator's `decision` for it |
 | `GET /api/swarm/events?id=&after=` | up to 200 events after an event id, oldest first |
 | `POST /api/swarm/init` | writes the starter file if none exists (409 otherwise) and syncs the agent files |
 | `POST /api/swarm/sync` | syncs the agent files with the swarm file |

@@ -1,9 +1,10 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import type { SwarmTask, SwarmWorkerUi } from "../api.js";
+import type { SwarmDecision, SwarmTask, SwarmWorkerUi } from "../api.js";
 import { Badge, Card, EmptyState } from "../ds.js";
 import { cls, fmt } from "../util.js";
 import { pure, RoleChip, State, useNow } from "./bits.js";
+import { DecisionChip, workerDecisions } from "./decision.js";
 import { heartbeat, sortWorkers } from "./run-helpers.js";
 import { dur, GLYPH, roleColor, shortAgent } from "./style.js";
 import { ReleaseButton } from "./Timeline.js";
@@ -22,7 +23,9 @@ function WorkerCard({
   picked,
   onPick,
   onRelease,
+  decision,
 }: {
+  decision: SwarmDecision | undefined;
   w: SwarmWorkerUi;
   roles: string[];
   task: SwarmTask | undefined;
@@ -49,6 +52,7 @@ function WorkerCard({
         <code class="sw-wk-id" title={w.agent_id}>
           {shortAgent(w.agent_id)}
         </code>
+        <DecisionChip d={decision} />
         <span class="spacer" />
         <State s={w.status} />
       </div>
@@ -117,7 +121,9 @@ function WorkersView({
   picked,
   onPick,
   onRelease,
+  decisions,
 }: {
+  decisions: Record<number, SwarmDecision> | undefined;
   workers: SwarmWorkerUi[];
   tasks: SwarmTask[];
   roles: string[];
@@ -173,6 +179,7 @@ function WorkersView({
                 picked={picked === w.agent_id}
                 onPick={onPick}
                 onRelease={onRelease}
+                decision={workerDecisions(decisions, w.agent_id, w.task_id)[0]}
               />
             ))}
           </div>

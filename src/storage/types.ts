@@ -683,6 +683,8 @@ export interface AdjudicatorStore {
   ): AdjudicationRow | undefined;
   /** Oldest first. */
   forTask(runId: string, taskId: number): AdjudicationRow[];
+  /** Every row of a swarm run (those with a task id), oldest first: one query for a whole run. */
+  forRun(runId: string): AdjudicationRow[];
   /** Rows with final = 0, oldest first; `olderThan` (epoch ms) keeps only rows with ts < it. */
   nonFinal(limit: number, olderThan?: number): AdjudicationRow[];
 
