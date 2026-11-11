@@ -4,7 +4,7 @@ kind: decision
 tags: [playbooks, design, scope]
 related: [file:src/playbooks/store.ts, file:src/tools/em_playbook.ts, file:src/playbooks/extract.ts, file:src/playbooks/export.ts, mem:playbooks/config-gate-rule, mem:security/stored-data-privacy]
 created: 2026-11-11T22:10:00.000Z
-updated: 2026-11-11T22:10:00.000Z
+updated: 2026-11-11T22:40:00.000Z
 ---
 
 Playbooks (swarm run 20261111-e068a8, branch feature/run_book, 2026-11-11, release 0.15.0). A playbook is a stored recurring task (name, title, prompt, parameters, optional schedule hint, tags, private flag) that eminiar lists and hands to Claude to run: check Slack for PRs and review them, check Datadog or Kubernetes for issues.
@@ -15,8 +15,10 @@ Decisions the user made (do not re-litigate):
 - Viewing, adding and running by hand are on by default. Extraction of candidates from session history is opt-in (`playbooks.extraction.enabled`), runs only on demand (never in a hook), and nothing becomes a playbook without an explicit accept.
 - Delivery: parent branch feature/run_book, one sub-branch per task named feature/run_book-<task>, each built in its own git worktree, merged back into feature/run_book.
 
-Storage: definitions are markdown with frontmatter in .eminiar/playbooks/*.md (committed); a private playbook goes to .eminiar/playbooks-private/ (0700/0600, verified gitignored through `git check-ignore`). Runs and suggestions live in the project SQLite db (schema migration v10: playbooks mirror, playbook_runs, playbook_suggestions); purging sessions deletes runs and suggestions, purging memories drops the mirror and keeps the files.
+Storage: definitions are markdown with frontmatter in .eminiar/playbooks/*.md (committed); a private playbook goes to .eminiar/playbooks-private/ (0700/0600, verified gitignored through `git check-ignore`). Runs and suggestions live in the project SQLite db (schema migration v11: playbooks mirror, playbook_runs, playbook_suggestions); purging sessions deletes runs and suggestions, purging memories drops the mirror and keeps the files.
 
-Open: migration v10 clashes with the unmerged branch feature/jev-integrations (its v10 is decision_calls, reserved in mem:security/stored-data-privacy). Playbooks lands first on current main (0.14.4 base), so jev-integrations must renumber to the next free version when it merges.
+Migration number (task #266, review2 H1, branch feature/run_book-r2-migration): playbooks first took v10, which feature/jev-integrations had already given to decision_calls (mem:security/stored-data-privacy), and real project databases are at schema_version 10 from jev with no playbook tables. The runner (SqliteAdapter.migrate) applies only versions above meta.schema_version, so those databases skipped the playbook DDL: `eminiar playbook list` failed and purge sessions/memories/all threw "no such table". Fix: (1) the playbook DDL is migration v11, the next free version after main (9) and jev-integrations (10), all IF NOT EXISTS (schema.ts PLAYBOOKS_SQL); (2) healPlaybookTables runs at every adapter open after the migrations and creates the three tables and their indexes whenever any is missing, whatever schema_version says (one sqlite_master count, about 19 µs on the real 200 MB db; hook p50 unchanged against a build without it; fail open on a busy db); (3) purge skips playbook tables that do not exist. tests/unit/schema-migrations.test.ts fails on duplicate or non-increasing versions; tests/unit/playbooks-runs.test.ts covers the jev-shaped db, a db at v11+ without the tables, reopen as a no-op and purge without the tables.
+
+Landing order: jev first (v10) then playbooks (v11) just works. Playbooks first (v11) then jev: jev's v10 would be skipped on every database already at 11, so the rule for the next branch is that whoever lands later takes the next free version (jev becomes v12, keeping IF NOT EXISTS so its own development databases at v10 rerun it harmlessly), and the heal step covers databases that ran another branch's number. Never resolve a merge by keeping two entries with one number.
 
 Not built: an LLM refiner for suggestion titles (the adjudicator provider/consent plumbing would be reused; off by default), automatic parameter extraction (events carry no tool arguments), and a Claude Code skill `/em-playbook`.

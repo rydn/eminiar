@@ -137,12 +137,13 @@ describe("playbooks config", () => {
   });
 });
 
-describe("migration 10", () => {
-  it("is the newest version, after the shipped ones, and has unique versions", () => {
+describe("the playbook migration", () => {
+  it("comes after the shipped versions and the versions are unique", () => {
     const versions = migrations.map((m) => m.version);
     expect(new Set(versions).size).toBe(versions.length);
     expect(versions).toEqual([...versions].sort((a, b) => a - b));
-    expect(versions.at(-1)).toBe(10);
+    const pb = migrations.find((m) => m.sql?.includes("CREATE TABLE IF NOT EXISTS playbooks ("));
+    expect(pb?.version).toBeGreaterThan(9);
   });
 
   it("creates the playbook tables", () => {

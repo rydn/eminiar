@@ -46,7 +46,7 @@ import type {
 } from "../types.js";
 import { SqliteAdjudicatorStore } from "./adjudicator.js";
 import { SqlitePlaybookStore } from "./playbooks.js";
-import { migrations, vecTableSql } from "./schema.js";
+import { healPlaybookTables, migrations, tablesExist, vecTableSql } from "./schema.js";
 import { SqliteSwarmStore } from "./swarm.js";
 
 export interface SqliteOptions {
@@ -348,6 +348,14 @@ export class SqliteAdapter implements StorageAdapter {
           this.metaSet("schema_version", String(m.version));
         }
       });
+    }
+    // A database can be at the playbook version or past it without the tables (another branch
+    // used the number first); one sqlite_master count when they are there. Fail open: a busy
+    // or read-only database retries on the next open, and purge skips missing tables.
+    try {
+      healPlaybookTables(this.db);
+    } catch {
+      // the playbook store reports the missing table on its own
     }
     if (this.vectors) {
       const prevDims = this.metaGet("vec_dims");
@@ -2037,8 +2045,10 @@ export class SqliteAdapter implements StorageAdapter {
         );
         // Swarm runs are session activity; deleting runs cascades to the rest of the ledger.
         this.db.exec("DELETE FROM swarm_runs;");
-        // Playbook runs and suggestions come from sessions too; the playbook files stay.
-        this.playbooks.purgeActivity();
+        // Playbook runs and suggestions come from sessions too; the playbook files stay. The
+        // tables can be missing when the heal at open could not run; nothing to clear then.
+        if (tablesExist(this.db, ["playbook_runs", "playbook_suggestions"]))
+          this.playbooks.purgeActivity();
         // The memorable events were also indexed (source "session"), and that copy is what
         // em_recall and the prompt hook recall. The index scope clears it with everything else.
         if (scope === "sessions") this.purgeDocumentsBySource("session");
@@ -2056,7 +2066,7 @@ export class SqliteAdapter implements StorageAdapter {
       if (scope === "adjudicator" || scope === "all") this.adjudicator.purge();
       if (scope === "memories" || scope === "all") {
         this.db.exec("DELETE FROM memories;");
-        this.playbooks.purgeMirror();
+        if (tablesExist(this.db, ["playbooks"])) this.playbooks.purgeMirror();
         // The index and graph scopes clear their own tables; a memories-only purge must
         // still drop the mirrored documents and memory nodes. The files stay on disk.
         if (scope === "memories") {

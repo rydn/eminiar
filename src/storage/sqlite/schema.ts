@@ -8,6 +8,11 @@ import type Database from "better-sqlite3";
  *
  * Never edit a shipped migration in place: databases that already ran it will not see
  * the change. Add a new version instead.
+ *
+ * Versions are unique and strictly increasing (tests/unit/schema-migrations.test.ts). Only
+ * versions above schema_version run, so when two branches pick the same number, whichever
+ * lands later takes the next free version and keeps its DDL IF NOT EXISTS; a heal at open
+ * (healPlaybookTables) covers databases that already ran the other branch's number.
  */
 export interface Migration {
   version: number;
@@ -20,6 +25,67 @@ export function hasColumn(db: Database.Database, table: string, column: string):
   const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
   return cols.some((c) => c.name === column);
 }
+
+/**
+ * The playbook tables and indexes (src/playbooks). Shared by migration 11 and
+ * healPlaybookTables, so every statement must stay IF NOT EXISTS.
+ */
+const PLAYBOOKS_SQL = `
+CREATE TABLE IF NOT EXISTS playbooks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  params TEXT,
+  schedule TEXT,
+  tags TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  private INTEGER NOT NULL DEFAULT 0,
+  path TEXT,
+  file_hash TEXT,
+  file_mtime INTEGER,
+  file_size INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS playbooks_updated ON playbooks(updated_at);
+CREATE TABLE IF NOT EXISTS playbook_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  playbook TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  trigger TEXT NOT NULL,
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'started',
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS playbook_runs_playbook ON playbook_runs(playbook, ts);
+CREATE TABLE IF NOT EXISTS playbook_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  params TEXT,
+  schedule TEXT,
+  tags TEXT,
+  evidence TEXT,
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  fingerprint TEXT NOT NULL UNIQUE,
+  playbook TEXT
+);
+CREATE INDEX IF NOT EXISTS playbook_suggestions_status ON playbook_suggestions(status, ts);
+`;
+
+/** Every table and index PLAYBOOKS_SQL creates. */
+export const PLAYBOOK_OBJECTS = [
+  "playbooks",
+  "playbooks_updated",
+  "playbook_runs",
+  "playbook_runs_playbook",
+  "playbook_suggestions",
+  "playbook_suggestions_status",
+] as const;
 
 export const migrations: Migration[] = [
   {
@@ -632,53 +698,11 @@ CREATE INDEX IF NOT EXISTS adjudicator_exchanges_ts ON adjudicator_exchanges(ts)
   {
     // Playbooks (src/playbooks): stored recurring tasks. `playbooks` mirrors the markdown files
     // like `memories`; runs and suggestions are activity. Nothing here executes a playbook.
-    version: 10,
-    sql: `
-CREATE TABLE IF NOT EXISTS playbooks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL UNIQUE,
-  title TEXT NOT NULL,
-  prompt TEXT NOT NULL,
-  params TEXT,
-  schedule TEXT,
-  tags TEXT,
-  source TEXT NOT NULL DEFAULT 'manual',
-  private INTEGER NOT NULL DEFAULT 0,
-  path TEXT,
-  file_hash TEXT,
-  file_mtime INTEGER,
-  file_size INTEGER,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS playbooks_updated ON playbooks(updated_at);
-CREATE TABLE IF NOT EXISTS playbook_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  playbook TEXT NOT NULL,
-  ts INTEGER NOT NULL,
-  trigger TEXT NOT NULL,
-  session_id TEXT,
-  status TEXT NOT NULL DEFAULT 'started',
-  note TEXT
-);
-CREATE INDEX IF NOT EXISTS playbook_runs_playbook ON playbook_runs(playbook, ts);
-CREATE TABLE IF NOT EXISTS playbook_suggestions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  title TEXT NOT NULL,
-  prompt TEXT NOT NULL,
-  params TEXT,
-  schedule TEXT,
-  tags TEXT,
-  evidence TEXT,
-  session_id TEXT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  fingerprint TEXT NOT NULL UNIQUE,
-  playbook TEXT
-);
-CREATE INDEX IF NOT EXISTS playbook_suggestions_status ON playbook_suggestions(status, ts);
-`,
+    // Version 11, not 10: feature/jev-integrations already shipped v10 (decision_calls) to
+    // development databases, and the runner only applies versions above schema_version.
+    // healPlaybookTables covers any database that reached 11 or later without these tables.
+    version: 11,
+    sql: PLAYBOOKS_SQL,
   },
 ];
 
@@ -735,6 +759,32 @@ export function healAdjudicatorColumns(db: Database.Database): string[] {
     added.push(index);
   }
   return added;
+}
+
+const PLAYBOOK_OBJECTS_SQL = `SELECT count(*) AS n FROM sqlite_master WHERE type IN ('table','index') AND name IN (${PLAYBOOK_OBJECTS.map((n) => `'${n}'`).join(",")})`;
+
+/**
+ * Creates the playbook tables and indexes when any is missing, whatever schema_version says.
+ * Two branches claimed migration v10 (playbooks and feature/jev-integrations' decision_calls),
+ * and the runner only applies versions above the stored one, so a database can sit at v10 or
+ * later without these tables. Costs one sqlite_master count when they exist; returns true when
+ * it created something.
+ */
+export function healPlaybookTables(db: Database.Database): boolean {
+  const row = db.prepare(PLAYBOOK_OBJECTS_SQL).get() as { n: number };
+  if (row.n === PLAYBOOK_OBJECTS.length) return false;
+  db.exec(PLAYBOOKS_SQL);
+  return true;
+}
+
+/** True when every named table exists. */
+export function tablesExist(db: Database.Database, names: readonly string[]): boolean {
+  const row = db
+    .prepare(
+      `SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN (${names.map(() => "?").join(",")})`,
+    )
+    .get(...names) as { n: number };
+  return row.n === names.length;
 }
 
 /** vec0 lives outside the migration list: it needs the extension loaded first and takes the dimension. */

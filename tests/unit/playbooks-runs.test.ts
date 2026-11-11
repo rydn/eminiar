@@ -8,12 +8,16 @@ import { closeRun, reconcile, recordRun, runs, suggest, write } from "../../src/
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
-import { migrations } from "../../src/storage/sqlite/schema.js";
+import {
+  healPlaybookTables,
+  migrations,
+  PLAYBOOK_OBJECTS,
+} from "../../src/storage/sqlite/schema.js";
 import { emPlaybook } from "../../src/tools/em_playbook.js";
 
 /**
- * Playbook runs (record, close in place, races), the v10 migration on an older database, and
- * which purge scopes touch playbook data. Hermetic: temp project, temp EMINIAR_HOME.
+ * Playbook runs (record, close in place, races), the playbook migration (v11) and heal on older
+ * databases, and which purge scopes touch playbook data. Hermetic: temp project, temp EMINIAR_HOME.
  */
 
 let root: string;
@@ -153,7 +157,7 @@ describe("closing a run", () => {
   });
 });
 
-describe("migration 10 on an existing database", () => {
+describe("the playbook migration on an existing database", () => {
   const latest = () => migrations[migrations.length - 1]!.version;
 
   function dbAtV9(): string {
@@ -173,6 +177,52 @@ describe("migration 10 on an existing database", () => {
     expect(
       raw.prepare("SELECT name FROM sqlite_master WHERE name = 'playbooks'").get(),
     ).toBeUndefined();
+    raw.close();
+    return path;
+  }
+
+  /**
+   * A database as feature/jev-integrations leaves it: migrations 1-9, its own v10
+   * (decision_calls, decision_cache) and schema_version 10, with no playbook tables. The user's
+   * project databases are in this state, so the playbook migration must not be v10.
+   */
+  function dbAsJevLeavesIt(): string {
+    const path = join(mkdtempSync(join(tmpdir(), "em-jev10-")), "eminiar.db");
+    const raw = new Database(path);
+    for (const m of migrations) {
+      if (m.version > 9) break;
+      if (m.sql) raw.exec(m.sql);
+      m.up?.(raw);
+    }
+    raw.exec(`
+CREATE TABLE IF NOT EXISTS decision_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, feature TEXT NOT NULL,
+  context TEXT NOT NULL, session_id TEXT, subject TEXT NOT NULL, mode TEXT NOT NULL,
+  status TEXT NOT NULL, items INTEGER NOT NULL DEFAULT 0, baseline TEXT NOT NULL DEFAULT 'null',
+  provider TEXT, answers TEXT, decision TEXT, changed INTEGER NOT NULL DEFAULT 0,
+  applied INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER, tokens_in INTEGER, cost_usd REAL,
+  model TEXT, exchange_id INTEGER, note TEXT, note_session TEXT, delivered_at INTEGER,
+  feedback TEXT
+);
+CREATE INDEX IF NOT EXISTS decision_calls_feature_ts ON decision_calls(feature, ts);
+CREATE TABLE IF NOT EXISTS decision_cache (
+  key TEXT PRIMARY KEY, feature TEXT NOT NULL, answers TEXT NOT NULL, created_at INTEGER NOT NULL
+);
+INSERT INTO decision_calls (ts, feature, context, subject, mode, status) VALUES (1, 'f', 'c', 's', 'shadow', 'ok');
+INSERT INTO meta (key, value) VALUES ('schema_version', '10');
+`);
+    raw.close();
+    return path;
+  }
+
+  /** A database at `version` (by default the newest) whose playbook tables were never made. */
+  function dbWithoutPlaybookTables(version = latest()): string {
+    const path = join(mkdtempSync(join(tmpdir(), "em-nopb-")), "eminiar.db");
+    new SqliteAdapter(path, { vectors: false }).close();
+    const raw = new Database(path);
+    raw.exec(
+      `DROP TABLE playbooks; DROP TABLE playbook_runs; DROP TABLE playbook_suggestions; UPDATE meta SET value = '${version}' WHERE key = 'schema_version'`,
+    );
     raw.close();
     return path;
   }
@@ -219,6 +269,89 @@ describe("migration 10 on an existing database", () => {
       expect(again.playbooks.runs()).toHaveLength(1);
     } finally {
       again.close();
+    }
+  });
+
+  it("is not version 10, which feature/jev-integrations shipped to development databases", () => {
+    const pb = migrations.find((m) => m.sql?.includes("CREATE TABLE IF NOT EXISTS playbooks ("));
+    expect(pb?.version).toBe(11);
+  });
+
+  it("a database at jev's v10 gets working playbook tables and a working purge", () => {
+    const path = dbAsJevLeavesIt();
+    const a = new SqliteAdapter(path, { vectors: false });
+    try {
+      expect(a.metaGet("schema_version")).toBe(String(latest()));
+      expect(objects(a)).toEqual(expect.arrayContaining([...PLAYBOOK_OBJECTS]));
+      expect(objects(a)).toEqual(expect.arrayContaining(["decision_calls", "decision_cache"]));
+      a.playbooks.upsert({ name: "n", title: "N", prompt: "p" });
+      a.playbooks.runAdd({ playbook: "n", trigger: "cli" });
+      expect(a.playbooks.count()).toBe(1);
+      for (const scope of ["sessions", "memories", "all"] as const)
+        expect(() => a.purge(scope), scope).not.toThrow();
+      expect(a.playbooks.count()).toBe(0);
+      expect(a.playbooks.runs()).toHaveLength(0);
+      // jev's own table is left alone
+      expect(
+        (a.db.prepare("SELECT count(*) AS n FROM decision_calls").get() as { n: number }).n,
+      ).toBe(1);
+    } finally {
+      a.close();
+    }
+  });
+
+  it("a database already at v11 or later without the tables gets them at open", () => {
+    for (const version of [latest(), latest() + 1]) {
+      const a = new SqliteAdapter(dbWithoutPlaybookTables(version), { vectors: false });
+      try {
+        expect(objects(a)).toEqual(expect.arrayContaining([...PLAYBOOK_OBJECTS]));
+        expect(a.metaGet("schema_version")).toBe(String(version));
+        a.playbooks.upsert({ name: "n", title: "N", prompt: "p" });
+        expect(a.playbooks.count()).toBe(1);
+      } finally {
+        a.close();
+      }
+    }
+  });
+
+  it("a missing playbook index is healed too", () => {
+    const path = dbWithoutPlaybookTables();
+    new SqliteAdapter(path, { vectors: false }).close();
+    const raw = new Database(path);
+    raw.exec("DROP INDEX playbook_runs_playbook");
+    expect(healPlaybookTables(raw)).toBe(true);
+    expect(
+      raw.prepare("SELECT 1 FROM sqlite_master WHERE name = 'playbook_runs_playbook'").get(),
+    ).toBeTruthy();
+    raw.close();
+  });
+
+  it("opening twice is a no-op: the heal creates nothing and the schema is unchanged", () => {
+    const path = dbAsJevLeavesIt();
+    const schema = (a: SqliteAdapter) =>
+      a.db.prepare("SELECT type, name, sql FROM sqlite_master ORDER BY name").all();
+    const first = new SqliteAdapter(path, { vectors: false });
+    const before = schema(first);
+    expect(healPlaybookTables(first.db)).toBe(false);
+    first.close();
+    const again = new SqliteAdapter(path, { vectors: false });
+    try {
+      expect(schema(again)).toEqual(before);
+      expect(again.metaGet("schema_version")).toBe(String(latest()));
+      expect(healPlaybookTables(again.db)).toBe(false);
+    } finally {
+      again.close();
+    }
+  });
+
+  it("purge does not throw when the playbook tables are missing", () => {
+    const a = new SqliteAdapter(dbWithoutPlaybookTables(), { vectors: false });
+    try {
+      a.db.exec("DROP TABLE playbooks; DROP TABLE playbook_runs; DROP TABLE playbook_suggestions");
+      for (const scope of ["sessions", "memories", "all"] as const)
+        expect(() => a.purge(scope), scope).not.toThrow();
+    } finally {
+      a.close();
     }
   });
 

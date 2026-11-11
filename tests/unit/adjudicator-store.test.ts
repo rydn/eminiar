@@ -49,7 +49,9 @@ const VERDICT = {
 describe("schema migration v8: adjudicator tables", () => {
   it("applies on top of a v7 database and is the latest version", () => {
     expect(migrations.find((m) => m.version === 8)).toBeTruthy();
-    expect(migrations[migrations.length - 1]?.version).toBe(10);
+    expect(migrations[migrations.length - 1]?.version).toBe(
+      Math.max(...migrations.map((m) => m.version)),
+    );
     const path = tmpDb("em-v7-");
     const raw = new Database(path);
     for (const m of migrations) {
