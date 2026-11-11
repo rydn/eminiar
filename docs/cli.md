@@ -207,9 +207,13 @@ eminiar playbook scan [--dry-run]              # opt-in: suggest playbooks from 
 left unfilled): eminiar never runs a playbook; you paste the prompt into Claude. `export` prints
 the markdown file; `--skill` writes `<target>/<name>/SKILL.md` (default `.claude/skills`) with
 `disable-model-invocation` unless you pass `--model-invocable`; `--schedule` prints text for a
-scheduled task. `scan` exits 1 until `playbooks.extraction.enabled` is true, and only saves
-suggestions, which you accept or dismiss in the dashboard or with `em_playbook`. See
-[Tools](tools.md#playbooks).
+scheduled task. `scan` only saves suggestions, which you accept or dismiss in the dashboard or
+with `em_playbook`.
+
+The config switches exit 1 with a message naming the key: `playbooks.viewing` off, every
+subcommand but `help`; `playbooks.adding` off, `add`, `edit`, `rm` and `scan` without
+`--dry-run` (`run` still prints the prompt, records nothing and says so on stderr);
+`playbooks.extraction.enabled` off, `scan`. See [Tools](tools.md#playbooks).
 
 ## Dashboard and status line
 

@@ -4,11 +4,13 @@ import { scan } from "../playbooks/extract.js";
 import { oneLine } from "../playbooks/frontmatter.js";
 import {
   acceptSuggestion,
+  assertCanScan,
   closeRun,
   dismissSuggestion,
   fillPrompt,
   list,
   type PlaybookFile,
+  PlaybookGateError,
   read,
   reconcile,
   recordRun,
@@ -62,7 +64,7 @@ export const emPlaybook = defineTool({
   // row on every call; nothing reaches the network.
   annotations: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: false },
   description:
-    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export (format markdown|skill|schedule: skill writes a Claude Code SKILL.md, schedule returns text to paste into a Desktop or cloud scheduled task); run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it for good.",
+    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export (format markdown|skill|schedule: skill writes a Claude Code SKILL.md, schedule returns text to paste into a Desktop or cloud scheduled task); run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. With playbooks.adding off, every write is refused (run still returns the prompt, unrecorded). Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it.",
   schema: {
     action: z.enum([
       "list",
@@ -122,6 +124,10 @@ export const emPlaybook = defineTool({
         "export skill: the task changes things outside the repo; true (default) keeps the model from starting it on its own",
       ),
   },
+  // Off (playbooks.viewing false) every action is refused, so the tool is not listed at all, as
+  // em_adjudicate is not while the adjudicator is off. The store still refuses if the config
+  // changes after the server started.
+  available: (config) => config.playbooks?.viewing !== false,
   handler: async (args, ctx) => {
     const db = getStorage(ctx);
     const need = (v: string | undefined, what: string): string => {
@@ -204,19 +210,29 @@ export const emPlaybook = defineTool({
         case "run": {
           const f = read(ctx, db, need(args.name, "name"));
           if (!f) return errorResult(`no playbook named "${args.name}"`);
-          const { id } = recordRun(ctx, db, {
-            playbook: f.name,
-            trigger: "mcp",
-            status: "started",
-            sessionId: getCurrentSession(ctx),
-          });
+          let id: number | undefined;
+          let unrecorded = "";
+          try {
+            id = recordRun(ctx, db, {
+              playbook: f.name,
+              trigger: "mcp",
+              status: "started",
+              sessionId: getCurrentSession(ctx),
+            }).id;
+          } catch (e) {
+            // read-only playbooks still hand over the prompt, as the dashboard's copy does
+            if (!(e instanceof PlaybookGateError && e.key === "playbooks.adding")) throw e;
+            unrecorded = e.message;
+          }
           const hidden = f.private ? shadowedBy(ctx, f.name) : undefined;
           const note = hidden
             ? `\n\n— note: the committed file ${hidden} has the same name and is ignored (hidden by this private playbook); check it before trusting either.`
             : "";
-          return text(
-            `${fillPrompt(f, args.values)}${note}\n\n— playbook ${f.name}, run ${id}. Carry out the task above, then em_playbook {action:"report", name:"${f.name}", run_id:${id}, status:"done"|"failed"|"skipped", note}.`,
-          );
+          const tail =
+            id === undefined
+              ? `— playbook ${f.name}, run not recorded (${unrecorded}). Carry out the task above.`
+              : `— playbook ${f.name}, run ${id}. Carry out the task above, then em_playbook {action:"report", name:"${f.name}", run_id:${id}, status:"done"|"failed"|"skipped", note}.`;
+          return text(`${fillPrompt(f, args.values)}${note}\n\n${tail}`);
         }
         case "report": {
           const name = need(args.name, "name");
@@ -231,6 +247,7 @@ export const emPlaybook = defineTool({
           return text(`closed run ${id} of ${name} as ${args.status}`);
         }
         case "scan": {
+          assertCanScan(ctx, { dryRun: args.dry_run });
           const r = await scan(ctx, db, { dryRun: args.dry_run });
           const head = `scanned ${r.prompts} prompts in ${r.clusters} clusters (${r.mode}): ${r.candidates.length} recurring, ${args.dry_run ? "none stored (dry run)" : `${r.suggested} new suggestions`}, ${r.known} already known`;
           return text(

@@ -131,14 +131,15 @@ describe("closing a run", () => {
     expect(runs(ctx, db, { playbook: "pb" })[0]?.status).toBe("started");
   });
 
-  it("is a read-side action: it follows playbooks.viewing, not playbooks.adding", () => {
+  it("is a write: it follows playbooks.viewing and playbooks.adding", () => {
     const id = recordRun(ctx, db, { playbook: "pb", trigger: "cli" }).id;
     const hidden = withPlaybooks({ viewing: false });
     expect(() => closeRun(hidden, db, { playbook: "pb", runId: id, status: "done" })).toThrow(
       /viewing/,
     );
     const ro = withPlaybooks({ adding: false });
-    expect(closeRun(ro, db, { playbook: "pb", runId: id, status: "done" })).toEqual({ id });
+    expect(() => closeRun(ro, db, { playbook: "pb", runId: id, status: "done" })).toThrow(/adding/);
+    expect(closeRun(ctx, db, { playbook: "pb", runId: id, status: "done" })).toEqual({ id });
   });
 
   it("em_playbook report of a run that belongs to another playbook is refused", async () => {
