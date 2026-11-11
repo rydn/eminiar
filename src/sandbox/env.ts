@@ -47,6 +47,9 @@ const BASE_ALLOW = [
 
 const DENY_ALWAYS = [/^ANTHROPIC_/, /^CLAUDE_/, /^OPENAI_/, /_API_KEY$/, /^EMINIAR_PLUGIN/];
 
+/** Does the sandbox withhold this variable unless a config lists its exact name? */
+export const isAlwaysWithheld = (name: string): boolean => DENY_ALWAYS.some((d) => d.test(name));
+
 function globToRegex(g: string): RegExp {
   return new RegExp(`^${g.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
 }
@@ -72,7 +75,7 @@ export function buildEnv(
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
-    if (DENY_ALWAYS.some((d) => d.test(k)) && !extraAllow.includes(k)) continue;
+    if (isAlwaysWithheld(k) && !extraAllow.includes(k)) continue;
     if (patterns.some((p) => p.test(k))) out[k] = v;
   }
   return { ...out, ...overrides };

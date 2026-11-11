@@ -105,6 +105,26 @@ describe("destructiveHint follows the input schema", () => {
     }
   });
 
+  it("only the network tools and the command runners are open-world", () => {
+    const open = tools.filter((t) => t.annotations.openWorldHint).map((t) => t.name);
+    expect(open.sort()).toEqual([
+      "em_adjudicate",
+      "em_batch_execute",
+      "em_docs",
+      "em_execute",
+      "em_execute_file",
+      "em_fetch_and_index",
+    ]);
+  });
+
+  it("em_remember replaces a memory, so it is destructive and local", () => {
+    expect(byName("em_remember").annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+    });
+  });
+
   it("em_graph_add replaces existing nodes, so it is destructive", () => {
     expect(byName("em_graph_add").annotations.destructiveHint).toBe(true);
   });

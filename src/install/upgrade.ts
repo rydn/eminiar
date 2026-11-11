@@ -36,7 +36,8 @@ export async function upgrade(): Promise<number> {
     yes: true,
     // "none" means Cursor-only last time; let install() decide again from what is present.
     method: rec.method === "none" ? undefined : rec.method,
-    // The recorded choice wins; a failed first download (recorded noModel: false) is retried.
+    // The recorded choice wins; a failed first download (recorded noModel: false) is retried. A
+    // record from before `noModel` was stored cannot say, so an empty model cache reads as no model.
     noModel: rec.noModel ?? !modelInstalled(),
     spec: fromCheckout ? undefined : "eminiar@latest",
     force: fromCheckout,

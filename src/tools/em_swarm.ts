@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { adjudicatePlan, planAdviceBlock, planNextHint } from "../adjudicator/swarm.js";
 import { getContext, type ProjectContext } from "../context.js";
+import { memoriesRel } from "../memory/store.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
 import { planAgentSync, syncAgents } from "../swarm/agents.js";
@@ -500,7 +501,7 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
       }
       if (!r.task)
         return `Nothing to claim in run ${run.id}: ${sentence(r.reason ?? "no eligible task")}`;
-      const brief = await taskBrief(db, run, caller.role, r.task);
+      const brief = await taskBrief(db, run, caller.role, r.task, memoriesRel(ctx));
       return capOutput(
         [
           `${r.already ? "You already hold" : "Claimed"} task #${r.task.id} (run ${run.id}). Report it with em_swarm {action:"update", task:${r.task.id}, status:"done"|"failed"|"blocked", result}.`,

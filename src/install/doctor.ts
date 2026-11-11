@@ -157,21 +157,37 @@ export function frozenDefaultCount(raw: Obj): number {
   return leafCount(raw) - leafCount(pruneDefaults(raw));
 }
 
-/** graph.include / graph.exclude lists that are a strict subset of the current default list. */
+/**
+ * A graph.include list that is a strict subset of the current default list, so it freezes an old
+ * default. graph.exclude is not checked: it adds to the defaults (ADDITIVE_LISTS), so a short one
+ * loses nothing; a default there is dropped with a `"!<entry>"`.
+ */
 export function staleGraphLists(raw: Obj): string[] {
   const graph = raw.graph;
   const defaults = schemaDefaults().graph as Record<string, string[]>;
   if (!isObj(graph)) return [];
-  const out: string[] = [];
-  for (const key of ["include", "exclude"] as const) {
-    const list = graph[key];
-    const def = defaults[key];
-    if (!def || !Array.isArray(list)) continue;
-    const missing = def.filter((e) => !list.includes(e));
-    if (list.every((e) => def.includes(e as string)) && missing.length)
-      out.push(
-        `graph.${key} lacks current default entries (${missing.join(", ")}); remove the key to inherit the defaults`,
-      );
+  const list = graph.include;
+  const def = defaults.include;
+  if (!def || !Array.isArray(list)) return [];
+  const missing = def.filter((e) => !list.includes(e));
+  if (!list.every((e) => def.includes(e as string)) || !missing.length) return [];
+  return [
+    `graph.include lacks current default entries (${missing.join(", ")}); remove the key to inherit the defaults`,
+  ];
+}
+
+/** Keys older releases wrote that no schema defines any more; `doctor --fix` removes them. */
+const RETIRED_KEYS: readonly (readonly [string, string])[] = [["code", "backend"]];
+
+/** `raw` without the RETIRED_KEYS (and the section they leave empty). */
+export function dropRetiredKeys(raw: Obj): Obj {
+  const out: Obj = { ...raw };
+  for (const [section, key] of RETIRED_KEYS) {
+    const s = out[section];
+    if (!isObj(s) || !(key in s)) continue;
+    const { [key]: _gone, ...rest } = s;
+    if (Object.keys(rest).length) out[section] = rest;
+    else delete out[section];
   }
   return out;
 }
@@ -259,11 +275,11 @@ export async function fullDoctor(opts: { fix?: boolean } = {}): Promise<Check[]>
   if (opts.fix) {
     const personal = readRawConfig(paths().configFile);
     if (personal) {
-      const pruned = pruneDefaults(personal);
+      const pruned = dropRetiredKeys(pruneDefaults(personal));
       if (JSON.stringify(pruned) !== JSON.stringify(personal)) {
         try {
           writeJsonWithBackup(paths().configFile, pruned);
-          fixed.push("config.json pruned of default values");
+          fixed.push("config.json pruned of default values and retired keys");
         } catch (err) {
           fixed.push(`config prune failed: ${(err as Error).message}`);
         }

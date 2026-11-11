@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -15,6 +16,7 @@ const savedEnv = {
   EMINIAR_ROUTING_MODE: process.env.EMINIAR_ROUTING_MODE,
   EMINIAR_PROJECT_ROOT: process.env.EMINIAR_PROJECT_ROOT,
   CLAUDE_PROJECT_DIR: process.env.CLAUDE_PROJECT_DIR,
+  CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
 };
 let root: string;
 let unmark: () => void;
@@ -32,6 +34,8 @@ function agent(name: string, tools?: string): void {
 beforeAll(() => {
   process.env.EMINIAR_HOME = mkdtempSync(join(tmpdir(), "em-sar-home-"));
   process.env.EMINIAR_ROUTING_MODE = "enforce";
+  // The user's agents directory is looked in too: an empty one, never the real ~/.claude.
+  process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "em-sar-claude-"));
   root = realpathSync(mkdtempSync(join(tmpdir(), "em-sar-")));
   writeFileSync(join(root, "package.json"), "{}");
   writeFileSync(
@@ -292,6 +296,16 @@ describe("disallowedTools on an agent that inherits every tool", () => {
   });
 });
 
+describe("roleHasEmTool with a tools list", () => {
+  it("grants only the worker em_* tools, not every one the server has", () => {
+    expect(roleHasEmTool({ tools: ["Read"] }, "em_search")).toBe(true);
+    expect(roleHasEmTool({ tools: ["Read"] }, "em_graph_changes")).toBe(false);
+    expect(roleHasEmTool({ tools: ["Read"] }, "em_stats")).toBe(false);
+    // no tools key: every tool is inherited
+    expect(roleHasEmTool({}, "em_stats")).toBe(true);
+  });
+});
+
 describe("roleHasEmTool with disallowed_tools", () => {
   it("ignores bare names, other servers and a single install form", () => {
     for (const disallowedTools of [
@@ -313,5 +327,164 @@ describe("roleHasEmTool with disallowed_tools", () => {
       expect(roleHasEmTool({ disallowedTools }, "em_docs"), disallowedTools.join()).toBe(false);
     // the generated runner disallows (Bash off) still remove the command runners
     expect(roleHasEmTool({ disallowedTools: ["Bash"] }, "em_execute")).toBe(false);
+  });
+});
+
+describe("finding the agent file by its frontmatter name", () => {
+  const raw = (dir: string, file: string, name: string, tools: string): void => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, file),
+      `---\nname: ${name}\ndescription: x\ntools: ${tools}\n---\nbody\n`,
+    );
+  };
+
+  it("matches a project agent whose file name differs from its `name`", () => {
+    raw(join(root, ".claude", "agents"), "code-reviewer.md", "reviewer", "Read, Grep, Glob");
+    expect(agentLacksTool(root, "code-reviewer", "em_symbols")).toBe("all");
+    expect(agentLacksTool(root, "reviewer", "em_symbols")).toBe("all");
+    expect(agentLacksEmTools(root, "reviewer")).toBe(true);
+  });
+
+  it("reads a quoted name with a trailing comment", () => {
+    raw(join(root, ".claude", "agents"), "quoted.md", '"fancy-name" # shown in the list', "Read");
+    expect(agentLacksTool(root, "fancy-name", "em_symbols")).toBe("all");
+  });
+
+  it("looks in the user's agents directory too", () => {
+    const home = mkdtempSync(join(tmpdir(), "em-sar-claude-"));
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = home;
+    try {
+      raw(join(home, "agents"), "mine.md", "user-agent", "Read");
+      expect(agentLacksTool(root, "user-agent", "em_symbols")).toBe("all");
+      raw(join(home, "agents"), "user-direct.md", "other", "Read");
+      expect(agentLacksTool(root, "user-direct", "em_symbols")).toBe("all");
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = saved;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps denying for an unknown type, a plugin-namespaced type and an empty tools list", () => {
+    expect(agentLacksTool(root, "nobody", "em_symbols")).toBeUndefined();
+    expect(agentLacksTool(root, "myplugin:reviewer", "em_symbols")).toBeUndefined();
+    raw(join(root, ".claude", "agents"), "empty-list.md", "empty-list", "[]");
+    expect(agentLacksTool(root, "empty-list", "em_symbols")).toBeUndefined();
+  });
+
+  it("treats a bare or foreign-server name in `tools:` as unsure, so it keeps denying", () => {
+    raw(join(root, ".claude", "agents"), "bare.md", "bare", "Read, em_execute_file");
+    raw(
+      join(root, ".claude", "agents"),
+      "foreign.md",
+      "foreign",
+      "Read, mcp__other__em_execute_file",
+    );
+    expect(agentLacksTool(root, "bare", "em_execute_file")).toBeUndefined();
+    expect(agentLacksTool(root, "foreign", "em_execute_file")).toBeUndefined();
+  });
+});
+
+describe("agent file lookup: precedence, bounds and hostile files", () => {
+  const dirOf = (kind: "project" | "user") =>
+    kind === "project"
+      ? join(root, ".claude", "agents")
+      : join(process.env.CLAUDE_CONFIG_DIR!, "agents");
+  const put = (kind: "project" | "user", file: string, text: string): void => {
+    mkdirSync(dirOf(kind), { recursive: true });
+    writeFileSync(join(dirOf(kind), file), text);
+  };
+  const fm = (name: string, tools?: string) =>
+    `---\nname: ${name}\ndescription: x\n${tools === undefined ? "" : `tools: ${tools}\n`}---\nbody\n`;
+
+  it("a project agent beats a user agent of the same name, whichever file holds the name", () => {
+    put("project", "x.md", fm("shared", "Read"));
+    put("user", "shared.md", fm("shared")); // inherits every tool
+    expect(agentLacksTool(root, "shared", "em_symbols")).toBe("all");
+    // and the other way round: a project file named for the type, a user agent naming it too
+    put("project", "dup.md", fm("dup"));
+    put("user", "other.md", fm("dup", "Read"));
+    expect(agentLacksTool(root, "dup", "em_symbols")).toBeUndefined();
+  });
+
+  it("scans .md files only, and the cap counts only those", () => {
+    for (let i = 0; i < 300; i++) put("project", `note${String(i).padStart(3, "0")}.txt`, "x");
+    put("project", "zz-file.md", fm("zz-agent", "Read"));
+    expect(agentLacksTool(root, "zz-agent", "em_symbols")).toBe("all");
+    put("project", "txt-only.txt", fm("txt-agent", "Read"));
+    expect(agentLacksTool(root, "txt-agent", "em_symbols")).toBeUndefined();
+  });
+
+  it("stops after 200 .md files, in name order", () => {
+    for (let i = 0; i < 205; i++) put("user", `a${String(i).padStart(3, "0")}.md`, fm(`n${i}`));
+    put("user", "z-late.md", fm("late-agent", "Read"));
+    expect(agentLacksTool(root, "late-agent", "em_symbols")).toBeUndefined();
+    put("user", "a-first.md", fm("early-agent", "Read"));
+    expect(agentLacksTool(root, "early-agent", "em_symbols")).toBe("all");
+  });
+
+  it("skips a file over the size cap", () => {
+    put("project", "huge.md", `${fm("huge-agent", "Read")}${"x".repeat(300 * 1024)}`);
+    expect(agentLacksTool(root, "huge-agent", "em_symbols")).toBeUndefined();
+  });
+
+  it("reads a name line full of spaces in linear time", () => {
+    // Alone in a fresh project and user directory, so no scan cap can skip it.
+    const lone = realpathSync(mkdtempSync(join(tmpdir(), "em-sar-lone-")));
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "em-sar-lone-claude-"));
+    try {
+      mkdirSync(join(lone, ".claude", "agents"), { recursive: true });
+      writeFileSync(
+        join(lone, ".claude", "agents", "spacey.md"),
+        `---\nname: a${" ".repeat(120_000)}x\ntools: Read\n---\nbody\n`,
+      );
+      const t0 = performance.now();
+      expect(agentLacksTool(lone, "nope-agent", "em_symbols")).toBeUndefined();
+      expect(performance.now() - t0).toBeLessThan(1000);
+    } finally {
+      process.env.CLAUDE_CONFIG_DIR = saved;
+      rmSync(lone, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("does not block on a FIFO named like an agent", () => {
+    try {
+      execFileSync("mkfifo", [join(dirOf("project"), "pipe.md")]);
+    } catch {
+      return; // no mkfifo here
+    }
+    put("project", "real.md", fm("real-agent", "Read"));
+    expect(agentLacksTool(root, "real-agent", "em_symbols")).toBe("all");
+  });
+});
+
+describe("the prompt prefix on a spawn", () => {
+  const spawn = (type: string) =>
+    handlers.PreToolUse!({
+      session_id: "s1",
+      cwd: root,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: type, description: "d", prompt: "look at it" },
+    });
+  const promptOf = (out: Awaited<ReturnType<typeof spawn>>): string | undefined =>
+    (out?.hookSpecificOutput as { updatedInput?: { prompt?: string } } | undefined)?.updatedInput
+      ?.prompt;
+
+  it("leaves the prompt alone for an agent that has no em_* tools", async () => {
+    expect(promptOf(await spawn("no-em"))).toBeUndefined();
+  });
+
+  it("prefixes an agent that has them", async () => {
+    expect(promptOf(await spawn("inherits"))).toMatch(/^Use the eminiar tools \(em_execute,/);
+  });
+
+  it("leaves out the runners an agent's own tools list lacks", async () => {
+    const out = promptOf(await spawn("ro"));
+    expect(out).toMatch(/^Use the eminiar tools \(/);
+    expect(out).not.toMatch(/^Use the eminiar tools \(em_execute/);
   });
 });

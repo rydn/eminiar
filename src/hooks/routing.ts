@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, extname, join, relative, resolve } from "node:path";
@@ -6,6 +6,7 @@ import type { ProjectContext } from "../context.js";
 import { sessionContext } from "../context.js";
 import { type DocSource, readManifestAt } from "../docs/manifest.js";
 import { git } from "../history/log.js";
+import { claudeConfigDir } from "../paths.js";
 import { loadPermissionRules } from "../permissions/settings.js";
 import { confinePath } from "../sandbox/file.js";
 import { renderProjectBrief } from "../session/brief.js";
@@ -1626,7 +1627,18 @@ async function route(
   if (mode === "enforce") {
     if (s.prefixPrompt) {
       // A swarm worker lacking em_execute*, em_fetch_and_index or em_docs: do not point it at them.
-      const lacks = (tool: string) => swarmWorker && workerLacksTool(input, spawnType(input), tool);
+      const type = spawnType(input);
+      // The agent file is read once for the three questions below.
+      const own = swarmWorker ? undefined : agentToolsFor(ctx.root, type);
+      // An agent with no em_* tool at all is not told to use them; the rewrite is skipped.
+      if (toolsLack(own, "em_search") === "all") {
+        record("allow", "no-em-tools");
+        return withContext(undefined, hint);
+      }
+      // Nor does a typed agent's own tools / disallowedTools list (agent file) get pointed at
+      // a runner, fetcher or docs tool it lacks, any more than a swarm worker's role does.
+      const lacks = (tool: string) =>
+        swarmWorker ? workerLacksTool(input, type, tool) : toolsLack(own, tool) !== undefined;
       const prefix =
         lacks("em_execute") || lacks("em_fetch_and_index") || lacks("em_docs")
           ? subagentPrefix(!lacks("em_execute"), !lacks("em_fetch_and_index"), !lacks("em_docs"))
@@ -1729,45 +1741,119 @@ function grantsSomeUnder(entry: string, prefix: string): boolean {
   return !isEmFullName(entry) && /(^|__)em_[a-z_]+$/.test(entry);
 }
 
-/**
- * Can the subagent `agentType` not call the em_* tool `tool`, by the project's
- * `.claude/agents/<type>.md` frontmatter? The agent may reach eminiar under either MCP name
- * form (plugin or settings install), so it lacks the tool only when no form reaches it: its
- * `tools:` allowlist does not grant that form, or `disallowedTools` removes it by full name or a
- * server-wide entry. Bare names and other servers' tools never remove one (Claude Code does not
- * match them to eminiar's tool). "all": no form reaches any em_* tool; "tool": it lacks this
- * one only. Only asked on the deny path. An agent without a file or without a `tools:` key
- * inherits every tool. Cached by file mtime. Never throws: any error answers undefined (keep
- * denying).
- */
-export function agentLacksTool(
-  root: string,
-  agentType: string | undefined,
-  tool: string,
-): "all" | "tool" | undefined {
-  if (!agentType || !/^[A-Za-z0-9][\w.-]*$/.test(agentType)) return undefined;
-  if (!/^em_[a-z_]+$/.test(tool)) return undefined;
+/** An agent file is read for its `name:` only up to this size; a larger file is not one. */
+const AGENT_FILE_MAX_BYTES = 256 * 1024;
+/** At most this many files of an agents directory are scanned for a matching `name:`. */
+const AGENT_SCAN_MAX = 200;
+
+/** Is `f` a regular file no larger than AGENT_FILE_MAX_BYTES? (A FIFO named `x.md` blocks a read.) */
+function isAgentFile(f: string): boolean {
   try {
-    const file = join(root, ".claude", "agents", `${agentType}.md`);
+    const st = statSync(f);
+    return st.isFile() && st.size <= AGENT_FILE_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The top-level `name:` of a markdown file's frontmatter, read line by line (no YAML parse, no
+ * backtracking regex: the line is cut at `#`, trimmed and unquoted). Only the first
+ * FRONTMATTER_MAX_CHARS are looked at.
+ */
+function frontmatterName(text: string): string | undefined {
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text.slice(0, FRONTMATTER_MAX_CHARS))?.[1];
+  if (fm === undefined) return undefined;
+  for (const line of fm.split("\n", FRONTMATTER_MAX_LINES)) {
+    if (!line.startsWith("name:")) continue;
+    const hash = line.indexOf("#");
+    const v = (hash < 0 ? line.slice(5) : line.slice(5, hash)).trim();
+    return v.replace(/^(["'])(.*)\1$/, "$2");
+  }
+  return undefined;
+}
+
+/**
+ * The file that defines the subagent `agentType`. Claude Code names an agent by its frontmatter
+ * `name:`, and a project agent beats a user agent of the same name, so each directory is searched
+ * completely, the project's first: `<type>.md`, then the first `.md` there (in name order, at
+ * most AGENT_SCAN_MAX) whose `name:` is the type. A cheap line match, so no YAML is parsed for
+ * files that are not the one. Plugin agents (`plugin:agent`) are not looked up: undefined.
+ */
+function findAgentFile(root: string, agentType: string): string | undefined {
+  for (const d of [join(root, ".claude", "agents"), join(claudeConfigDir(), "agents")]) {
+    const direct = join(d, `${agentType}.md`);
+    if (isAgentFile(direct)) return direct;
+    let names: string[];
+    try {
+      names = readdirSync(d);
+    } catch {
+      continue;
+    }
+    for (const n of names
+      .filter((n) => n.endsWith(".md"))
+      .sort()
+      .slice(0, AGENT_SCAN_MAX)) {
+      const f = join(d, n);
+      try {
+        if (isAgentFile(f) && frontmatterName(readFileSync(f, "utf8")) === agentType) return f;
+      } catch {
+        // unreadable: not this one
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The tools of the subagent `agentType`, from its agent file's (findAgentFile) frontmatter;
+ * undefined without a file, an unparsable one or one with no `tools:` / `disallowedTools` to
+ * judge by (keep denying). Cached by file mtime. Never throws.
+ */
+export function agentToolsFor(root: string, agentType: string | undefined): AgentTools | undefined {
+  if (!agentType || !/^[A-Za-z0-9][\w.-]*$/.test(agentType)) return undefined;
+  try {
+    const file = findAgentFile(root, agentType);
+    if (!file) return undefined;
     const mtimeMs = statSync(file).mtimeMs;
     let hit = agentToolsCache.get(file);
     if (!hit || hit.mtimeMs !== mtimeMs) {
       hit = { mtimeMs, tools: frontmatterAgentTools(readFileSync(file, "utf8")) };
       agentToolsCache.set(file, hit);
     }
-    const a = hit.tools;
-    if (!a) return undefined;
-    const { tools, disallowed } = a;
-    const reaches = (p: string) =>
-      !namesEmTool(disallowed, p, tool) && (!tools || tools.some((t) => grantsUnder(t, p, tool)));
-    if (EM_MCP_PREFIXES.some(reaches)) return undefined;
-    const reachesSome = (p: string) =>
-      !disallowed.some((t) => isEmServerEntry(t, p)) &&
-      (!tools || tools.some((t) => grantsSomeUnder(t, p)));
-    return EM_MCP_PREFIXES.some(reachesSome) ? "tool" : "all";
+    return hit.tools;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Does an agent with these tools lack the em_* tool `tool`? The agent may reach eminiar under
+ * either MCP name form (plugin or settings install), so it lacks the tool only when no form
+ * reaches it: its `tools:` allowlist does not grant that form, or `disallowedTools` removes it by
+ * full name or a server-wide entry. Bare names and other servers' tools never remove one (Claude
+ * Code does not match them to eminiar's tool). "all": no form reaches any em_* tool; "tool": it
+ * lacks this one only. An agent without a `tools:` key inherits every tool.
+ */
+export function toolsLack(a: AgentTools | undefined, tool: string): "all" | "tool" | undefined {
+  if (!a || !/^em_[a-z_]+$/.test(tool)) return undefined;
+  const { tools, disallowed } = a;
+  const reaches = (p: string) =>
+    !namesEmTool(disallowed, p, tool) && (!tools || tools.some((t) => grantsUnder(t, p, tool)));
+  if (EM_MCP_PREFIXES.some(reaches)) return undefined;
+  const reachesSome = (p: string) =>
+    !disallowed.some((t) => isEmServerEntry(t, p)) &&
+    (!tools || tools.some((t) => grantsSomeUnder(t, p)));
+  return EM_MCP_PREFIXES.some(reachesSome) ? "tool" : "all";
+}
+
+/** Can the subagent `agentType` not call the em_* tool `tool` (agentToolsFor, toolsLack)? Only asked on the deny path and the spawn path; never throws. */
+export function agentLacksTool(
+  root: string,
+  agentType: string | undefined,
+  tool: string,
+): "all" | "tool" | undefined {
+  return toolsLack(agentToolsFor(root, agentType), tool);
 }
 
 /** Does the subagent's tools allowlist have no em_* tool at all? (agentLacksTool "all") */
