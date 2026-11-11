@@ -91,7 +91,7 @@ export interface SwarmSpec {
   name: string;
   description: string;
   topology: Topology;
-  /** Concurrent workers in one run. */
+  /** Concurrent workers across all active runs of this swarm. */
   maxAgents: number;
   /** Pipeline order of roles; roles not listed are not stage-gated. */
   stages: string[];

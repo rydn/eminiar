@@ -267,7 +267,7 @@ export function writeTeamFiles(
     );
   } else {
     log.info(
-      `teammates: \`npx eminiar install${extra.cursor ? " --cursor" : ""}\` (reads the committed eminiar.config.json)`,
+      `teammates: \`npx eminiar install${extra.cursor ? " --cursor" : ""}\` (eminiar then reads the committed eminiar.config.json at run time)`,
     );
   }
   if (extra.cursor) {
