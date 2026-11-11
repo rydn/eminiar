@@ -176,11 +176,24 @@ Ollama, LM Studio, llama.cpp) or the local embedding model. Remote providers nee
 and a key, and only redacted text leaves the machine. Off by default, and it costs nothing while
 off: `eminiar adjudicator enable` ([details](docs/adjudicator.md)).
 
+### 📋 Playbooks
+
+A library of your recurring tasks ("check Slack for open PRs and review them", "look at
+Datadog for new errors"): a prompt with `{{parameters}}` and an optional schedule hint, stored as
+markdown in `.eminiar/playbooks/`. List, run, edit and export them from Claude (`em_playbook`)
+or the CLI (`eminiar playbook`); the dashboard lists and edits them and copies a run prompt.
+eminiar does not run or schedule them: running
+hands the prompt to Claude, and a schedule is a hint Claude can turn into a `/loop` or cron job.
+Optional extraction suggests playbooks from tasks you repeat; it is off by default and nothing
+becomes a playbook until you accept it. Secrets are masked, and private playbooks live in a
+git-ignored folder. Not to be confused with Claude Code Skills, though a playbook can be exported
+as one ([details](docs/tools.md#playbooks)).
+
 ### 📊 Local dashboard
 
 `eminiar ui` opens a local web app with token savings, usage and cost, a source explorer with
 impact analysis, a graph "galaxy", a history explorer with a history graph, a memory editor with a
-memory graph, a docs manager, and a swarm monitor with a configuration studio.
+memory graph, a docs manager, a playbook library, and a swarm monitor with a configuration studio.
 
 [<img alt="Overview: tokens kept out of context, savings per session, project and lifetime, the active swarm run and savings by tool" src="docs/images/dashboard-overview-dark.webp" width="640">](docs/dashboard.md#overview)
 
@@ -246,7 +259,7 @@ flowchart LR
     CC["Claude Code"]
     subgraph eminiar ["eminiar (local)"]
         H["Hooks<br/>recall · routing · capture"]
-        S["MCP server<br/>24 em_* tools"]
+        S["MCP server<br/>25 em_* tools"]
         SB["Sandbox<br/>shell · JS · TS · Python …"]
         DB[("SQLite per project<br/>FTS5 · vectors · graph")]
         M["Memory files<br/>.eminiar/memories/*.md"]

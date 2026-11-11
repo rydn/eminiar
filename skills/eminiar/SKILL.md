@@ -83,5 +83,11 @@ surfacing only the answer.
   completeness; verify negative claims ("nothing calls X") against it.
 - **Decisions have a lifecycle.** `em_remember {kind: "decision", status, supersedes}` records ADR-style
   decisions; `em_memory {action: "status"}` changes one. `em_architecture` lists the accepted ones.
+- **Recurring tasks are playbooks.** When the user repeats a task ("check Slack for PRs and review
+  them"), `em_playbook {action: "list"}` first; `{action: "run", name, values}` returns the filled
+  prompt and records the run, so carry it out, then `{action: "report", name, run_id, status}`.
+  `{action: "add", title, prompt}` stores a new one under `.eminiar/playbooks/`. eminiar never runs
+  or schedules a playbook itself; `{action: "export", format: "skill"}` writes it as a Claude Code
+  skill.
 
 Plain `Bash`, `Read` and `Grep` stay right for short, fixed outputs and for files you will edit.
