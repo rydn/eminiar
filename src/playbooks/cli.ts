@@ -6,8 +6,10 @@ import type { PlaybookParam } from "../storage/types.js";
 import { exportMarkdown, exportSkill, schedulePrompt } from "./export.js";
 import { scan } from "./extract.js";
 import {
+  assertCanScan,
   fillPrompt,
   list,
+  PlaybookGateError,
   read,
   reconcile,
   recordRun,
@@ -251,13 +253,20 @@ export async function playbookCommand(
         const missing = [...filled.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)].map(
           (m) => m[1] as string,
         );
-        const rec = recordRun(ctx, db, {
-          playbook: f.name,
-          trigger: "cli",
-          status: "started",
-          note: str(values.note),
-        });
-        if (json) emit({ name: f.name, run: rec.id, prompt: filled, unfilled: missing });
+        let run: number | null = null;
+        try {
+          run = recordRun(ctx, db, {
+            playbook: f.name,
+            trigger: "cli",
+            status: "started",
+            note: str(values.note),
+          }).id;
+        } catch (e) {
+          // read-only playbooks still print the prompt, as the dashboard's copy does
+          if (!(e instanceof PlaybookGateError && e.key === "playbooks.adding")) throw e;
+          io.err(`run not recorded: ${e.message}`);
+        }
+        if (json) emit({ name: f.name, run, prompt: filled, unfilled: missing });
         else {
           io.out(filled);
           if (missing.length)
@@ -337,13 +346,8 @@ export async function playbookCommand(
       }
 
       case "scan": {
-        if (!ctx.config.playbooks.extraction.enabled) {
-          io.err(
-            "playbook extraction is off: set playbooks.extraction.enabled to true in eminiar.config.json to scan your history for recurring tasks",
-          );
-          return 1;
-        }
         const dryRun = values["dry-run"] === true;
+        assertCanScan(ctx, { dryRun });
         const r = await scan(ctx, db, { dryRun });
         if (json) {
           emit({ dryRun, ...r });

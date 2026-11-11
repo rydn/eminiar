@@ -497,8 +497,9 @@ describe("config gates", () => {
     const ro = withPlaybooks({ adding: false });
     expect(() => write(ro, db, { title: "t", prompt: "p" })).toThrow(/adding/);
     expect(() => remove(ro, db, "keep")).toThrow(/adding/);
-    expect(() => acceptSuggestion(ro, db, 1)).toThrow(/adding/);
-    expect(() => dismissSuggestion(ro, db, 1)).toThrow(/adding/);
+    const roOn = withPlaybooks({ adding: false, extraction: { enabled: true } });
+    expect(() => acceptSuggestion(roOn, db, 1)).toThrow(/adding/);
+    expect(() => dismissSuggestion(roOn, db, 1)).toThrow(/adding/);
     expect(read(ro, db, "keep")!.title).toBe("Keep");
   });
 

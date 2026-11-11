@@ -150,13 +150,11 @@ export async function playbooksRoute(
     }
     if (isGet) return fail(404, "not found");
     if (method !== "POST") return fail(405, "POST only");
-    const c = ctx.config.playbooks;
-    if (!c.viewing) return fail(403, "playbooks are hidden: playbooks.viewing is false");
+    // The config switches are the store's to enforce; its PlaybookGateError becomes a 403 below.
     const db = getStorage(ctx);
     const b = await readBody();
 
     if (path === "/api/playbooks/save") {
-      if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
       const saveName = strOrUndef(b.name)?.trim();
       // Without an explicit flag an existing playbook keeps its privacy, as the CLI and tool do.
       const priv =
@@ -178,7 +176,6 @@ export async function playbooksRoute(
       return ok({ name: r.name, path: r.path, created: r.created });
     }
     if (path === "/api/playbooks/delete") {
-      if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
       const name = strOrUndef(b.name) ?? "";
       return ok({ removed: store.remove(ctx, db, name) });
     }
@@ -196,25 +193,20 @@ export async function playbooksRoute(
       return ok({ id: rec.id });
     }
     if (path === "/api/playbooks/suggestion/accept") {
-      if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
       const id = b.id;
       if (typeof id !== "number" || !Number.isInteger(id) || id < 1)
         return fail(400, "id must be a suggestion id");
       return ok(store.acceptSuggestion(ctx, db, id, { private: b.private === true }));
     }
     if (path === "/api/playbooks/suggestion/dismiss") {
-      if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
       const id = b.id;
       if (typeof id !== "number" || !Number.isInteger(id) || id < 1)
         return fail(400, "id must be a suggestion id");
       return ok({ dismissed: store.dismissSuggestion(ctx, db, id) });
     }
     if (path === "/api/playbooks/scan") {
-      if (!c.extraction.enabled)
-        return fail(403, "playbook extraction is off: playbooks.extraction.enabled is false");
       const dryRun = b.dryRun === true;
-      if (!dryRun && !c.adding)
-        return fail(403, "playbooks are read-only: playbooks.adding is false");
+      store.assertCanScan(ctx, { dryRun });
       const r = await scan(ctx, db, { dryRun });
       return ok({
         dryRun,
@@ -233,6 +225,6 @@ export async function playbooksRoute(
     }
     return fail(404, "not found");
   } catch (err) {
-    return fail(400, (err as Error).message);
+    return fail(err instanceof store.PlaybookGateError ? 403 : 400, (err as Error).message);
   }
 }

@@ -159,12 +159,14 @@ headers of the memory files there, so a cloned repo must not aim it at your othe
 |---|---|---|
 | `dir` | `".eminiar/playbooks"` | Where playbook files (`<name>.md`) live, relative to the project root. Commit it |
 | `privateDir` | `".eminiar/playbooks-private"` | Where private playbooks live. eminiar adds it to the project's `.gitignore` before writing the first one, and refuses a path equal to or inside `dir` |
-| `viewing` | `true` | List and read playbooks (tool, dashboard, CLI). Off hides them |
-| `adding` | `true` | Create, edit and delete playbooks, and accept or dismiss suggestions. Off makes them read-only |
-| `extraction.enabled` | `false` | Allow `scan`, which reads your session history for recurring tasks and files them as suggestions. Nothing is read or suggested while it is off |
+| `viewing` | `true` | Playbooks at all. Off refuses every playbook call, read or write, and `em_playbook` is not listed (run `/mcp reconnect` after changing it) |
+| `adding` | `true` | Every write: add, edit and delete playbooks, record and report runs, save suggestions (`scan` without a dry run), accept or dismiss them. Off makes playbooks read-only; `run` still returns the prompt but records nothing |
+| `extraction.enabled` | `false` | Suggestions: `scan` reads your session history for recurring tasks and files them as suggestions; listing, accepting and dismissing them need it too. Nothing is read or suggested while it is off |
 
-`dir` and `privateDir` follow the same path rule as `memories.dir`. Playbooks are stored tasks,
-not jobs: eminiar never runs or schedules them. See [Tools](tools.md#playbooks).
+The three switches are checked in one place, so the tool, the CLI and the dashboard refuse the
+same calls: the tool returns an error, the CLI exits 1 and the dashboard answers 403, each naming
+the key. `dir` and `privateDir` follow the same path rule as `memories.dir`. Playbooks are stored
+tasks, not jobs: eminiar never runs or schedules them. See [Tools](tools.md#playbooks).
 
 ### `recall`
 

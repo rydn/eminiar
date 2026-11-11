@@ -6,10 +6,26 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { getContext, type ProjectContext, resetContextCache } from "../../src/context.js";
 import { playbookCommand } from "../../src/playbooks/cli.js";
-import { reconcile, suggest, suggestions, write } from "../../src/playbooks/store.js";
+import {
+  acceptSuggestion,
+  assertCanScan,
+  closeRun,
+  dismissSuggestion,
+  list,
+  PlaybookGateError,
+  read,
+  reconcile,
+  recordRun,
+  remove,
+  runs,
+  suggest,
+  suggestions,
+  write,
+} from "../../src/playbooks/store.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import { emPlaybook } from "../../src/tools/em_playbook.js";
+import { availableTools } from "../../src/tools/types.js";
 import { playbooksRoute } from "../../src/ui/playbooks-api.js";
 
 /**
@@ -141,10 +157,251 @@ describe("defaults of a project with no config", () => {
     expect(db.playbooks.suggestions()).toHaveLength(0);
   });
 
-  it("the tool says there is nothing to review, rather than failing, while extraction is off", async () => {
+  it("the tool refuses to list suggestions while extraction is off, naming the switch", async () => {
     const r = await tool({ action: "suggestions" });
+    expect(r.err).toBe(true);
+    expect(r.text).toContain("playbooks.extraction.enabled");
+  });
+});
+
+describe("one rule, enforced by the store, on every surface", () => {
+  type Gate = "playbooks.viewing" | "playbooks.adding" | "playbooks.extraction.enabled";
+  let sid: number;
+  let runId: number;
+  beforeEach(() => {
+    write(ctx, db, { name: "keep", title: "Keep", prompt: "original {{what}}" });
+    sid = suggest(extracting(), db, { title: "Pending", prompt: "a pending task" }).id;
+    runId = recordRun(ctx, db, { playbook: "keep", trigger: "cli" }).id;
+  });
+  /** Every switch on except the ones named. */
+  const off = (...keys: Gate[]): ProjectContext =>
+    withPlaybooks({
+      viewing: !keys.includes("playbooks.viewing"),
+      adding: !keys.includes("playbooks.adding"),
+      extraction: { enabled: !keys.includes("playbooks.extraction.enabled") },
+    });
+  const gateOf = (fn: () => unknown): string | undefined => {
+    try {
+      fn();
+    } catch (e) {
+      return e instanceof PlaybookGateError ? e.key : `other: ${(e as Error).message}`;
+    }
+    return undefined;
+  };
+  const unchanged = () => {
+    expect(readFileSync(file("keep"), "utf8")).toContain("original");
+    expect(existsSync(file("new"))).toBe(false);
+    expect(db.playbooks.suggestionGet(sid)?.status).toBe("pending");
+    expect(db.playbooks.runs({ playbook: "keep" }).map((r) => [r.id, r.status])).toEqual([
+      [runId, "started"],
+    ]);
+  };
+
+  it("store: viewing gates every call, reads and writes alike", () => {
+    const c = off("playbooks.viewing");
+    const calls: Array<[string, () => unknown]> = [
+      ["read", () => read(c, db, "keep")],
+      ["list", () => list(c, db)],
+      ["runs", () => runs(c, db)],
+      ["write", () => write(c, db, { name: "new", title: "N", prompt: "p" })],
+      ["remove", () => remove(c, db, "keep")],
+      ["recordRun", () => recordRun(c, db, { playbook: "keep", trigger: "mcp" })],
+      ["closeRun", () => closeRun(c, db, { playbook: "keep", runId, status: "done" })],
+      ["suggest", () => suggest(c, db, { title: "S", prompt: "another task" })],
+      ["suggestions", () => suggestions(c, db)],
+      ["accept", () => acceptSuggestion(c, db, sid)],
+      ["dismiss", () => dismissSuggestion(c, db, sid)],
+      ["scan", () => assertCanScan(c, { dryRun: false })],
+      ["scan dry", () => assertCanScan(c, { dryRun: true })],
+    ];
+    for (const [what, fn] of calls) expect([what, gateOf(fn)]).toEqual([what, "playbooks.viewing"]);
+    unchanged();
+  });
+
+  it("store: adding gates every write, runs and suggestions included; reads still work", () => {
+    const c = off("playbooks.adding");
+    const calls: Array<[string, () => unknown]> = [
+      ["write", () => write(c, db, { name: "new", title: "N", prompt: "p" })],
+      ["remove", () => remove(c, db, "keep")],
+      ["recordRun", () => recordRun(c, db, { playbook: "keep", trigger: "mcp" })],
+      ["closeRun", () => closeRun(c, db, { playbook: "keep", runId, status: "done" })],
+      ["suggest", () => suggest(c, db, { title: "S", prompt: "another task" })],
+      ["accept", () => acceptSuggestion(c, db, sid)],
+      ["dismiss", () => dismissSuggestion(c, db, sid)],
+      ["scan", () => assertCanScan(c, { dryRun: false })],
+    ];
+    for (const [what, fn] of calls) expect([what, gateOf(fn)]).toEqual([what, "playbooks.adding"]);
+    for (const [what, fn] of [
+      ["read", () => read(c, db, "keep")],
+      ["list", () => list(c, db)],
+      ["runs", () => runs(c, db)],
+      ["suggestions", () => suggestions(c, db)],
+      ["scan dry", () => assertCanScan(c, { dryRun: true })],
+    ] as Array<[string, () => unknown]>)
+      expect([what, gateOf(fn)]).toEqual([what, undefined]);
+    unchanged();
+  });
+
+  it("store: extraction gates suggest, suggestions, accept, dismiss and scan", () => {
+    const c = off("playbooks.extraction.enabled");
+    const calls: Array<[string, () => unknown]> = [
+      ["suggest", () => suggest(c, db, { title: "S", prompt: "another task" })],
+      ["suggestions", () => suggestions(c, db)],
+      ["accept", () => acceptSuggestion(c, db, sid)],
+      ["dismiss", () => dismissSuggestion(c, db, sid)],
+      ["scan", () => assertCanScan(c, { dryRun: false })],
+      ["scan dry", () => assertCanScan(c, { dryRun: true })],
+    ];
+    for (const [what, fn] of calls)
+      expect([what, gateOf(fn)]).toEqual([what, "playbooks.extraction.enabled"]);
+    unchanged();
+  });
+
+  it("the gate error names the config key in its message", () => {
+    for (const key of [
+      "playbooks.viewing",
+      "playbooks.adding",
+      "playbooks.extraction.enabled",
+    ] as Gate[]) {
+      try {
+        acceptSuggestion(off(key), db, sid);
+        expect.unreachable(key);
+      } catch (e) {
+        expect(e).toBeInstanceOf(PlaybookGateError);
+        expect((e as Error).message).toContain(key);
+      }
+    }
+  });
+
+  const toolWrites = () => [
+    { action: "add", name: "new", title: "N", prompt: "p" },
+    { action: "edit", name: "keep", prompt: "changed" },
+    { action: "delete", name: "keep", confirm: true },
+    { action: "report", name: "keep", run_id: runId, status: "done" },
+    { action: "accept", id: sid },
+    { action: "dismiss", id: sid },
+    { action: "scan" },
+  ];
+
+  it("tool: viewing off refuses every action, with the key in the error", async () => {
+    for (const a of [
+      ...toolWrites(),
+      { action: "list" },
+      { action: "read", name: "keep" },
+      { action: "run", name: "keep" },
+      { action: "suggestions" },
+      { action: "scan", dry_run: true },
+    ]) {
+      const r = await tool(a, off("playbooks.viewing"));
+      expect([JSON.stringify(a), r.err, r.text]).toEqual([
+        JSON.stringify(a),
+        true,
+        expect.stringContaining("playbooks.viewing"),
+      ]);
+    }
+    unchanged();
+  });
+
+  it("tool: adding off refuses every write (report and a saving scan included)", async () => {
+    for (const a of toolWrites()) {
+      const r = await tool(a, off("playbooks.adding"));
+      expect([JSON.stringify(a), r.err, r.text]).toEqual([
+        JSON.stringify(a),
+        true,
+        expect.stringContaining("playbooks.adding"),
+      ]);
+    }
+    unchanged();
+    for (const a of [
+      { action: "list" },
+      { action: "read", name: "keep" },
+      { action: "suggestions" },
+      { action: "scan", dry_run: true },
+    ])
+      expect([a.action, (await tool(a, off("playbooks.adding"))).err]).toEqual([a.action, false]);
+  });
+
+  it("tool: adding off, run hands over the filled prompt but records nothing", async () => {
+    const r = await tool(
+      { action: "run", name: "keep", values: { what: "x" } },
+      off("playbooks.adding"),
+    );
     expect(r.err).toBe(false);
-    expect(r.text).toMatch(/no pending suggestions/);
+    expect(r.text).toContain("original x");
+    expect(r.text).toContain("playbooks.adding");
+    expect(r.text).not.toContain('action:"report"');
+    unchanged();
+  });
+
+  it("tool: extraction off refuses suggestions, accept, dismiss and scan", async () => {
+    for (const a of [
+      { action: "suggestions" },
+      { action: "accept", id: sid },
+      { action: "dismiss", id: sid },
+      { action: "scan" },
+      { action: "scan", dry_run: true },
+    ]) {
+      const r = await tool(a, off("playbooks.extraction.enabled"));
+      expect([JSON.stringify(a), r.err, r.text]).toEqual([
+        JSON.stringify(a),
+        true,
+        expect.stringContaining("playbooks.extraction.enabled"),
+      ]);
+    }
+    unchanged();
+  });
+
+  it("CLI: each switch exits 1 with the key on stderr and nothing on stdout", async () => {
+    const table: Array<[Gate, string[]]> = [
+      ["playbooks.viewing", ["add", "new", "--title", "N", "--prompt", "p"]],
+      ["playbooks.viewing", ["rm", "keep"]],
+      ["playbooks.viewing", ["scan"]],
+      ["playbooks.viewing", ["scan", "--dry-run"]],
+      ["playbooks.adding", ["scan"]],
+      ["playbooks.adding", ["scan", "--json"]],
+      ["playbooks.extraction.enabled", ["scan", "--dry-run"]],
+    ];
+    for (const [key, args] of table) {
+      const r = await cli(args, off(key));
+      expect([key, args.join(" "), r.code, r.out]).toEqual([key, args.join(" "), 1, ""]);
+      expect(r.err).toContain(key);
+    }
+    unchanged();
+    expect((await cli(["scan", "--dry-run"], off("playbooks.adding"))).code).toBe(0);
+  });
+
+  it("CLI: adding off, run prints the filled prompt, says it was not recorded, exits 0", async () => {
+    const r = await cli(["run", "keep", "--set", "what=x"], off("playbooks.adding"));
+    expect([r.code, r.out]).toEqual([0, "original x"]);
+    expect(r.err).toContain("playbooks.adding");
+    const j = await cli(["run", "keep", "--set", "what=x", "--json"], off("playbooks.adding"));
+    expect(JSON.parse(j.out)).toMatchObject({ name: "keep", run: null, prompt: "original x" });
+    unchanged();
+  });
+
+  it("API: every refusal of the store is a 403 naming the key", async () => {
+    const table: Array<[Gate, string, Record<string, unknown>]> = [
+      ["playbooks.viewing", "/api/playbooks/save", { title: "N", prompt: "p" }],
+      ["playbooks.viewing", "/api/playbooks/scan", { dryRun: true }],
+      ["playbooks.adding", "/api/playbooks/run", { name: "keep" }],
+      ["playbooks.adding", "/api/playbooks/scan", { dryRun: false }],
+      ["playbooks.extraction.enabled", "/api/playbooks/suggestion/accept", { id: sid }],
+      ["playbooks.extraction.enabled", "/api/playbooks/suggestion/dismiss", { id: sid }],
+      ["playbooks.extraction.enabled", "/api/playbooks/scan", { dryRun: true }],
+    ];
+    for (const [key, path, body] of table) {
+      const r = await api(off(key), "POST", path, body);
+      expect([key, path, r.status]).toEqual([key, path, 403]);
+      expect(JSON.stringify(r.body)).toContain(key);
+    }
+    unchanged();
+    expect((await api(ctx, "POST", "/api/playbooks/delete", { name: "../x" })).status).toBe(400);
+  });
+
+  it("em_playbook is listed only while playbooks.viewing is on", () => {
+    expect(availableTools([emPlaybook], ctx.config)).toEqual([emPlaybook]);
+    expect(availableTools([emPlaybook], off("playbooks.adding").config)).toEqual([emPlaybook]);
+    expect(availableTools([emPlaybook], off("playbooks.viewing").config)).toEqual([]);
   });
 });
 
@@ -289,7 +546,7 @@ describe("playbooks.adding = false", () => {
       expect((await tool(a, readOnly())).err, a.action).toBe(false);
   });
 
-  it("the dashboard answers 403 to save, delete, accept and dismiss, and still lists and records uses", async () => {
+  it("the dashboard answers 403 to save, delete, accept, dismiss and recording a use, and still lists", async () => {
     for (const [path, body] of [
       ["/api/playbooks/save", { title: "t", prompt: "p" }],
       ["/api/playbooks/delete", { name: "keep" }],
@@ -305,7 +562,9 @@ describe("playbooks.adding = false", () => {
       adding: boolean;
     };
     expect([o.adding, o.playbooks.length]).toEqual([false, 1]);
-    expect((await api(roOn(), "POST", "/api/playbooks/run", { name: "keep" })).status).toBe(200);
+    // recording a use is a write too: the page has already copied the prompt and ignores the 403
+    expect((await api(roOn(), "POST", "/api/playbooks/run", { name: "keep" })).status).toBe(403);
+    expect(db.playbooks.runs()).toHaveLength(0);
   });
 
   it("the CLI exits 1 for add, edit and rm, and 0 for list and show", async () => {

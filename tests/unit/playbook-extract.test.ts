@@ -78,7 +78,7 @@ describe("playbook extraction", () => {
     const db = fresh(false);
     recurring(db);
     await expect(scan(ctx, db, opts)).rejects.toThrow(/extraction is off/);
-    expect(suggestions(ctx, db)).toHaveLength(0);
+    expect(db.playbooks.suggestions()).toHaveLength(0);
   });
 
   it("proposes a recurring prompt with a shared MCP server", async () => {

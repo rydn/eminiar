@@ -385,15 +385,64 @@ export function rowTags(row: { tags: string | null }): string[] {
 }
 
 // --- config gates ----------------------------------------------------------------------
+//
+// The switches are enforced here, once, so the MCP tool, the CLI and the dashboard API cannot
+// disagree: each turns a PlaybookGateError into its own refusal (tool error, exit 1, HTTP 403).
+//   playbooks.viewing            every call, reads and writes alike (off: playbooks are off)
+//   playbooks.adding             every write: playbooks, runs (run/report) and suggestions
+//   playbooks.extraction.enabled suggest, suggestions, accept, dismiss and scan
+
+export type PlaybookSwitch =
+  | "playbooks.viewing"
+  | "playbooks.adding"
+  | "playbooks.extraction.enabled";
+
+/** A call refused by a config switch; `key` is the switch, which the message also names. */
+export class PlaybookGateError extends Error {
+  readonly key: PlaybookSwitch;
+  constructor(key: PlaybookSwitch, message: string) {
+    super(message);
+    this.name = "PlaybookGateError";
+    this.key = key;
+  }
+}
 
 function assertViewing(ctx: ProjectContext): void {
   if (!ctx.config.playbooks.viewing)
-    throw new Error("playbooks are hidden: playbooks.viewing is false in the config");
+    throw new PlaybookGateError(
+      "playbooks.viewing",
+      "playbooks are off: playbooks.viewing is false in the eminiar config",
+    );
 }
 
 function assertAdding(ctx: ProjectContext): void {
+  assertViewing(ctx);
   if (!ctx.config.playbooks.adding)
-    throw new Error("playbooks are read-only: playbooks.adding is false in the config");
+    throw new PlaybookGateError(
+      "playbooks.adding",
+      "playbooks are read-only: playbooks.adding is false in the eminiar config",
+    );
+}
+
+function assertExtraction(ctx: ProjectContext): void {
+  assertViewing(ctx);
+  if (!ctx.config.playbooks.extraction.enabled)
+    throw new PlaybookGateError(
+      "playbooks.extraction.enabled",
+      "playbook suggestions are off: playbooks.extraction.enabled is false in the eminiar config",
+    );
+}
+
+/**
+ * The gate of a history scan: viewing and extraction, plus adding unless it is a dry run (a
+ * real scan stores suggestions). Callers check it before `scan`, so a refused scan reads nothing.
+ */
+export function assertCanScan(
+  ctx: ProjectContext,
+  opts: { dryRun?: boolean | undefined } = {},
+): void {
+  assertExtraction(ctx);
+  if (!opts.dryRun) assertAdding(ctx);
 }
 
 // --- mirroring -------------------------------------------------------------------------
@@ -722,13 +771,16 @@ export interface RunInput {
   note?: string | undefined;
 }
 
-/** Record that a playbook was used (by a person or by Claude); nothing is executed. */
+/**
+ * Record that a playbook was used (by a person or by Claude); nothing is executed. A write, so
+ * it needs `playbooks.adding`.
+ */
 export function recordRun(
   ctx: ProjectContext,
   db: StorageAdapter,
   input: RunInput,
 ): { id: number } {
-  assertViewing(ctx);
+  assertAdding(ctx);
   assertValidName(input.playbook);
   if (!(PLAYBOOK_TRIGGERS as readonly string[]).includes(input.trigger))
     throw new Error(`invalid trigger "${input.trigger}": use ${PLAYBOOK_TRIGGERS.join(" | ")}`);
@@ -764,7 +816,7 @@ export function closeRun(
   db: StorageAdapter,
   input: CloseRunInput,
 ): { id: number } {
-  assertViewing(ctx);
+  assertAdding(ctx);
   assertValidName(input.playbook);
   if (
     input.status === "started" ||
@@ -812,15 +864,15 @@ export interface SuggestInput extends PlaybookFields {
 /**
  * Store a suggested playbook for a person to accept or dismiss. The same task (same prompt,
  * ignoring case and spacing) is stored once, whatever its status. Needs
- * `playbooks.extraction.enabled`: nothing is suggested while it is off.
+ * `playbooks.extraction.enabled` and `playbooks.adding`: nothing is suggested while either is off.
  */
 export function suggest(
   ctx: ProjectContext,
   db: StorageAdapter,
   input: SuggestInput,
 ): { id: number; created: boolean } {
-  if (!ctx.config.playbooks.extraction.enabled)
-    throw new Error("playbook suggestions are off: set playbooks.extraction.enabled in the config");
+  assertExtraction(ctx);
+  assertAdding(ctx);
   const c = clean(input, true, "");
   const name = input.name?.trim() || slugify(c.title);
   assertValidName(name);
@@ -841,7 +893,7 @@ export function suggestions(
   db: StorageAdapter,
   opts: { status?: PlaybookSuggestionStatus | undefined; limit?: number | undefined } = {},
 ): PlaybookSuggestionRow[] {
-  assertViewing(ctx);
+  assertExtraction(ctx);
   return db.playbooks.suggestions(opts as Parameters<typeof db.playbooks.suggestions>[0]);
 }
 
@@ -852,6 +904,7 @@ export function acceptSuggestion(
   id: number,
   overrides: Partial<WriteInput> = {},
 ): { name: string; path: string } {
+  assertExtraction(ctx);
   assertAdding(ctx);
   const s = db.playbooks.suggestionGet(id);
   if (!s) throw new Error(`no suggestion with id ${id}`);
@@ -876,6 +929,7 @@ export function acceptSuggestion(
 }
 
 export function dismissSuggestion(ctx: ProjectContext, db: StorageAdapter, id: number): boolean {
+  assertExtraction(ctx);
   assertAdding(ctx);
   const s = db.playbooks.suggestionGet(id);
   if (s?.status !== "pending") return false;
