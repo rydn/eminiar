@@ -222,10 +222,10 @@ function cursorDirHint(): string {
 
 /**
  * Commit-able defaults so teammates get the same behaviour from `npx eminiar install`. No list
- * keys: an array in the project file replaces the teammate's own and the built-in one, so
- * `extraDeny: []` would wipe personal deny rules, and a `graph.exclude` written for every team
- * would keep later default excludes out of its repo. A team that needs one sets the full list
- * by hand (docs/configuration.md).
+ * keys: most lists in the project file replace the teammate's own, and graph.exclude,
+ * permissions.extraDeny and sandbox.disabledLanguages add up over the built-in list and the
+ * personal one anyway (ADDITIVE_LISTS in src/config.ts), so there is nothing to write. A team
+ * adds only its own entries by hand (docs/configuration.md).
  */
 export function writeTeamFiles(
   root: string,

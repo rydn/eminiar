@@ -40,7 +40,9 @@ describe("writeTeamFiles", () => {
     expect(arrayPaths(written)).toEqual([]);
     const cfg = loadConfig(root);
     expect(cfg.permissions.extraDeny).toEqual(["Bash(kubectl *)"]);
-    expect(cfg.graph.exclude).toEqual(["**/node_modules/**", "**/generated/**"]);
+    // graph.exclude adds up: the defaults stay, the personal entry is added once.
+    expect(cfg.graph.exclude.filter((e) => e === "**/node_modules/**")).toHaveLength(1);
+    expect(cfg.graph.exclude).toEqual(expect.arrayContaining(["**/dist/**", "**/generated/**"]));
     expect(cfg.index.docs).toEqual(["**/*.md", "**/*.mdx"]);
   });
 });
