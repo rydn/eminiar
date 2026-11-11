@@ -196,6 +196,21 @@ describe("renderStatusline", () => {
     expect(line).toMatch(/% efficient$/);
     expect(db.statuslineSnapshots({ sessionId: "sl-bare" })).toHaveLength(0);
   });
+
+  it("shows the session's saved tokens as estimates with the measured part", () => {
+    // em_execute 40000 → 2000 chars: ≈9.5k measured; em_search 8000 → 800: ≈1.8k counterfactual
+    db.statRecord("sl-saved", "em_execute", {
+      rawChars: 40_000,
+      returnedChars: 2_000,
+      durationMs: 1,
+    });
+    db.statRecord("sl-saved", "em_search", { rawChars: 8_000, returnedChars: 800, durationMs: 1 });
+    dropRenderCache();
+    const line = renderStatusline(JSON.stringify({ session_id: "sl-saved", cwd: root }));
+    expect(line).toMatch(
+      /^eminiar · ≈11\.3k saved \(≈9\.5k measured\) · ≈\S+ lifetime · 94% efficient$/,
+    );
+  });
 });
 
 describe("usageBrief", () => {

@@ -24,6 +24,8 @@ import { pinNode, pinRoot } from "./node-resolve.js";
 import { registerPlugin, registerSettings, setStatusline } from "./register.js";
 import { claudeCli, confirm, log } from "./shell.js";
 
+const SCHEMA_URL = "https://raw.githubusercontent.com/rydn/eminiar/main/eminiar.config.schema.json";
+
 export interface InstallOptions {
   noModel?: boolean;
   method?: "plugin" | "settings" | undefined;
@@ -82,8 +84,7 @@ export async function install(opts: InstallOptions): Promise<number> {
 
   log.step("data directory");
   const p = ensureDirs();
-  if (!existsSync(p.configFile))
-    writeFileSync(p.configFile, `${JSON.stringify(frozenDefaults(), null, 2)}\n`);
+  writeFreshUserConfig(p.configFile);
   globalDb();
   log.ok(p.home);
 
@@ -164,6 +165,7 @@ export async function install(opts: InstallOptions): Promise<number> {
     stableRoot: stable,
     fromSpec,
     installedAt: new Date().toISOString(),
+    noModel: !!opts.noModel,
     wrote,
   });
 
@@ -196,9 +198,19 @@ export async function install(opts: InstallOptions): Promise<number> {
 }
 
 /**
- * The defaults written to a fresh ~/.eminiar/config.json. The adjudicator section is left out
- * so later default changes reach users; it is written only when they turn the feature on.
+ * A fresh ~/.eminiar/config.json holds only what the user chose (nothing yet), so later default
+ * changes reach them. An existing file is never rewritten here; `eminiar doctor --fix` prunes it.
  */
+export function minimalUserConfig(): Record<string, unknown> {
+  return { $schema: SCHEMA_URL };
+}
+
+/** Create ~/.eminiar/config.json with only the minimal content; an existing file is left as is. */
+export function writeFreshUserConfig(file: string): void {
+  if (!existsSync(file)) writeFileSync(file, `${JSON.stringify(minimalUserConfig(), null, 2)}\n`);
+}
+
+/** Every schema default, minus the adjudicator section. The reference `doctor --fix` prunes against. */
 export function frozenDefaults(): Record<string, unknown> {
   const { adjudicator: _off, ...rest } = ConfigSchema.parse({});
   return rest;
@@ -210,10 +222,10 @@ function cursorDirHint(): string {
 
 /**
  * Commit-able defaults so teammates get the same behaviour from `npx eminiar install`. No list
- * keys: an array in the project file replaces the teammate's own and the built-in one, so
- * `extraDeny: []` would wipe personal deny rules, and a `graph.exclude` written for every team
- * would keep later default excludes out of its repo. A team that needs one sets the full list
- * by hand (docs/configuration.md).
+ * keys: most lists in the project file replace the teammate's own, and graph.exclude,
+ * permissions.extraDeny and sandbox.disabledLanguages add up over the built-in list and the
+ * personal one anyway (ADDITIVE_LISTS in src/config.ts), so there is nothing to write. A team
+ * adds only its own entries by hand (docs/configuration.md).
  */
 export function writeTeamFiles(
   root: string,
@@ -226,7 +238,7 @@ export function writeTeamFiles(
       cfg,
       `${JSON.stringify(
         {
-          $schema: "https://raw.githubusercontent.com/rydn/eminiar/main/eminiar.config.schema.json",
+          $schema: SCHEMA_URL,
           routing: { mode: "auto", deferToContextMode: true },
         },
         null,
@@ -255,7 +267,7 @@ export function writeTeamFiles(
     );
   } else {
     log.info(
-      `teammates: \`npx eminiar install${extra.cursor ? " --cursor" : ""}\` (reads the committed eminiar.config.json)`,
+      `teammates: \`npx eminiar install${extra.cursor ? " --cursor" : ""}\` (eminiar then reads the committed eminiar.config.json at run time)`,
     );
   }
   if (extra.cursor) {

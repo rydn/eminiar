@@ -4,7 +4,8 @@
 
 ## Where settings come from
 
-eminiar merges four layers. A later layer overrides an earlier one.
+eminiar merges four layers. A later layer overrides an earlier one, except for the lists
+described under [How layers merge](#how-layers-merge).
 
 | Order | Source | Use for |
 |---|---|---|
@@ -14,7 +15,8 @@ eminiar merges four layers. A later layer overrides an earlier one.
 | 4 | `EMINIAR_*` environment variables | One-off overrides |
 
 `eminiar.config.schema.json` is the JSON Schema for every key. The file written by
-`eminiar install --team` already points to it, so your editor completes and checks the keys:
+`eminiar install --team` already points to it, so your editor completes the keys and checks
+their values:
 
 ```json
 { "$schema": "https://raw.githubusercontent.com/rydn/eminiar/main/eminiar.config.schema.json" }
@@ -33,22 +35,53 @@ A project `eminiar.config.json` (`~/.eminiar/config.json` takes the same keys):
 }
 ```
 
-Objects merge key by key. Any other value replaces the one from the earlier layer, lists
-included: a list you set replaces the built-in list, and one in the project file also replaces
-your personal one. Lists cannot add to each other yet, so to skip one more folder, repeat the
-default excludes:
+## How layers merge
+
+Objects merge key by key. Any other value replaces the one from the earlier layer, and so do
+most lists: a `graph.include` or `index.docs` you set replaces the built-in list, and one in
+the project file also replaces your personal one.
+
+Three lists add up instead: `graph.exclude`, `permissions.extraDeny` and
+`sandbox.disabledLanguages`. The result is the built-in list, then the entries of your personal
+config, then those of the project file, each entry once. They only make eminiar skip or refuse
+more, so a project file can add a deny rule, but cannot remove one of yours (`"extraDeny": []`
+changes nothing). To skip one more folder, list only that folder:
 
 ```json
-{
-  "graph": {
-    "exclude": [
-      "**/node_modules/**", "**/dist/**", "**/build/**", "**/.git/**", "**/coverage/**",
-      "**/*.d.ts", "**/.venv/**", "**/venv/**", "**/__pycache__/**", "**/site-packages/**",
-      "**/vendor/**", "**/*.min.js", "**/*.blade.php", "**/generated/**"
-    ]
-  }
-}
+{ "graph": { "exclude": ["**/generated/**"] } }
 ```
+
+In `graph.exclude` only, an entry that starts with `!` removes that exact entry from the
+built-in list, for example `"!**/vendor/**"` to parse vendored code. It never removes any other
+entry a config file lists, so a project file cannot take back one of your own excludes. A
+personal entry that only repeats a built-in entry does not count as yours here: earlier
+versions of `eminiar install` copied the whole built-in list into `~/.eminiar/config.json`, so
+a `!` in the project file still removes it. The `!` entry itself is not kept. In the other two
+lists `!` has no special meaning.
+
+Earlier versions replaced `graph.exclude` too. If your personal config sets a short list so that
+some built-in folders get parsed, for example `["**/node_modules/**"]` to parse `build/` and
+`vendor/`, eminiar now adds the built-in list back and skips those folders again. Remove each
+built-in entry you want parsed with `!`:
+
+```json
+{ "graph": { "exclude": ["!**/build/**", "!**/vendor/**"] } }
+```
+
+A value the schema refuses (a wrong type, or a number above its limit) makes only the file that
+holds it invalid. eminiar ignores that whole file, prints a note on stderr naming it, and uses
+the other layers. A bad `recall.maxMemories` in your personal config therefore leaves the team's
+`routing.mode` in force. A file can also be valid on its own but not on top of the earlier ones,
+for example when the project file's `adjudicator.weights.features` and yours together hold more
+than 64 keys. Then eminiar ignores only the fields the schema names in the later file (here the
+project file's `adjudicator.weights.features`), or that whole file when that is not enough, and
+names the file and the fields on stderr. A later file never costs an earlier one its settings.
+`eminiar doctor` names the invalid values of `eminiar.config.json`.
+
+Keys the schema does not know, such as a typo like `recall.maxMemory`, are ignored when the
+config loads and never make a file invalid, so a config written for a newer eminiar still
+loads. Your editor flags only invalid values of known keys, so check the key names against the
+tables below.
 
 ## All keys
 
@@ -57,7 +90,7 @@ default excludes:
 | Key | Default | Description |
 |---|---|---|
 | `mode` | `"auto"` | `auto`, `enforce`, `annotate` or `off`. See [Routing](how-it-works.md#routing) |
-| `deferToContextMode` | `true` | In `auto`, only annotate while the context-mode plugin is installed |
+| `deferToContextMode` | `true` | While the context-mode plugin is installed, in every mode except `off`, eminiar gives no routing suggestion for `Bash`, `Read`, `Grep` and `WebFetch` and keeps only its own hints (symbols, coverage, file memos). `auto` also annotates instead of enforcing |
 
 ### `sandbox`
 
@@ -66,8 +99,8 @@ default excludes:
 | `timeoutMs` | `60000` | Time limit for one run |
 | `maxOutputBytes` | `2097152` (2 MB) | Output cap per stream in one run: stdout stops at this many bytes, stderr keeps its last this many characters |
 | `indexThreshold` | `5120` (5 KB) | Output larger than this is indexed, and only matching sections return |
-| `envAllow` | `[]` | Extra environment variable names to pass to the sandbox |
-| `disabledLanguages` | `[]` | Languages to turn off, for example `["php"]` |
+| `envAllow` | `[]` | Extra environment variable names to pass to the sandbox. `*` matches any characters (`"MY_*"`). A name the sandbox always withholds (`ANTHROPIC_*`, `CLAUDE_*`, `OPENAI_*`, `*_API_KEY`) passes only when listed exactly, never through a glob |
+| `disabledLanguages` | `[]` | Languages to turn off, for example `["php"]`. Adds to the earlier layers |
 
 ### `search`
 
@@ -89,7 +122,7 @@ default excludes:
 | Key | Default | Description |
 |---|---|---|
 | `include` | `**/*.{ts,tsx,js,jsx,mjs,cjs,py,go,php}` | Files to parse |
-| `exclude` | `node_modules`, `dist`, `build`, `.git`, `coverage`, `*.d.ts`, virtualenvs, `__pycache__`, `site-packages`, `vendor`, `*.min.js`, `*.blade.php` | Files to skip. Setting it replaces this whole list |
+| `exclude` | `node_modules`, `dist`, `build`, `.git`, `coverage`, `*.d.ts`, virtualenvs, `__pycache__`, `site-packages`, `vendor`, `*.min.js`, `*.blade.php` | Files to skip. Adds to this list and the earlier layers; `"!<glob>"` removes a built-in one (see [How layers merge](#how-layers-merge)) |
 
 ### `git`
 
@@ -107,13 +140,7 @@ default excludes:
 
 | Key | Default | Description |
 |---|---|---|
-| `extraDeny` | `[]` | Extra Bash deny rules for the sandbox, in addition to Claude Code's `permissions.deny` |
-
-### `code`
-
-| Key | Default | Description |
-|---|---|---|
-| `backend` | `"tree-sitter"` | Code parser backend |
+| `extraDeny` | `[]` | Extra Bash deny rules for the sandbox, in addition to Claude Code's `permissions.deny`. Adds to the earlier layers; a project file cannot remove a personal rule |
 
 ### `memories`
 
@@ -149,9 +176,9 @@ not jobs: eminiar never runs or schedules them. See [Tools](tools.md#playbooks).
 | `onCommit` | `true` | List risky files before `git commit` |
 | `onError` | `true` | Attach earlier occurrences of a failed call's error |
 | `onWeb` | `true` | Attach indexed doc pages before `WebSearch` / `WebFetch` |
-| `maxMemories` | `3` | Memories per prompt |
-| `maxDocs` | `2` | Doc pages per prompt |
-| `repeatAfter` | `10` | Prompts after which an item already shown in this context window may be attached again (`0` = once per window) |
+| `maxMemories` | `3` | Memories per prompt, `0` to `10` |
+| `maxDocs` | `2` | Doc pages per prompt, `0` to `10` |
+| `repeatAfter` | `10` | Prompts after which an item already shown in this context window may be attached again (`0` = once per window), at most `1000` |
 
 ### `docs`
 
@@ -159,15 +186,15 @@ not jobs: eminiar never runs or schedules them. See [Tools](tools.md#playbooks).
 |---|---|---|
 | `manifest` | `".eminiar/docs.json"` | The documentation sources manifest, relative to the project root (see below) |
 | `ttlHours` | `168` (7 days) | Page cache lifetime |
-| `crawl.depth` | `1` | Link depth for dependency docs |
-| `crawl.maxPages` | `8` | Pages per dependency source |
+| `crawl.depth` | `1` | Link depth for dependency docs, `0` to `3` |
+| `crawl.maxPages` | `8` | Pages per dependency source, `1` to `200` |
 | `crawl.maxPageBytes` | `122880` (120 KB) | Page size cap |
-| `crawl.api.depth` | `2` | Link depth for external API docs |
-| `crawl.api.maxPages` | `150` | Pages per external API source |
+| `crawl.api.depth` | `2` | Link depth for external API docs, `0` to `3` |
+| `crawl.api.maxPages` | `150` | Pages per external API source, `1` to `200` |
 | `embed` | `false` | Also embed documentation for semantic search |
 | `discover.includeDev` | `false` | Include dev dependencies in discovery |
 | `discover.subprojects` | `true` | Scan one level of sub-projects |
-| `catalog` | `[]` | Extra catalogue entries, each with a `tier`: `service`, `infra` or `library` |
+| `catalog` | `[]` | Extra catalogue entries. Required: `id`, `title`, `urls`. Optional lists of strings: `npm`, `pypi`, `go`, `env`, `image`, `files`, `hosts`, `tags`. Optional: `tier` (`service`, `infra` or `library`) and `crawl` (`depth` `0` to `3`, `maxPages` `1` to `200`) |
 
 `docs.manifest` must be a path inside the project: an absolute path, a drive letter, a `..`
 segment or a control character (a newline, NUL) is refused by the schema, and a project
@@ -234,12 +261,13 @@ only:
 | `openai.baseUrl` | unset (the preset's) | Overrides the preset's URL; required for `custom`. A non-loopback URL makes any preset remote |
 | `openai.model` | unset (the preset's) | Overrides the preset's model; required for `custom` |
 | `openai.json` | `"auto"` | `schema` (strict JSON schema), `object` (JSON mode) or `auto` (schema, falling back to JSON mode when the server rejects it) |
-| `openai.price.inPerM` | unset (the preset's) | USD per million input tokens. Without a price, a preset with an unknown price reports no cost |
-| `openai.price.outPerM` | unset (the preset's) | USD per million output tokens |
+| `openai.price.inPerM` | unset (the preset's) | USD per million input tokens. Without a price, a preset with an unknown price reports no cost. Set it together with `outPerM`: one without the other makes the config invalid |
+| `openai.price.outPerM` | unset (the preset's) | USD per million output tokens. Set it together with `inPerM` |
 | `embedding.k` | `5` | Nearest examples that vote |
 | `embedding.minSimilarity` | `0.55` | Cosine similarity below which an example does not count; with none, the heuristic answers |
 | `keyEnv` | unset | The NAME of an environment variable holding the key, never the key |
 | `remoteConsent` | `false` | Consent to send redacted text to a remote provider. Set by `enable`/`provider` after you agree |
+| `remoteConsentOrigins` | unset | The origins (`scheme://host[:port]`, at most 64) you agreed to send text to, written by the consent prompt of `enable`/`provider`. A remote provider runs only when its origin is listed. Read from `~/.eminiar/config.json` only |
 | `timeouts.promptMs` | `1200` | Provider deadline on prompts (remote providers) |
 | `timeouts.agentMs` | `800` | Provider deadline on dispatches and tool hints (remote providers) |
 | `timeouts.planMs` | `3000` | Deadline for a plan batch, `em_adjudicate score` and each eval chunk |

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { TIERS, type Tier } from "../adjudicator/types.js";
 import { editDistance } from "../search/typo.js";
 import { tierOf } from "../storage/dispatch.js";
+import { READONLY_BUILTINS } from "./agents.js";
 import { checkGlob, GlobError } from "./glob.js";
 
 /**
@@ -179,6 +180,7 @@ const RawAgent = z.object({
   model: Model.optional(),
   model_range: RawModelRange.optional(),
   tools: z.array(ToolName).max(80).optional(),
+  tools_profile: z.enum(["readonly"]).optional(),
   disallowed_tools: z.array(ToolName).max(80).optional(),
   skills: z.array(SkillName).max(20).optional(),
   hooks: RawHooks.optional(),
@@ -606,6 +608,13 @@ function resolve(
           `agent name "${agentType}" is also produced by ${other}; rename one of them`,
         );
       seenAgent.set(agentType, `swarms.${name}.agents.${role}`);
+      if (a.tools_profile === "readonly")
+        for (const t of a.tools ?? [])
+          if (!READONLY_BUILTINS.includes(t))
+            issue(
+              ["swarms", name, "agents", role, "tools"],
+              `tools_profile: readonly allows only ${READONLY_BUILTINS.join(", ")} (and the read-only em_* tools); "${t}" can write or run code. Remove it, or drop tools_profile`,
+            );
       return {
         swarm: name,
         role,
@@ -615,6 +624,7 @@ function resolve(
         model: a.model ?? raw.defaults?.model,
         range: roleRange(raw.defaults, a, ["swarms", name, "agents", role], once),
         tools: a.tools ? uniq(a.tools) : undefined,
+        toolsProfile: a.tools_profile,
         disallowedTools: a.disallowed_tools ? uniq(a.disallowed_tools) : undefined,
         skills: uniq([...(raw.defaults?.skills ?? []), ...(a.skills ?? [])]),
         hooks: a.hooks,
@@ -756,7 +766,7 @@ swarms:
   feature:
     description: Plan, build, test and review a change to the codebase.
     topology: hierarchical   # hierarchical | mesh | pipeline
-    max_agents: 4            # workers running at once in one run
+    max_agents: 4            # workers running at once across all runs of the swarm
     instructions: |
       Break the goal into tasks one worker can finish in one go, each naming the files it touches.
       Let the architect design first, fan the coding tasks out, then test, then review.

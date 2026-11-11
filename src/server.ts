@@ -53,6 +53,7 @@ for (const tool of listed) {
     tool.name,
     {
       description: tool.description,
+      annotations: tool.annotations,
       // Every tool accepts an optional project_root, for a caller whose project is not the
       // server's own (the em_swarm stamp hook names the session's); without it, the server's.
       inputSchema: { ...tool.schema, project_root: z.string().optional() },

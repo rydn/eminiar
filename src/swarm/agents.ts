@@ -72,13 +72,108 @@ export const EXEC_TOOLS: ReadonlySet<string> = new Set([
   "em_batch_execute",
 ]);
 
-/** Does the role keep Bash? An unset `tools` means every tool; `disallowed_tools` wins. */
-export function roleHasShell(role: Pick<RoleSpec, "tools" | "disallowedTools">): boolean {
+/**
+ * `tools_profile: readonly`: the built-in tools the agent file allowlists. Bash is never among
+ * them, because a shell can write files; a reviewer that needs to run a command does not use
+ * the profile. ToolSearch is how a worker loads its deferred em_* tools.
+ */
+export const READONLY_BUILTINS: readonly string[] = [
+  "Read",
+  "Grep",
+  "Glob",
+  "WebFetch",
+  "WebSearch",
+  "ToolSearch",
+];
+
+/**
+ * The em_* tools a readonly profile allows: those whose ToolDef.annotations are READ_ONLY
+ * (tests/unit/swarm-tools-profile.test.ts checks this list against the registry), plus em_swarm,
+ * which every worker needs to claim and close tasks. em_remember, em_memory, em_docs and the
+ * command runners write or run code and are left out.
+ */
+export const READONLY_EM_TOOLS = [
+  "em_swarm",
+  "em_recall",
+  "em_search",
+  "em_symbols",
+  "em_history",
+  "em_graph_impact",
+  "em_graph_query",
+  "em_architecture",
+] as const;
+
+/** Tools a readonly role is told never to use, also written to `disallowedTools`. */
+const READONLY_DENY = ["Edit", "Write", "NotebookEdit"] as const;
+
+/**
+ * The allowlist of a readonly role: the built-ins (its own `tools` when set, even an empty list,
+ * which narrows to ToolSearch) and read-only em_*.
+ */
+export function readonlyTools(role: Pick<RoleSpec, "tools">): string[] {
+  const builtins = role.tools ?? READONLY_BUILTINS;
+  const out = builtins.includes("ToolSearch") ? [...builtins] : [...builtins, "ToolSearch"];
+  for (const prefix of EM_MCP_PREFIXES) for (const t of READONLY_EM_TOOLS) out.push(prefix + t);
+  return out;
+}
+
+/**
+ * Does the role keep Bash? An unset `tools` means every tool; `disallowed_tools` wins. A
+ * readonly profile never has Bash (its allowlist is READONLY_BUILTINS or a subset).
+ */
+export function roleHasShell(
+  role: Pick<RoleSpec, "tools" | "disallowedTools"> & Partial<Pick<RoleSpec, "toolsProfile">>,
+): boolean {
+  if (role.toolsProfile === "readonly") return false;
   return (role.tools?.includes("Bash") ?? true) && !role.disallowedTools?.includes("Bash");
+}
+
+/**
+ * Does the role's generated agent file give it the em_* tool `tool` (a bare name such as
+ * em_execute_file)? Mirrors frontmatter(): a readonly profile gets READONLY_EM_TOOLS, a `tools`
+ * list gets WORKER_EM_TOOLS, an unset `tools` inherits every tool; the command runners need
+ * Bash, and `disallowed_tools` removes the tool only when it names it under both MCP name forms
+ * (disallowsEmTool): frontmatter() writes the list verbatim, and Claude Code ignores a bare
+ * name or another server's tool.
+ */
+export function roleHasEmTool(
+  role: Pick<RoleSpec, "tools" | "disallowedTools"> & Partial<Pick<RoleSpec, "toolsProfile">>,
+  tool: string,
+): boolean {
+  if (role.disallowedTools && disallowsEmTool(role.disallowedTools, tool)) return false;
+  if (EXEC_TOOLS.has(tool) && !roleHasShell(role)) return false;
+  if (role.toolsProfile === "readonly")
+    return (READONLY_EM_TOOLS as readonly string[]).includes(tool);
+  if (role.tools) return (WORKER_EM_TOOLS as readonly string[]).includes(tool);
+  return true;
 }
 
 /** MCP tool name prefixes: plugin install and `install --method settings`. */
 export const EM_MCP_PREFIXES = ["mcp__plugin_eminiar_eminiar__", "mcp__eminiar__"] as const;
+
+/**
+ * Is `entry` a server-wide tool-list entry (`mcp__<server>` or `mcp__<server>__*`) for the
+ * eminiar server behind the MCP name prefix `prefix` (one of EM_MCP_PREFIXES)?
+ */
+export function isEmServerEntry(entry: string, prefix: string): boolean {
+  return entry === prefix.slice(0, -2) || entry === `${prefix}*`;
+}
+
+/**
+ * Does the tool list name the em_* tool `tool` under the MCP name prefix `prefix`, by its full
+ * name or a server-wide entry? A bare name or another server's tool does not count.
+ */
+export function namesEmTool(list: readonly string[], prefix: string, tool: string): boolean {
+  return list.some((t) => t === prefix + tool || isEmServerEntry(t, prefix));
+}
+
+/**
+ * Does a `disallowedTools` list remove the em_* tool `tool` under every MCP name form? The
+ * agent may reach eminiar under either install, so naming one form leaves the other.
+ */
+export function disallowsEmTool(disallowed: readonly string[], tool: string): boolean {
+  return EM_MCP_PREFIXES.every((p) => namesEmTool(disallowed, p, tool));
+}
 
 export const AGENTS_REL = ".claude/agents";
 
@@ -121,7 +216,9 @@ function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> 
     description: `Worker "${role.role}" of the eminiar swarm "${swarm.name}": ${role.description} Spawn it for a task of this swarm and name the task as "task #N" in the prompt; the em-swarm skill coordinates runs.`,
   };
   if (role.model) fm.model = role.model;
-  if (role.tools) fm.tools = workerTools(role.tools, roleHasShell(role)).join(", ");
+  const readonly = role.toolsProfile === "readonly";
+  if (readonly) fm.tools = readonlyTools(role).join(", ");
+  else if (role.tools) fm.tools = workerTools(role.tools, roleHasShell(role)).join(", ");
   // Workers are leaves: Claude Code lets subagents spawn subagents unless Agent is disallowed.
   // A role that lists Agent or Task in its own `tools` opted out of that.
   const spawns = role.tools?.some((t) => t === "Agent" || t === "Task");
@@ -129,7 +226,12 @@ function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> 
   // disallow the command runners too.
   const noShell = role.disallowedTools?.includes("Bash") ? execToolNames() : [];
   const disallowed = [
-    ...new Set([...(role.disallowedTools ?? []), ...(spawns ? [] : ["Agent"]), ...noShell]),
+    ...new Set([
+      ...(role.disallowedTools ?? []),
+      ...(spawns ? [] : ["Agent"]),
+      ...noShell,
+      ...(readonly ? READONLY_DENY : []),
+    ]),
   ];
   if (disallowed.length) fm.disallowedTools = disallowed.join(", ");
   if (role.skills.length) fm.skills = role.skills;
@@ -188,10 +290,16 @@ export function renderAgentFile(config: SwarmConfig, swarm: SwarmSpec, role: Rol
     ...[
       'eminiar starts you with a swarm brief: the run goal, the open tasks, the shared notes and what the project knows (memories, history, structure). First claim the task your prompt names with `em_swarm {action:"claim", task:N}` (or the next open one with `em_swarm {action:"claim"}`); if the brief says you already hold a task, continue it.',
       'Ask eminiar before acting: `em_recall {query}` for decisions and constraints, `em_history {action:"file", path}` before editing a file, `em_graph_impact {node}` before changing a symbol, `em_symbols` / `em_search` instead of grepping.',
-      ...(!role.isolation && roleHasShell(role) ? [SHARED_TREE_RULE] : []),
+      ...(!role.isolation && roleHasShell(role) && role.toolsProfile !== "readonly"
+        ? [SHARED_TREE_RULE]
+        : []),
       'Share what other workers need with `em_swarm {action:"post", key, value}` and read theirs with `em_swarm {action:"read"}`.',
       'Close every task with `em_swarm {action:"update", task, status, result}`: status `done`, `failed` or `blocked`; the result says what changed and how you verified it.',
-      "Record durable decisions with `em_remember` so later sessions know them.",
+      ...(role.toolsProfile === "readonly"
+        ? [
+            "You are read-only: you cannot edit files or run commands. Put findings in your update and report.",
+          ]
+        : ["Record durable decisions with `em_remember` so later sessions know them."]),
       "Your final message goes back to the coordinator: lead with the outcome, then the files you changed and anything left open.",
     ].map((step, i) => `${i + 1}. ${step}`),
     "",

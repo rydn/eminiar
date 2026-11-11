@@ -6,10 +6,11 @@ import { cleanStderr, processOutput } from "../sandbox/output.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
 import { LANG_ENUM } from "./em_execute.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, RUNS_CODE, text } from "./types.js";
 
 export const emExecuteFile = defineTool({
   name: "em_execute_file",
+  annotations: RUNS_CODE,
   description:
     "Process a file in the sandbox without reading it into context. Your code receives the absolute path as $EM_FILE (shell) / process.env.EM_FILE (node) / os.environ['EM_FILE'] (python); print only what you need. The file must be inside the project root unless a Read(<path>) allow rule opts it in; a matching Read deny or ask rule refuses the path, inside the root or out. Omit `code` to get a quick summary (size, lines, head). javascript and typescript run as ES modules; `import` and `require` both work.",
   schema: {

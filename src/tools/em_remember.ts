@@ -3,12 +3,14 @@ import { kickEmbedding } from "../embeddings/queue.js";
 import { gitignoreHint, MEMORY_KINDS, MEMORY_STATUSES, reconcile, write } from "../memory/store.js";
 import { getCurrentSession } from "../session/current.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export { MEMORY_KINDS };
 
 export const emRemember = defineTool({
   name: "em_remember",
+  // replace:true overwrites an existing memory file
+  annotations: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: false },
   description:
     "Record something worth keeping across sessions as a named markdown memory under .eminiar/memories/<topic>/<name>.md (human-editable, git-shareable): a decision and why, a constraint, a project fact, a user preference, a todo, a note, or onboarding knowledge. It is indexed for em_search / em_recall and linked in the graph to related_files / related_nodes. Manage existing memories with em_memory.",
   schema: {

@@ -7,7 +7,7 @@ import type { HookHandler, HookInput, HookOutput } from "../hooks/types.js";
 import { resolveProjectRoot, sessionRoot } from "../project.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
-import { EXEC_TOOLS, roleHasShell, syncAgents } from "./agents.js";
+import { roleHasEmTool, syncAgents } from "./agents.js";
 import { workerBrief } from "./brief.js";
 import {
   activeSwarmConfig,
@@ -597,26 +597,27 @@ export function swarmTouch(ctx: ProjectContext, input: HookInput): void {
 }
 
 /**
- * Does the swarm worker type `agentType` lack the em_* tool `tool`? Only the command runners
- * are ever left out, for a role without Bash (roleHasShell), so routing neither denies toward
- * them nor tells the worker to use them. A role that lists an em_execute name in its own
- * `tools` without Bash still counts as lacking it: at worst a routing hint is not given.
- * Swarm files only (swarmRoots), no context or database. Never throws.
+ * Does the swarm worker type `agentType` lack the em_* tool `tool`, by its role's config
+ * (roleHasEmTool)? A role without Bash has no command runners; a readonly profile has only
+ * the read-only em_* tools. Routing then neither denies toward the tool nor tells the worker
+ * to use it. A role that lists an em_execute name in its own `tools` without Bash still counts
+ * as lacking it: at worst a routing hint is not given. Swarm files only (swarmRoots), no
+ * context or database. Never throws.
  */
 export function workerLacksTool(
   input: Pick<HookInput, "cwd">,
   agentType: string | undefined,
   tool: string,
 ): boolean {
-  if (!EXEC_TOOLS.has(tool) || !isSwarmAgentType(agentType)) return false;
+  if (!/^em_[a-z_]+$/.test(tool) || !isSwarmAgentType(agentType)) return false;
   try {
     for (const dir of swarmRoots(input)) {
       const config = activeSwarmConfig(dir);
       const found = config && findRole(config, agentType);
-      if (found) return !roleHasShell(found.role);
+      if (found) return !roleHasEmTool(found.role, tool);
     }
   } catch (err) {
-    fail("shell", err);
+    fail("tools", err);
   }
   return false;
 }

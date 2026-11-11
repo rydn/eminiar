@@ -1,9 +1,10 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
-import type { SwarmEvent, SwarmRoleUi, SwarmTask, SwarmWorkerUi } from "../api.js";
+import type { SwarmDecision, SwarmEvent, SwarmRoleUi, SwarmTask, SwarmWorkerUi } from "../api.js";
 import { Badge, Drawer, EmptyState, Stat, StatRow } from "../ds.js";
 import { cls, fmt } from "../util.js";
 import { RoleChip, State, useNow } from "./bits.js";
+import { DecisionSection, workerDecisions } from "./decision.js";
 import { clip, heartbeat, workerTasks } from "./run-helpers.js";
 import { dur, eventIo, GLYPH, KIND_GLYPH, rel, shortAgent } from "./style.js";
 
@@ -64,7 +65,9 @@ export function WorkerDrawer({
   skew,
   staleMs,
   onClose,
+  decisions,
 }: {
+  decisions?: Record<number, SwarmDecision> | undefined;
   worker: SwarmWorkerUi;
   /** The role as configured now (absent when the swarm or role left the file). */
   role: SwarmRoleUi | undefined;
@@ -176,6 +179,11 @@ export function WorkerDrawer({
             <code>{w.agent_type}</code>.
           </p>
         )}
+      </section>
+
+      <section class="sw-wd-sec">
+        <h4>Decision</h4>
+        <DecisionSection decisions={workerDecisions(decisions, w.agent_id, w.task_id)} />
       </section>
 
       {w.summary ? (

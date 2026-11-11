@@ -129,7 +129,7 @@ counts. `remove` with the orphaned name drops those pages; `add` with the same n
   name.
 - A `WebSearch` is told which sources exist. Matching indexed pages are attached.
 - The session brief lists the sources.
-- `/em-onboard` builds the set and writes the `onboarding/documentation` memory.
+- `/eminiar:em-onboard` builds the set and writes the `onboarding/documentation` memory.
 
 ## Share and extend
 

@@ -77,8 +77,13 @@ interface Item {
   vec?: Float32Array | undefined;
 }
 
+/** The prompt without harness envelopes, line breaks kept (the code check reads line starts). */
+function dropEnvelope(text: string): string {
+  return text.replace(ENVELOPE_TAGS, " ").trim();
+}
+
 export function stripEnvelope(text: string): string {
-  return text.replace(ENVELOPE_TAGS, " ").replace(/\s+/g, " ").trim();
+  return dropEnvelope(text).replace(/\s+/g, " ").trim();
 }
 
 /** Mostly code, commands or paths: not a recurring task description. */
@@ -168,9 +173,12 @@ function loadItems(db: StorageAdapter, since: number | undefined): Item[] {
       if (e?.category !== "user_prompt") continue;
       const raw = payloadText(e.payload);
       if (SWARM.test(raw)) continue;
-      const text = stripEnvelope(raw);
+      // Secrets are masked before anything is tokenized: the tokens build the title and name.
+      // The code check runs on the text with its line breaks, so a stack trace is recognised.
+      const body = redactSecrets(dropEnvelope(raw)).trim();
+      const text = body.replace(/\s+/g, " ");
       if (text.length < 8 || text.startsWith("<") || text.startsWith("/")) continue;
-      if (text.split(/\s+/).length < MIN_WORDS || isCodeHeavy(text)) continue;
+      if (text.split(/\s+/).length < MIN_WORDS || isCodeHeavy(body)) continue;
       const servers = new Set<string>();
       let orchestration = false;
       for (let j = i + 1; j < evs.length; j++) {

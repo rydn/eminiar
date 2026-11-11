@@ -5,10 +5,11 @@ import { search } from "../search/pipeline.js";
 import { getStorage } from "../storage/index.js";
 import type { MemoryRow } from "../storage/types.js";
 import { memoryLine } from "./em_memory.js";
-import { defineTool, text } from "./types.js";
+import { defineTool, READ_ONLY, text } from "./types.js";
 
 export const emRecall = defineTool({
   name: "em_recall",
+  annotations: READ_ONLY,
   description:
     'Call this first when a task starts, a design changes or an approach is chosen: it recalls memories (.eminiar/memories, written by em_remember) and captured session history — decisions, constraints, errors and their fixes, rejected approaches — matching a query (hybrid keyword + semantic), so nothing is re-decided or re-broken. Without a query, lists the most recent memories, onboarding first. The hooks also push matching memories on their own ("eminiar recall", "eminiar memory"); this tool searches further, with synonyms. em_memory {action:"read"} shows a whole memory.',
   schema: {

@@ -30,6 +30,7 @@ export interface SwarmDocRole {
   model?: string | undefined;
   model_range?: SwarmDocModelRange | undefined;
   tools?: string[] | undefined;
+  tools_profile?: "readonly" | undefined;
   disallowed_tools?: string[] | undefined;
   skills?: string[] | undefined;
   /** Read-only in the dashboard: shown, never edited (edit it in the YAML). */

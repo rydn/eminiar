@@ -96,7 +96,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
     "AKIAIOSFODNN7EXAMPLE",
     "password=hunter2secret",
   ]) {
-    it.fails(`a secret repeated in recurring prompts never reaches the title or name (${secret.slice(0, 6)})`, async () => {
+    it(`a secret repeated in recurring prompts never reaches the title or name (${secret.slice(0, 6)})`, async () => {
       recurring(`Check Slack for pull requests token ${secret} and review`);
       await scan(on(), db, { embeddings: false });
       const rows = db.playbooks.suggestions();
@@ -220,7 +220,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
 
   // src/playbooks/extract.ts loadItems: whitespace is collapsed by stripEnvelope before
   // isCodeHeavy runs, so its stack-trace rule (which needs line starts) can never match.
-  it.fails("a pasted stack trace is left out of the mining", async () => {
+  it("a pasted stack trace is left out of the mining", async () => {
     const trace = "why does slack time out\n    at run (index.js:10:5)\n    at main (index.js:2:1)";
     expect(isCodeHeavy(trace)).toBe(true); // the rule itself works on raw text
     recurring(trace);

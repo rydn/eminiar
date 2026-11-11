@@ -41,6 +41,8 @@ export interface InstallRecord {
   stableRoot: string;
   fromSpec: string;
   installedAt: string;
+  /** Set when `install --no-model` skipped the embedding model; upgrade keeps that choice. Absent in older records. */
+  noModel?: boolean;
   /** Exact things we wrote so uninstall can remove only those. */
   wrote: {
     hookEvents?: string[];

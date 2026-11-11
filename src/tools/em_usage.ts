@@ -49,7 +49,7 @@ import { ingestProject, ingestSession, usageEnabled } from "../usage/ingest.js";
 import { detectInsights, type Insight, loadInsightInput, type Score } from "../usage/insights.js";
 import { formatUsd } from "../usage/pricing.js";
 import { type PricedSavings, pricedSavings } from "../usage/savings.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 export const USAGE_VIEWS = [
   "summary",
@@ -504,7 +504,7 @@ export function usageView(
 
 type Align = "l" | "r";
 
-/** Fixed-width text table in the style of formatStats (two-space indent, padded columns). */
+/** Fixed-width text table in the style of em_stats (two-space indent, padded columns). */
 export function textTable(headers: string[], rows: string[][], aligns?: Align[]): string {
   const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
   const line = (cells: string[]) =>
@@ -590,7 +590,7 @@ export function renderSummary(p: SummaryPayload): string {
     for (const i of p.insights) out.push(`    [${i.severity}] ${i.title}: ${i.reason}`);
   } else out.push("  insights: none");
   out.push(
-    `  eminiar savings: ${fmtTokens(p.savings.savedTokens)} tokens kept out of context ≈ ${usd(p.savings.directUsd)} direct + ${usd(p.savings.compoundingUsd)} compounding (see em_usage view:"savings")`,
+    `  eminiar savings: ≈${fmtTokens(p.savings.savedTokens)} tokens kept out of context (≈${fmtTokens(p.savings.measuredTokens)} measured, ≈${fmtTokens(p.savings.counterfactualTokens)} counterfactual) ≈ ${usd(p.savings.directUsd)} direct + ${usd(p.savings.compoundingUsd)} compounding (see em_usage view:"savings")`,
   );
   if (p.totals.unpricedCalls)
     out.push(
@@ -760,9 +760,11 @@ export function renderInsights(p: InsightsPayload): string {
 
 export function renderSavings(p: SavingsPayload): string {
   const out = [
-    `eminiar savings: ${fmtTokens(p.savedTokens)} tokens kept out of context`,
-    `  direct      ${usd(p.directUsd)}  (never written to cache: cache-write price of ${shortModel(p.model)})`,
-    `  compounding ${usd(p.compoundingUsd)}  (never re-read on later turns: cache-read price × ${p.laterCallsPerSession.toFixed(1)} later calls per session)`,
+    `eminiar savings: ≈${fmtTokens(p.savedTokens)} tokens kept out of context (estimated, 4 characters per token)`,
+    `  measured       ≈${fmtTokens(p.measuredTokens)}  (execution output produced and kept out of context)`,
+    `  counterfactual ≈${fmtTokens(p.counterfactualTokens)}  (what native Read, Grep or git calls might have returned; can overstate)`,
+    `  direct         ≈ ${usd(p.directUsd)}  (never written to cache: cache-write price of ${shortModel(p.model)})`,
+    `  compounding    ≈ ${usd(p.compoundingUsd)}  (never re-read on later turns: cache-read price × ${p.laterCallsPerSession.toFixed(1)} later calls per session)`,
     "  assumptions:",
     ...p.assumptions.map((a) => `    - ${a}`),
   ];
@@ -933,6 +935,7 @@ export function usageCsv(view: UsageView, payload: UsagePayload): string | undef
 
 export const emUsage = defineTool({
   name: "em_usage",
+  annotations: LOCAL_WRITE,
   description:
     "Token, cache and cost insights for Claude Code sessions, from the transcripts on this machine: cost today / 7d / 30d, cache hit rate, per-model and per-session breakdowns, 5-hour billing blocks with burn rate, the context timeline of a session with compactions, which tools put the most into context, detected insights with scores, and what eminiar's own tools saved. Cost is an estimate at list prices; everything stays local.",
   schema: {

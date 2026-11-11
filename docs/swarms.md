@@ -25,7 +25,7 @@ You can opt in three ways:
 
 - run `eminiar swarm init`. It writes a starter file with two swarms (`feature` and `review`)
   and generates their agent files;
-- click "Create starter swarm.yaml" on the Swarms tab of the dashboard (`eminiar ui`);
+- click "Create from the starter" on the Swarms tab of the dashboard (`eminiar ui`);
 - write the file yourself, using the reference below.
 
 Commit `.eminiar/swarm.yaml` so your team shares the swarms. The generated agent files in
@@ -172,6 +172,7 @@ across all swarms.
 | `model` | `defaults.model` | `inherit`, `sonnet`, `opus`, `haiku`, `fable` or a full model id. When nothing sets a model, the agent file has no `model` line and Claude Code uses its default for subagents. With a `model_range`, this is the fallback |
 | `model_range` | `defaults.model_range` | `{ floor, ceiling }`: the tiers (`haiku`, `sonnet`, `opus`, `fable`) the adjudicator may move this worker's model between. See [Model ranges](#model-ranges) |
 | `tools` | unset | Tool allowlist. When set, eminiar adds its own `em_*` tools under both MCP name forms so routing never leaves the worker without them. `em_execute`, `em_execute_file` and `em_batch_execute` run code, so they are added only when the list has `Bash`. Unset: the worker gets every tool |
+| `tools_profile` | unset | `readonly` writes the agent file's `tools` allowlist as `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch` and `ToolSearch` plus the read-only `em_*` tools (`em_recall`, `em_search`, `em_symbols`, `em_history`, `em_graph_impact`, `em_graph_query`, `em_architecture`) and `em_swarm`, and disallows `Edit`, `Write` and `NotebookEdit`. `Bash` is never allowed, because a shell can write files, so `em_execute`, `em_execute_file`, `em_batch_execute`, `em_remember`, `em_memory` and `em_docs` are left out too. A `tools` list narrows the built-ins; naming a tool outside the profile in it is an error. Unset: the role is only as read-only as its prompt and `disallowed_tools` make it |
 | `disallowed_tools` | unset | Tools the worker cannot use, such as `[Edit, Write, NotebookEdit]` for a reviewer that must not edit files. `Bash` here also disallows `em_execute`, `em_execute_file` and `em_batch_execute` |
 | `skills` | `[]` | Skills preloaded into the worker, after `defaults.skills` |
 | `hooks` | unset | Hooks scoped to this worker. See [Role hooks](#role-hooks) |
@@ -229,7 +230,7 @@ swarm or a role; the most specific value wins.
 | `history` | `true` | Bug-prone files among the task's files (or in the role's scope), each with its fix count and last fix, plus the project's history lesson |
 | `structure` | `true` | The project brief |
 | `insights` | `true` | Hot files (fan-in × churn) among the task's files or in the role's scope |
-| `max_chars` | `4000` | Size budget of the brief, 500 to 20000 characters |
+| `max_chars` | `4000` | Size budget of the brief, 500 to 9000 characters |
 
 ### Role hooks
 
@@ -442,7 +443,7 @@ it. Projects without `enforce: true` are never affected.
 | Database error while checking a swarm worker | Denied (a busy database gets a retry message) |
 | The hook throws elsewhere | Denied if the raw file says `enforce: true` |
 | No Node.js or no installed copy (`bin/em-hook` shim) | Denied if the raw file says `enforce: true` |
-| Hook timeout (5 s) or a crash while loading | **Not covered: the spawn goes ahead** |
+| Hook timeout (5 s for the plugin's hook, 10 s for the entry `eminiar install` writes into settings) or a crash while loading | **Not covered: the spawn goes ahead** |
 
 The last row is an open gap. Claude Code treats a hook that times out or cannot start as a
 non-blocking error. For a hard guarantee, add your own entry to the project's

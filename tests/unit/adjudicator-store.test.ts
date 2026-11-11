@@ -331,6 +331,10 @@ describe("SqliteAdjudicatorStore", () => {
     a.adjudicator.insert(row({ ts: 55, runId: "r", taskId: 2, inputHash: "z", final: true }));
     expect(a.adjudicator.forTask("r", 1).map((r) => r.inputHash)).toEqual(["x", "y"]);
     expect(a.adjudicator.forTask("r", 3)).toEqual([]);
+    // forRun: every task row of the run, oldest first; rows without a task id and other runs stay out
+    a.adjudicator.insert(row({ ts: 70, runId: "other", taskId: 1, inputHash: "o", final: true }));
+    expect(a.adjudicator.forRun("r").map((r) => r.inputHash)).toEqual(["x", "z", "y"]);
+    expect(a.adjudicator.forRun("none")).toEqual([]);
 
     expect(a.adjudicator.nonFinal(100).map((r) => r.ts)).toEqual([10, 20, 30, 40, 50, 60]);
     expect(a.adjudicator.nonFinal(2).map((r) => r.ts)).toEqual([10, 20]);

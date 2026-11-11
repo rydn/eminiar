@@ -54,7 +54,7 @@ equivalents are [below](#cursor)):
 | `SubagentStop` | Records the subagent's findings, so `em_recall` can find them later. Closes a swarm worker |
 | `PreCompact` | Writes a ≤2 KB Session Guide snapshot |
 | `Stop` | Classifies Claude's last reply (decisions, summaries) |
-| `SessionEnd` | Marks the session as ended and flushes lifetime statistics |
+| `SessionEnd` | Marks the session as ended and records its last token usage from the transcript. Lifetime statistics need no flush: each `em_*` call writes them |
 
 Hooks are fast by design. They never run `git log` and never load the embedding model. Recall
 is a few FTS queries against the project database.
@@ -89,9 +89,8 @@ run inside it:
   (`busyTimeoutFor` in `src/hooks/budget.ts`). That release runs first; the writes after it
   are best effort and wait 250 ms each, so a lock held past the whole run keeps the hook near
   2 s instead of past its 5 s timeout. Cursor's hooks wait as the Claude Code event
-  they translate to: `sessionStart` waits as `SessionStart`, `subagentStop` as `SubagentStop`,
-  `afterFileEdit` as `PostToolUse` (`lockWaitFor`, called by `src/hook.ts` before the database
-  opens).
+  they translate to: `sessionStart` waits as `SessionStart`, `subagentStop` as `SubagentStop`
+  (`lockWaitFor`, called by `src/hook.ts` before the database opens).
 - **Best-effort writes.** `UserPromptSubmit`, `SessionStart` and `PostToolUseFailure` still
   answer when the database stays locked past that wait: the session row, the event log and the
   recall statistics are skipped, and the reads (recall, guidance) still run because a reader is
@@ -115,7 +114,7 @@ Swarms are opt-in: without `.eminiar/swarm.yaml` every swarm path below returns 
 | Event | Swarm work |
 |---|---|
 | `SessionStart` | With `sync: auto`, regenerates `.claude/agents/swarm-<swarm>-<role>.md` from the YAML. Adds one line naming the swarms and any active run, or a warning naming the first problem in an invalid file |
-| `PreToolUse` `Agent` / `Task` | For a `swarm-*` agent: checks `max_agents` and the role's `count`, and reserves the slot. Over capacity, the spawn is denied with the reason. Routing still adds its prompt prefix, but not the prompt brief: `SubagentStart` briefs the worker instead |
+| `PreToolUse` `Agent` / `Task` | For a `swarm-*` agent: checks `max_agents` and the role's `count`, and reserves the slot. Over capacity, the spawn is denied with the reason. In `enforce` routing mode, routing still adds its prompt prefix, but not the prompt brief: `SubagentStart` briefs the worker instead. In `annotate` mode the prompt is left unchanged |
 | `PreToolUse` `em_swarm` | Drops any `caller_*` fields the model passed and stamps the call with the real caller from the hook payload: main session or subagent, `agent_id`, `agent_type` and `session_id`, signed with a per-machine key (`~/.eminiar/swarm.key`). The tool trusts only stamps that verify, so nobody can pose as the coordinator or another worker; an unstamped call can only `list`, `status` and `read`. Never routed or annotated |
 | `SubagentStart` | Registers the worker in its run and injects the worker brief: goal, blackboard, memories, history and hot files for its scope. The worker claims the `task #N` its spawn prompt names itself, because parallel spawns of one role cannot be told apart here |
 | `PostToolUse` / `PostToolUseFailure` | Counts the worker's tool calls and errors, and adds them to the run's activity feed |
@@ -147,6 +146,9 @@ the payload when Cursor runs a Claude Code hook through its third-party import.
 | `afterAgentResponse` | `Stop` | Cursor's `stop` carries no text; this one carries the reply that `Stop` classifies |
 | `subagentStop`, `preCompact`, `sessionEnd` | same | Observational |
 
+`src/hooks/cursor.ts` also translates `afterFileEdit` (as a `PostToolUse` for `Edit`), but the
+installer does not subscribe eminiar to that event, so it never runs.
+
 Parked context is kept per session for ten minutes and delivered once. Two safety rules carry
 over: a hook never exits non-zero, and `enforce` routing denies a call only when Cursor has the
 eminiar MCP server in `~/.cursor/mcp.json` and a server runs for the project. Otherwise the call
@@ -169,21 +171,30 @@ Routing decides what happens when Claude calls a native tool that an `em_*` tool
 | `Grep` | `em_execute` | Content-mode grep without a `head_limit` for anything else |
 | `WebFetch` | `em_fetch_and_index` / `em_docs` | Always. Names the docs source if the site is already indexed |
 | `WebSearch` | `em_docs` | When documentation sources exist (annotation only) |
-| `Agent`, `Task` | — | Adds eminiar guidance to the subagent prompt and brief (swarm workers get the guidance only; their brief comes from `SubagentStart`) |
+| `Agent`, `Task` | — | `enforce`: adds eminiar guidance and the project brief (with memories and doc pages for the task) to the subagent prompt; swarm workers get the guidance only, their brief comes from `SubagentStart`. `annotate`: the prompt is unchanged, and the brief goes to the main session as context, not to the subagent. `off`: nothing |
+
+A `Grep` with a `head_limit` is never denied: for a symbol the graph defines it is annotated like
+a files-only grep, and otherwise it is left alone.
 
 Set the mode with `routing.mode` in `eminiar.config.json`:
 
 | Mode | Behaviour |
 |---|---|
-| `auto` (default) | `annotate` while the context-mode plugin is installed, otherwise `enforce` |
+| `auto` (default) | `annotate` while the context-mode plugin is installed, otherwise `enforce`. With `routing.deferToContextMode` on, `Bash`, `Read`, `Grep` and `WebFetch` get no routing hint while it is installed (see below) |
 | `enforce` | Denies the native call and tells Claude which `em_*` tool to use |
 | `annotate` | Allows the call and adds a hint |
 | `off` | No routing hints |
 
+While the context-mode plugin is installed and `routing.deferToContextMode` is `true` (the default),
+every mode except `off` stops suggesting `em_*` tools for `Bash`, `Read`, `Grep` and `WebFetch`,
+because context-mode already routes them. eminiar still adds the hints only it has: symbol matches,
+coverage warnings and file memos.
+
 **Bash is judged one simple command at a time.** A line is split at `;`, `&&`, `||` and
 newlines (heredoc bodies and quoted text are skipped), and each part is classified on its own, so
-`cd src && npm test` is heavy because of `npm test`, and the denial names that part. Output that
-is bounded by construction stays native:
+`cd src && npm test` is heavy because of `npm test`, and the denial names that part. One
+exception: if any part changes something (last item below), the whole line stays native, so
+`npm test && git commit` is not routed. Output that is bounded by construction stays native:
 
 - a trailing `| head -40`, `| tail -5` or `| wc -l` (up to 400 lines);
 - `head` / `tail` of a file, a `sed -n 'A,Bp'` range, `du -s`, `grep -l` / `-c`, `git log -1`;
@@ -205,9 +216,10 @@ is bounded by construction stays native:
   may change something, so only known filters after the first stage, and a known read-only
   source for a pipe that is routed for its filter, are sent to `em_execute`.
 
-Every routing decision is recorded as a `routing` session event: `em_stats` reports how many
-native calls were denied or annotated per tool, which `em_*` tool they were sent to and which
-rule did it, and `~/.eminiar/hook.log` has one line per denial.
+Routing decisions are recorded as `routing` session events, except in `off` mode and for the
+calls left to context-mode. `em_stats` reports totals, not single decisions: how many native
+calls were denied or annotated per tool, which `em_*` tool they were sent to and which rule did
+it. `~/.eminiar/hook.log` has one line per denial.
 
 **Safety rule:** `enforce` denies a call only while an eminiar MCP server runs for the project.
 The server writes a pid marker under `~/.eminiar/projects/<id>/servers/`. With no server, the
@@ -217,8 +229,10 @@ outside the project, Claude Code's own saved tool outputs among them, or one a `
 `ask` rule matches): the native `Read` goes ahead under Claude Code's own permission check. A
 `git log` that `em_history` cannot answer is judged like any other command.
 
-**Project knowledge is not routing.** Memories, fix history, fan-in and doc notes are attached
-in every mode, including `off`. Every such decision is recorded, fired or quiet; `em_stats` and
+**Project knowledge is not routing.** Memories, fix history, fan-in and doc notes for files,
+commits and web calls are attached in every mode, including `off`. The subagent brief is the
+exception: it follows the routing mode (see `Agent`, `Task` above). Every recall decision is
+recorded, fired or quiet; `em_stats` and
 `eminiar recall --explain` show the hit rate and the reasons (see
 [Memory and recall](memory-and-recall.md#rules-that-keep-recall-useful)).
 
@@ -228,7 +242,8 @@ in every mode, including `off`. Every such decision is recorded, fired or quiet;
 root.
 
 - **Languages:** shell and JavaScript/TypeScript always. Python, Ruby, Go, PHP, Perl, R,
-  Elixir, Rust and C# when their tools are installed. JavaScript and TypeScript snippets run
+  Elixir and Rust when their tools are installed, and C# when `dotnet-script` is installed.
+  JavaScript and TypeScript snippets run
   as ES modules; a snippet that calls `require(...)` gets one that resolves packages and
   relative paths from the project root, as a script of the project would.
 - **Output:** output over `sandbox.indexThreshold` (5 KB) is indexed. Claude gets back only the
@@ -293,24 +308,26 @@ Each chunk has a `source`, for example `memory`, `git`, `docs:<name>` or a sandb
 
 ## Session continuity
 
-The capture hooks sort session events into 27 categories with four priority levels:
+The capture hooks sort session events into 28 categories with four priority levels:
 
 | Priority | Categories |
 |---|---|
 | P1 | files, tasks, plans, rules, user prompt |
 | P2 | decisions, git, errors and their resolutions, constraints, blockers, rejected approaches, environment, agent findings, iteration loops, assistant summaries |
 | P3 | latency, MCP tools, subagents, skills, external references, role |
-| P4 | intent, data, tool calls, session start, recall decisions |
+| P4 | intent, data, tool calls, session start, recall decisions, routing decisions |
 
 Before `/compact`, eminiar writes a **Session Guide** of 2 KB or less: P1 always, then P2, P3 and
-P4 as space allows. When the session resumes, the guide is replayed. `em_search {sort:
-"timeline"}` finds the full history.
+P4 as space allows. Recall and routing decisions are never put in the guide. When the session
+resumes, the guide is replayed. `em_search {sort: "timeline"}` finds the full history.
 
 ## Storage
 
-Storage goes through one interface, `src/storage/adapter.ts`. The SQLite adapter
-(`better-sqlite3`) is the only module with SQL. A Postgres or libSQL adapter can be added later
-for a shared team knowledge base.
+Project storage goes through one interface, `src/storage/adapter.ts`, and the SQLite adapter
+(`better-sqlite3`, `src/storage/sqlite/`) holds the project database's SQL. A Postgres or libSQL
+adapter can be added later for a shared team knowledge base. The global database
+(`~/.eminiar/global.db`: lifetime statistics and the fetch cache) is not behind that interface:
+`src/stats/global.ts` opens it and runs its own SQL.
 
 ## Privacy and data
 
@@ -319,7 +336,13 @@ for a shared team knowledge base.
 | Location | Contents |
 |---|---|
 | `~/.eminiar/projects/<id>/eminiar.db` | Index, vectors, graph, history and sessions for one project |
-| `~/.eminiar/` (global DB) | Lifetime statistics and the fetch cache |
+| `~/.eminiar/global.db` | Lifetime statistics and the fetch cache |
+| `~/.eminiar/config.json` | Your personal configuration, including adjudicator consent |
+| `~/.eminiar/hook.log` | Hook diagnostics, including the first 120 characters of each command, path or URL that routing denied |
+| `~/.eminiar/swarm.key` | The per-machine key that signs `em_swarm` caller stamps |
+| `~/.eminiar/adjudicator.key` | Adjudicator provider keys, written by `eminiar adjudicator key set`, and by the hidden key prompt that the adjudicator step of `eminiar install` and `eminiar adjudicator enable` show in a terminal when the chosen provider needs a key and none is stored |
+| `~/.eminiar/tmp/` | Scratch files for sandbox snippets, deleted after each run |
+| `~/.eminiar/install.json`, `node-path`, `root-path` | The install record and the pinned Node.js and plugin paths |
 | `~/.eminiar/models/` | The embedding model |
 | `~/.eminiar/plugin/` | The stable plugin copy |
 | `<project>/.eminiar/memories/` | Memory files (commit them) |
@@ -358,5 +381,8 @@ VACUUM.
 searches; command output belongs to the `index` scope.
 
 eminiar uses the network only to download the embedding model, to fetch pages and documentation
-that you ask it to index, and to read package metadata from the npm, PyPI and Go registries. The
-dashboard accepts loopback connections only.
+that you ask it to index, to read package metadata from the npm, PyPI and Go registries, to
+download the eminiar package and its dependencies from the npm registry (`install`, and
+`eminiar@latest` on `upgrade`), and, only when you turn on the adjudicator with a remote provider
+and consent, to send redacted prompt and task text to that provider. The dashboard accepts
+loopback connections only.

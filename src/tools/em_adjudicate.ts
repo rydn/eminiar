@@ -33,7 +33,7 @@ import { getStorage } from "../storage/index.js";
 import { capOutput } from "../swarm/format.js";
 import { formatUsd } from "../usage/pricing.js";
 import { parseSince } from "./em_usage.js";
-import { defineTool, errorResult, type ToolResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, type ToolResult, text } from "./types.js";
 
 export const ADJUDICATE_ACTIONS = ["score", "explain", "stats", "feedback"] as const;
 export const FEEDBACK_VALUES = ["good", "too_small", "too_big"] as const;
@@ -291,6 +291,7 @@ type Args = z.infer<z.ZodObject<typeof SCHEMA>>;
 
 export const emAdjudicate = defineTool({
   name: "em_adjudicate",
+  annotations: { ...LOCAL_WRITE, openWorldHint: true, idempotentHint: false },
   description:
     'The adjudicator (opt-in): score how complex a request or task is and which tool, Claude model size (Agent `model`: haiku|sonnet|opus|fable) and swarm role fit it. score {text} or {tasks:[{key,title,detail?,role?}]} returns one line per item with its decision id; explain {id} shows the full score tables, provider status, cost and outcome; stats {since} summarises decisions, follow rate and savings; feedback {id, outcome:"good"|"too_small"|"too_big", note?} teaches the learned bias.',
   schema: SCHEMA,

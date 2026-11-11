@@ -6,10 +6,11 @@ import { availableLanguages } from "../sandbox/languages.js";
 import { getCurrentSession } from "../session/current.js";
 import { liveServers } from "../session/server-alive.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, text } from "./types.js";
+import { defineTool, READ_ONLY, text } from "./types.js";
 
 export const emDoctor = defineTool({
   name: "em_doctor",
+  annotations: READ_ONLY,
   description:
     "Check eminiar's health: node version, data directory, SQLite FTS5, sqlite-vec, embedding model, project root resolution.",
   schema: {},

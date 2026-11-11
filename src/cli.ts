@@ -9,27 +9,29 @@ Usage: eminiar <command> [options]
 
 Setup
   install [--no-model] [--method plugin|settings] [--cursor] [--team] [--yes] [--force]
+          [--marketplace github:org/repo] [--statusline] [--node PATH]
           [--adjudicator[=heuristic|embedding|typesafe|groq|cerebras|ollama|lmstudio|llamacpp]]
           [--accept-remote]    Install into Claude Code; --cursor also registers with Cursor
                                (hooks, MCP server, skills under ~/.cursor). An interactive
                                install asks whether to turn on the adjudicator (default no)
   upgrade                      Update to the latest version and re-register
-  uninstall [--purge-data]     Remove from Claude Code and Cursor (data kept unless --purge-data)
+  uninstall [--purge-data] [--yes]   Remove from Claude Code and Cursor (data kept unless --purge-data)
   doctor [--json] [--fix]      Check installation health; --fix re-pins node/root and clears
                                Claude Code's cached launch failure
-  replace-context-mode [--yes] Remove the context-mode plugin after parity sign-off
+  replace-context-mode [--yes] [--revert-gateway]   Remove the context-mode plugin after parity
+                               sign-off; --revert-gateway restores the gateway it replaced
 
 Use
   index <path> [--source X] [--glob G ...]     Index files or a directory
   search "<q>" [--source X] [--code] [--timeline] [--lexical] [--limit N] [--json]
-  graph <impact|deps|dependents|neighbors|path> <node> [--to node] [--depth N]
-  graph <architecture|status|changes [ref]|find <q>|pattern '<json>'>
-  graph <hotspots|routes|dead_code|cycles|clusters|coupled|orphans|stats>
+  graph <impact|deps|dependents|neighbors|path> <node> [--to node] [--depth N] [--limit N]
+  graph <architecture|status|changes [ref]|find <q>|pattern '<json>'> [--limit N]
+  graph <hotspots|routes|dead_code|cycles|clusters|coupled|orphans|stats> [--limit N]
   reindex [--scope code|git|metrics|docs|memories|embeddings|all] [--full]
   docs discover [--dev] [--no-subprojects]       Find local docs and the libraries, services and APIs the project uses
   docs add [--pick recommended|local|service|infra|catalog|api|registry|all] [--name N] [--url U ...] [--path P]
            [--glob G ...] [--provider npm:x|pypi:x|go:x|env:X|image:x|api:host] [--depth N] [--max N] [--no-sync]
-  docs list | sync [name ...] [--force] | remove <name> | lookup "<q>" [--name N] | resolve <provider>
+  docs list | sync [name ...] [--force] | remove <name> | lookup "<q>" [--name N] [--limit N] | resolve <provider>
   stats [--lifetime]           Context savings, routing interceptions, how often recall fired
   usage [summary|daily|weekly|monthly|models|session|sessions|blocks|turns|tools|insights|savings]
         [--since 30d] [--session ID] [--limit N] [--json] [--csv]   Tokens, cache, cost and insights
@@ -40,10 +42,10 @@ Use
   recall --replay [--limit N] [--since 30d]    Re-run recall over past prompts: hit rate, misses
   purge <index|sessions|graph|memories|usage|adjudicator|all> --yes
   ui [--port 7331] [--no-open] Web dashboard: stats, memories, graph, search, sessions, actions
-                               (alias: serve)
+                               (opens the browser; "serve" is the same server and opens it only with --open)
   statusline                   Claude Code statusLine command (reads JSON on stdin)
   hook [--event E] [--client claude|cursor]   Run the hook handler manually (reads JSON on stdin)
-  version | help
+  version | -v | help
 
 Adjudicator (opt-in: scores each request, suggests the tool, Claude model size and agent role)
   adjudicator status [--json]  On/off, configured vs effective provider, key, consent, health
@@ -75,6 +77,13 @@ Playbooks (stored recurring tasks; eminiar never runs or schedules them)
 `;
 
 type Command = (args: string[]) => Promise<number>;
+
+/** A positive whole number from a flag value, undefined for anything else. */
+function positiveInt(v: unknown): number | undefined {
+  if (typeof v !== "string" || !/^\d+$/.test(v)) return undefined;
+  const n = Number(v);
+  return n > 0 ? n : undefined;
+}
 
 function text(r: { content: Array<{ text: string }> }): string {
   return r.content.map((c) => c.text).join("\n");
@@ -206,6 +215,14 @@ const commands: Record<string, Command> = {
       console.error('usage: eminiar search "<query>"');
       return 2;
     }
+    let limit: number | undefined;
+    if (values.limit !== undefined) {
+      limit = positiveInt(values.limit);
+      if (limit === undefined) {
+        console.error("usage: --limit takes a positive whole number");
+        return 2;
+      }
+    }
     const ctx = getContext();
     const { getStorage } = await import("./storage/index.js");
     const { search } = await import("./search/pipeline.js");
@@ -214,7 +231,7 @@ const commands: Record<string, Command> = {
     const db = getStorage(ctx);
     const vectorSearch = values.lexical ? undefined : await vectorRanker(ctx, db);
     const r = await search(db, positionals.join(" "), {
-      limit: values.limit ? Number(values.limit) : 5,
+      limit: limit ?? ctx.config.search.defaultLimit,
       sort: values.timeline ? "timeline" : "relevance",
       mode: values.lexical ? "lexical" : "hybrid",
       vectorSearch,
@@ -237,7 +254,7 @@ const commands: Record<string, Command> = {
           2,
         ),
       );
-    else console.log(formatResults([r], 4000));
+    else console.log(formatResults([r], ctx.config.search.defaultMaxTokens));
     return 0;
   },
 
@@ -249,6 +266,13 @@ const commands: Record<string, Command> = {
       strict: false,
     });
     const [sub = "stats", node] = positionals;
+    if (
+      (values.limit !== undefined && positiveInt(values.limit) === undefined) ||
+      (values.depth !== undefined && positiveInt(values.depth) === undefined)
+    ) {
+      console.error("usage: --limit and --depth take a positive whole number");
+      return 2;
+    }
     const { emGraphImpact, emGraphQuery } = await import("./tools/em_graph.js");
     const ctx = getContext();
     const limit = values.limit ? Number(values.limit) : undefined;
@@ -267,6 +291,10 @@ const commands: Record<string, Command> = {
     if (presets.includes(sub)) {
       r = await emGraphQuery.handler({ preset: sub as "hotspots", limit }, ctx);
     } else if (sub === "find") {
+      if (!node) {
+        console.error('usage: eminiar graph find "<query>"');
+        return 2;
+      }
       r = await emGraphQuery.handler({ query: node, limit }, ctx);
     } else if (sub === "pattern") {
       if (!node) {
@@ -275,7 +303,14 @@ const commands: Record<string, Command> = {
         );
         return 2;
       }
-      r = await emGraphQuery.handler({ pattern: JSON.parse(node), limit }, ctx);
+      let pattern: unknown;
+      try {
+        pattern = JSON.parse(node);
+      } catch (err) {
+        console.error(`graph pattern: the pattern is not valid JSON (${(err as Error).message})`);
+        return 2;
+      }
+      r = await emGraphQuery.handler({ pattern: pattern as never, limit }, ctx);
     } else if (sub === "changes") {
       const { emGraphChanges } = await import("./tools/em_graph_changes.js");
       r = await emGraphChanges.handler({ ref: node, limit }, ctx);
@@ -309,6 +344,11 @@ const commands: Record<string, Command> = {
       options: { scope: { type: "string" }, full: { type: "boolean" } },
       strict: false,
     });
+    const scopes = ["code", "git", "metrics", "docs", "memories", "embeddings", "all"];
+    if (values.scope !== undefined && !scopes.includes(String(values.scope))) {
+      console.error(`usage: eminiar reindex [--scope ${scopes.join("|")}] [--full]`);
+      return 2;
+    }
     const { emReindex } = await import("./tools/em_graph.js");
     const r = await emReindex.handler(
       { scope: (values.scope as "all") ?? "all", full: !!values.full },
@@ -402,6 +442,10 @@ const commands: Record<string, Command> = {
     const [sub = "summary"] = positionals;
     const ctx = getContext();
     if (sub === "ingest") {
+      if (!ctx.config.usage.enabled) {
+        console.error("usage tracking is off (usage.enabled is false); nothing was read");
+        return 0;
+      }
       const { getStorage } = await import("./storage/index.js");
       const { ingestProject } = await import("./usage/ingest.js");
       const r = ingestProject(getStorage(ctx), ctx.root, { overrides: ctx.config.usage.pricing });
@@ -543,7 +587,6 @@ const commands: Record<string, Command> = {
       args,
       options: {
         port: { type: "string" },
-        open: { type: "boolean" },
         "no-open": { type: "boolean" },
       },
       strict: false,
@@ -647,7 +690,12 @@ const run = commands[cmd] ?? (cmd === "--version" || cmd === "-v" ? commands.ver
 let code: number;
 // Commands parse with strict: false, so `--help` would otherwise be ignored and
 // `npx eminiar install --help` would start installing.
-if (cmd === "--help" || cmd === "-h" || rest.includes("--help")) {
+if (rest.includes("--help") && (cmd === "adjudicator" || cmd === "swarm")) {
+  // These two have their own subcommand help.
+  if (cmd === "swarm") console.log((await import("./swarm/cli.js")).SWARM_USAGE);
+  else console.log((await import("./adjudicator/cli.js")).ADJUDICATOR_USAGE);
+  code = 0;
+} else if (cmd === "--help" || cmd === "-h" || rest.includes("--help")) {
   console.log(USAGE);
   code = 0;
 } else if (!run) {

@@ -9,6 +9,7 @@ import {
   PROJECT_RELATIVE_PATH_RE,
   parseJsonSafe,
 } from "../../src/config.js";
+import { frozenDefaults } from "../../src/install/install.js";
 import { findProjectRoot, projectId } from "../../src/project.js";
 
 describe("config", () => {
@@ -43,11 +44,211 @@ describe("config", () => {
   });
 
   it("falls back to defaults on invalid config", () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     writeFileSync(
       join(root, "eminiar.config.json"),
       JSON.stringify({ routing: { mode: "bogus" } }),
     );
     expect(loadConfig(root).routing.mode).toBe("auto");
+    vi.restoreAllMocks();
+  });
+});
+
+describe("config layering: one bad layer, additive lists, unknown keys", () => {
+  let home: string;
+  let root: string;
+  let err: { mock: { calls: unknown[][] } };
+  const stderr = () => err.mock.calls.map((a) => String(a[0])).join("");
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "em-home-"));
+    root = mkdtempSync(join(tmpdir(), "em-root-"));
+    process.env.EMINIAR_HOME = home;
+    err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+  afterEach(() => {
+    delete process.env.EMINIAR_HOME;
+    delete process.env.EMINIAR_ROUTING_MODE;
+    vi.restoreAllMocks();
+  });
+  const personal = (o: unknown) => writeFileSync(join(home, "config.json"), JSON.stringify(o));
+  const project = (o: unknown) =>
+    writeFileSync(join(root, "eminiar.config.json"), JSON.stringify(o));
+
+  it("a bad personal value keeps the team's routing.mode enforce", () => {
+    project({ routing: { mode: "enforce" }, search: { defaultLimit: 9 } });
+    personal({ recall: { maxMemories: 50 }, sandbox: { timeoutMs: 5000 } });
+    const c = loadConfig(root);
+    expect([c.routing.mode, c.search.defaultLimit]).toEqual(["enforce", 9]);
+    // The whole personal layer goes, its valid keys included; the bad value never applies.
+    expect([c.recall.maxMemories, c.sandbox.timeoutMs]).toEqual([3, 60_000]);
+    expect(stderr()).toContain(`invalid config in ${join(home, "config.json")}, ignoring it`);
+    expect(stderr()).not.toContain("using defaults");
+  });
+
+  it("a bad project value drops only the project file, keeping the personal one", () => {
+    personal({ routing: { mode: "enforce" }, recall: { maxDocs: 4 } });
+    project({ routing: { mode: "annotate" }, recall: { maxMemories: 11 } });
+    const c = loadConfig(root);
+    expect([c.routing.mode, c.recall.maxDocs, c.recall.maxMemories]).toEqual(["enforce", 4, 3]);
+    expect(stderr()).toContain("invalid config in eminiar.config.json, ignoring it");
+  });
+
+  it("env overrides still apply over a dropped layer", () => {
+    project({ docs: { crawl: { depth: 9 } } });
+    process.env.EMINIAR_ROUTING_MODE = "off";
+    expect(loadConfig(root).routing.mode).toBe("off");
+  });
+
+  it("two bad layers fall back to the defaults", () => {
+    personal({ recall: { repeatAfter: 5000 } });
+    project({ docs: { crawl: { maxPages: 500 } } });
+    const c = loadConfig(root);
+    expect([c.recall.repeatAfter, c.docs.crawl.maxPages]).toEqual([10, 8]);
+    expect(stderr()).toContain("invalid config in eminiar.config.json");
+  });
+
+  it("graph.exclude adds to the defaults and to the personal list", () => {
+    const defaults = loadConfig(root).graph.exclude;
+    expect(defaults).toContain("**/node_modules/**");
+    personal({ graph: { exclude: ["**/tmp/**"] } });
+    project({ graph: { exclude: ["**/generated/**", "**/node_modules/**"] } });
+    const ex = loadConfig(root).graph.exclude;
+    expect(ex).toEqual([...defaults, "**/tmp/**", "**/generated/**"]);
+  });
+
+  it('graph.exclude "!entry" removes a built-in default', () => {
+    project({ graph: { exclude: ["!**/vendor/**", "!**/not-there/**"] } });
+    let ex = loadConfig(root).graph.exclude;
+    expect(ex).toContain("**/node_modules/**");
+    expect(ex).not.toContain("**/vendor/**");
+    expect(ex.some((e) => e.startsWith("!"))).toBe(false);
+    personal({ graph: { exclude: ["!**/dist/**"] } });
+    ex = loadConfig(root).graph.exclude;
+    expect(ex).not.toContain("**/dist/**");
+    expect(ex).not.toContain("**/vendor/**");
+  });
+
+  it('a project "!entry" cannot take back a personal graph.exclude entry', () => {
+    personal({ graph: { exclude: ["**/secret-dir/**"] } });
+    project({ graph: { exclude: ["!**/secret-dir/**", "!**/build/**"] } });
+    const ex = loadConfig(root).graph.exclude;
+    expect(ex).toContain("**/secret-dir/**");
+    // A default nobody listed is still the project's to remove.
+    expect(ex).not.toContain("**/build/**");
+  });
+
+  it('a project "!entry" removes a default that an older install froze into the personal file', () => {
+    // Every install before this change wrote frozenDefaults() to ~/.eminiar/config.json.
+    personal(frozenDefaults());
+    project({ graph: { exclude: ["!**/vendor/**"] } });
+    const ex = loadConfig(root).graph.exclude;
+    expect(ex).not.toContain("**/vendor/**");
+    expect(ex).toContain("**/node_modules/**");
+  });
+
+  it('a personal entry that repeats a default is removable by a project "!", others are not', () => {
+    personal({ graph: { exclude: ["**/private-client/**", "**/vendor/**"] } });
+    project({ graph: { exclude: ["!**/private-client/**", "!**/vendor/**"] } });
+    const ex = loadConfig(root).graph.exclude;
+    expect(ex).toContain("**/private-client/**");
+    expect(ex).not.toContain("**/vendor/**");
+  });
+
+  it("a project file adds deny rules and disabled languages but cannot remove personal ones", () => {
+    personal({
+      permissions: { extraDeny: ["Bash(rm -rf *)"] },
+      sandbox: { disabledLanguages: ["javascript"] },
+    });
+    project({
+      permissions: { extraDeny: [] },
+      sandbox: { disabledLanguages: ["!javascript", "php"] },
+    });
+    let c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(rm -rf *)"]);
+    // "!" is not a removal in the security lists: it stays a (harmless) literal entry.
+    expect(c.sandbox.disabledLanguages).toEqual(["javascript", "!javascript", "php"]);
+    project({ permissions: { extraDeny: ["Bash(curl *)", "Bash(rm -rf *)"] } });
+    c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(rm -rf *)", "Bash(curl *)"]);
+  });
+
+  it("a non-list value in an additive list is still refused, for that layer only", () => {
+    personal({ routing: { mode: "enforce" }, graph: { exclude: ["**/tmp/**"] } });
+    project({ graph: { exclude: "**/generated/**" } });
+    const c = loadConfig(root);
+    expect(c.routing.mode).toBe("enforce");
+    expect(c.graph.exclude).toContain("**/tmp/**");
+    expect(c.graph.exclude).not.toContain("**/generated/**");
+    expect(stderr()).toContain("invalid config in eminiar.config.json");
+  });
+
+  it("a non-list in an earlier layer is refused, not replaced by a later list", () => {
+    const defaults = loadConfig(root).graph.exclude;
+    personal({
+      routing: { mode: "enforce" },
+      graph: { exclude: "**/x/**" },
+      permissions: { extraDeny: "Bash(rm *)" },
+    });
+    project({ graph: { exclude: ["**/gen/**"] }, permissions: { extraDeny: [] } });
+    const c = loadConfig(root);
+    expect(c.graph.exclude).toEqual([...defaults, "**/gen/**"]);
+    expect(c.permissions.extraDeny).toEqual([]);
+    // The personal file is invalid as a whole, so its routing.mode goes too, with a note.
+    expect(c.routing.mode).toBe("auto");
+    expect(stderr()).toContain(`invalid config in ${join(home, "config.json")}, ignoring it`);
+  });
+
+  it("a section that is not an object is refused, not spread into the merge", () => {
+    personal({ permissions: { extraDeny: ["Bash(curl *)"] } });
+    project({ routing: { mode: "enforce" }, permissions: "deny-all" });
+    const c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(curl *)"]);
+    expect(c.routing.mode).toBe("auto");
+    expect(stderr()).toContain("invalid config in eminiar.config.json, ignoring it");
+  });
+
+  it("project weights.features that pass alone but overflow on merge cost only that field", () => {
+    personal({
+      permissions: { extraDeny: ["Bash(curl *)"] },
+      routing: { mode: "enforce" },
+      adjudicator: { weights: { features: { design: 2 } } },
+    });
+    const features = Object.fromEntries(Array.from({ length: 64 }, (_, i) => [`f${i}`, 1]));
+    project({ search: { defaultLimit: 9 }, adjudicator: { weights: { features } } });
+    const c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(curl *)"]);
+    expect(c.routing.mode).toBe("enforce");
+    expect(c.adjudicator.weights.features).toEqual({ design: 2 });
+    expect(c.search.defaultLimit).toBe(9);
+    expect(stderr()).toContain("ignoring adjudicator.weights.features in eminiar.config.json");
+    expect(stderr()).not.toContain("using defaults");
+  });
+
+  it("project weights.tierCenters that overflow on merge cost only that field", () => {
+    personal({
+      permissions: { extraDeny: ["Bash(curl *)"] },
+      routing: { mode: "enforce" },
+      adjudicator: { weights: { tierCenters: { haiku: 1 } } },
+    });
+    const tierCenters = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`t${i}`, i]));
+    project({ adjudicator: { weights: { tierCenters, lowConfidence: 0.3 } } });
+    const c = loadConfig(root);
+    expect(c.permissions.extraDeny).toEqual(["Bash(curl *)"]);
+    expect(c.routing.mode).toBe("enforce");
+    expect(c.adjudicator.weights.tierCenters.haiku).toBe(1);
+    expect(c.adjudicator.weights.tierCenters.t0).toBeUndefined();
+    expect(c.adjudicator.weights.lowConfidence).toBe(0.3);
+    expect(stderr()).toContain("ignoring adjudicator.weights.tierCenters in eminiar.config.json");
+    expect(stderr()).not.toContain("using defaults");
+  });
+
+  it("unknown keys are ignored and never invalidate a layer", () => {
+    personal({ routing: { mode: "enforce" }, recall: { maxMemory: 5 }, nope: { x: 1 } });
+    const c = loadConfig(root) as unknown as Record<string, Record<string, unknown>>;
+    expect(c.routing?.mode).toBe("enforce");
+    expect(c.recall?.maxMemory).toBeUndefined();
+    expect(c.nope).toBeUndefined();
+    expect(stderr()).toBe("");
   });
 });
 

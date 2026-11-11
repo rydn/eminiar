@@ -4,7 +4,7 @@ import { formatResults } from "../search/format.js";
 import { contentTypeFilter, type SearchResponse, search } from "../search/pipeline.js";
 import { recordStat } from "../stats/record.js";
 import { getStorage } from "../storage/index.js";
-import { defineTool, errorResult, text } from "./types.js";
+import { defineTool, errorResult, READ_ONLY, text } from "./types.js";
 
 /** `docs:*` selects every source with that prefix; anything else is an exact tag (or list). */
 export function sourceFilter(source: string | string[] | undefined): {
@@ -18,6 +18,7 @@ export function sourceFilter(source: string | string[] | undefined): {
 
 export const emSearch = defineTool({
   name: "em_search",
+  annotations: READ_ONLY,
   description:
     'Search everything eminiar has indexed: sandbox outputs, files, fetched pages, session memory, memories, commit messages (source git) and code (chunks named by symbol, e.g. `src/auth.ts > Session.refresh`). Reach for it before Grep or Bash when looking for where something lives, what an earlier command printed, or what a past session found: `source: "code"` answers code questions by symbol, `sort: timeline` orders by recency (use after a resume), `mode: regex` scans indexed content with a JS regular expression and returns the matching lines with context (for ad-hoc greps over files not indexed, use em_execute with rg). Pass several queries at once — the round trip is paid once. Hybrid BM25 (porter + trigram) with typo correction.',
   schema: {

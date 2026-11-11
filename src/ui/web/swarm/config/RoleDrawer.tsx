@@ -125,6 +125,7 @@ const LOCKABLE = [
   "count",
   "max_turns",
   "isolation",
+  "tools_profile",
   "tools",
   "disallowed_tools",
   "skills",
@@ -411,6 +412,18 @@ export function RoleDrawer({
             disabled={lockedAt("isolation")}
             label="worktree"
             onChange={(on) => set("isolation", on ? "worktree" : undefined)}
+          />
+        </Field>
+        <Field
+          label="Read-only profile"
+          hint="allowlist read-only tools only: no Edit, Write or Bash"
+          error={err("tools_profile")}
+        >
+          <Switch
+            checked={role.tools_profile === "readonly"}
+            disabled={lockedAt("tools_profile")}
+            label="readonly"
+            onChange={(on) => set("tools_profile", on ? "readonly" : undefined)}
           />
         </Field>
       </div>
