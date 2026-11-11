@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -16,6 +16,7 @@ import type { ProjectContext } from "../context.js";
 import { within } from "../docs/manifest.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { oneLine, serializePlaybookFile } from "./frontmatter.js";
+import { gitIgnoredFor } from "./git.js";
 import { fillPrompt, type PlaybookFile, read } from "./store.js";
 
 /**
@@ -229,37 +230,17 @@ function resolveTarget(
 /**
  * A private playbook must not land in a folder that is committed. git decides (`check-ignore`
  * knows later negations, nested ignore files and the global excludes); anything but "ignored" -
- * not ignored, not a repository, git missing, a timeout - refuses.
+ * not ignored, not a repository, git missing, a timeout - refuses. Git is asked from the folder
+ * that will hold the file, so a nested repository or worktree answers for its own files. With
+ * the index: a tracked SKILL.md is not ignored.
  */
 function assertGitIgnored(ctx: ProjectContext, path: string, name: string): void {
-  const root = resolve(ctx.root);
-  let realRoot = root;
-  try {
-    realRoot = realpathSync.native(root);
-  } catch {
-    /* keep root */
-  }
-  // name the file by where it really lands (the root may be spelled through a symlink)
-  let probe = path;
-  while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
-  const real = join(realpathSync.native(probe), relative(probe, path));
-  const rel = relative(realRoot, real);
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
-  ) as NodeJS.ProcessEnv;
+  if (gitIgnoredFor(ctx.root, path) === "ignored") return;
+  const rel = relative(resolve(ctx.root), path);
   const why = `playbook ${name} is private and ${rel} is not git-ignored, so the skill could be committed`;
-  try {
-    execFileSync("git", ["check-ignore", "-q", "--", rel], {
-      cwd: root,
-      env,
-      stdio: "ignore",
-      timeout: 5000,
-    });
-  } catch {
-    throw new Error(
-      `refusing to export: ${why} (or git could not say). Add the folder to .gitignore, or make the playbook public; the CLI can override with --allow-private`,
-    );
-  }
+  throw new Error(
+    `refusing to export: ${why} (or git could not say). Add the folder to .gitignore, or make the playbook public; the CLI can override with --allow-private`,
+  );
 }
 
 /** True when the marker is the exact line eminiar writes: first body line after the front matter. */
@@ -316,9 +297,12 @@ export function exportSkill(
   mkdirSync(dir, { recursive: true });
   if (dirname(realpathSync.native(dir)) !== realpathSync.native(target))
     throw new Error(`refusing to write into ${dir}: it resolves outside the target directory`);
+  // A private playbook stays its owner's on disk too, as in the store: a 0700 folder (an
+  // existing looser one is tightened) and a 0600 file (the rename replaces an older 0644 one).
+  if (file.private && (lstatSync(dir).mode & 0o077) !== 0) chmodSync(dir, 0o700);
   const tmp = `${path}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, content, { flag: "wx" });
+    writeFileSync(tmp, content, { flag: "wx", ...(file.private ? { mode: 0o600 } : {}) });
     renameSync(tmp, path);
   } catch (e) {
     try {
