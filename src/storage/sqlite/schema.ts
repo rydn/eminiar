@@ -13,6 +13,8 @@ import type Database from "better-sqlite3";
  * versions above schema_version run, so when two branches pick the same number, whichever
  * lands later takes the next free version and keeps its DDL IF NOT EXISTS; a heal at open
  * (healPlaybookTables) covers databases that already ran the other branch's number.
+ * tests/unit/schema-migrations.test.ts also refuses a version in RESERVED_SCHEMA_VERSIONS or
+ * below the highest released one.
  */
 export interface Migration {
   version: number;
@@ -707,6 +709,19 @@ CREATE INDEX IF NOT EXISTS adjudicator_exchanges_ts ON adjudicator_exchanges(ts)
 ];
 
 /**
+ * Migration numbers that no entry in `migrations` may use, ever.
+ *
+ * 10: feature/jev-integrations' v10 (decision_calls, decision_cache) ran on development
+ * databases, and the playbooks migration took v11 instead. Every database that took v11 first
+ * is at schema_version 11, and the runner only applies versions above it, so a v10 entry
+ * added later would be skipped there without an error. Jev lands as the next free version
+ * (its DDL is IF NOT EXISTS, so its own databases at 10 rerun it harmlessly).
+ *
+ * tests/unit/schema-migrations.test.ts fails on a migration numbered here.
+ */
+export const RESERVED_SCHEMA_VERSIONS: readonly number[] = [10];
+
+/**
  * Columns added to the v8 tables after v8 first ran on development databases (v8 was not yet
  * released, so the migration was edited in place). Those databases are already at version 8
  * and never rerun it; healAdjudicatorColumns adds what they lack. A released change to these
@@ -761,6 +776,9 @@ export function healAdjudicatorColumns(db: Database.Database): string[] {
   return added;
 }
 
+/** Longest wait for the write lock in healPlaybookTables, in ms. */
+export const HEAL_LOCK_WAIT_MS = 25;
+
 const PLAYBOOK_OBJECTS_SQL = `SELECT count(*) AS n FROM sqlite_master WHERE type IN ('table','index') AND name IN (${PLAYBOOK_OBJECTS.map((n) => `'${n}'`).join(",")})`;
 
 /**
@@ -769,12 +787,33 @@ const PLAYBOOK_OBJECTS_SQL = `SELECT count(*) AS n FROM sqlite_master WHERE type
  * and the runner only applies versions above the stored one, so a database can sit at v10 or
  * later without these tables. Costs one sqlite_master count when they exist; returns true when
  * it created something.
+ *
+ * The DDL runs in one BEGIN IMMEDIATE that waits at most `lockWaitMs` (HEAL_LOCK_WAIT_MS) for
+ * the write lock, not the connection's busy timeout: when another process holds the lock, the
+ * heal returns false at once and the next open retries, so an open never stalls on it.
  */
-export function healPlaybookTables(db: Database.Database): boolean {
+export function healPlaybookTables(
+  db: Database.Database,
+  lockWaitMs: number = HEAL_LOCK_WAIT_MS,
+): boolean {
   const row = db.prepare(PLAYBOOK_OBJECTS_SQL).get() as { n: number };
   if (row.n === PLAYBOOK_OBJECTS.length) return false;
-  db.exec(PLAYBOOKS_SQL);
-  return true;
+  if (db.inTransaction) {
+    db.exec(PLAYBOOKS_SQL);
+    return true;
+  }
+  const prev = Number(db.pragma("busy_timeout", { simple: true }));
+  const next = Math.max(0, Math.min(Number.isFinite(prev) ? prev : 0, Math.floor(lockWaitMs)));
+  if (next !== prev) db.pragma(`busy_timeout = ${next}`);
+  try {
+    db.transaction(() => db.exec(PLAYBOOKS_SQL)).immediate();
+    return true;
+  } catch (e) {
+    if (String((e as { code?: unknown }).code ?? "").startsWith("SQLITE_BUSY")) return false;
+    throw e;
+  } finally {
+    if (next !== prev) db.pragma(`busy_timeout = ${prev}`);
+  }
 }
 
 /** True when every named table exists. */
