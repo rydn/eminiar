@@ -5,3 +5,4 @@ dist/
 coverage/
 *.log
 .eminiar-dev/
+.eminiar/playbooks-private/
