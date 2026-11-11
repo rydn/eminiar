@@ -1,0 +1,460 @@
+import { readFileSync } from "node:fs";
+import { parseArgs } from "node:util";
+import type { ProjectContext } from "../context.js";
+import type { StorageAdapter } from "../storage/adapter.js";
+import type { PlaybookParam } from "../storage/types.js";
+import { exportMarkdown, exportSkill, schedulePrompt } from "./export.js";
+import { scan } from "./extract.js";
+import {
+  assertCanScan,
+  closeRun,
+  fillPrompt,
+  list,
+  PlaybookGateError,
+  read,
+  reconcile,
+  recordRun,
+  remove,
+  rowParams,
+  rowTags,
+  runs,
+  write,
+} from "./store.js";
+
+/**
+ * `eminiar playbook <list|show|add|edit|rm|run|report|runs|export|scan|help>` (flags in
+ * PLAYBOOK_USAGE). Playbooks are stored recurring tasks; nothing here executes or schedules one.
+ * `run` prints the filled prompt and records a run.
+ * Kept out of src/cli.ts so it can be tested without process.exit. Returns the exit code.
+ */
+
+export interface CliIO {
+  out: (s: string) => void;
+  err: (s: string) => void;
+}
+
+const defaultIO: CliIO = {
+  out: (s) => console.log(s),
+  err: (s) => console.error(s),
+};
+
+export const PLAYBOOK_USAGE =
+  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | report <name> --status done|failed|skipped [--run ID] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR | --user] [--model-invocable] [--allow-private]] [--schedule] [--set k=v] | scan [--dry-run]> [--json]";
+
+async function storage(ctx: ProjectContext): Promise<StorageAdapter> {
+  const { getStorage } = await import("../storage/index.js");
+  return getStorage(ctx, { vectors: false });
+}
+
+function parseParams(specs: string[]): PlaybookParam[] {
+  return specs.map((s) => {
+    const i = s.indexOf("=");
+    return i < 0 ? { name: s.trim() } : { name: s.slice(0, i).trim(), default: s.slice(i + 1) };
+  });
+}
+
+/** A mistake in how the command was typed: exit code 2, like the other usage errors. */
+class UsageError extends Error {}
+
+/** `--tag a,b --tag c` is three tags, as in the dashboard. */
+const splitTags = (specs: string[]): string[] =>
+  specs
+    .flatMap((t) => t.split(","))
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+const REPORT_STATUSES = ["done", "failed", "skipped"];
+
+/** `schedule` takes a value for add and edit and is a plain switch for export. */
+function optionSpec(scheduleSwitch: boolean) {
+  return {
+    json: { type: "boolean" },
+    title: { type: "string" },
+    prompt: { type: "string" },
+    file: { type: "string" },
+    param: { type: "string", multiple: true },
+    set: { type: "string", multiple: true },
+    tag: { type: "string", multiple: true },
+    schedule: { type: scheduleSwitch ? "boolean" : "string" },
+    note: { type: "string" },
+    limit: { type: "string" },
+    status: { type: "string" },
+    run: { type: "string" },
+    private: { type: "boolean" },
+    replace: { type: "boolean" },
+    skill: { type: "boolean" },
+    "model-invocable": { type: "boolean" },
+    target: { type: "string" },
+    user: { type: "boolean" },
+    "allow-private": { type: "boolean" },
+    "dry-run": { type: "boolean" },
+  } as const;
+}
+
+function parseSets(specs: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const s of specs) {
+    const i = s.indexOf("=");
+    if (i <= 0) throw new UsageError(`--set expects name=value, got "${s}"`);
+    out[s.slice(0, i).trim()] = s.slice(i + 1);
+  }
+  return out;
+}
+
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(c as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+const when = (ms: number | null | undefined): string =>
+  ms ? new Date(ms).toISOString().slice(0, 16).replace("T", " ") : "-";
+
+export async function playbookCommand(
+  args: string[],
+  ctx: ProjectContext,
+  io: CliIO = defaultIO,
+  stdin: () => Promise<string> = readStdin,
+): Promise<number> {
+  // `--schedule` takes a value for add/edit but is a plain switch for export, so find the
+  // subcommand first (it need not come first: `--json export a --schedule`).
+  const exporting =
+    parseArgs({ args, options: optionSpec(true), allowPositionals: true, strict: false })
+      .positionals[0] === "export";
+  const spec = optionSpec(exporting);
+  const { values, positionals } = parseArgs({
+    args,
+    options: spec,
+    allowPositionals: true,
+    strict: false,
+  });
+  const [sub = "list", name] = positionals;
+  const json = !!values.json;
+  const unknown = Object.keys(values).find((k) => !(k in spec));
+  if (unknown) {
+    io.err(`unknown option --${unknown}\n${PLAYBOOK_USAGE}`);
+    return 2;
+  }
+  if (exporting && typeof values.schedule === "string") {
+    io.err("--schedule takes no value for export");
+    return 2;
+  }
+  const scheduleFlag = exporting && values.schedule === true;
+  for (const o of ["title", "prompt", "file", "note", "limit", "target", "status", "run"] as const)
+    if (values[o] === true) {
+      io.err(`--${o} needs a value`);
+      return 2;
+    }
+  if (!exporting && values.schedule === true) {
+    io.err("--schedule needs a value");
+    return 2;
+  }
+  const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const strs = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  const emit = (v: unknown) => io.out(JSON.stringify(v, null, 2));
+  let limit: number | undefined;
+  if (str(values.limit) !== undefined) {
+    limit = Number(values.limit);
+    if (!Number.isInteger(limit) || limit < 1) {
+      io.err("--limit needs a positive whole number");
+      return 2;
+    }
+  }
+  const needName = (): string | undefined => {
+    if (!name) io.err(`playbook ${sub} needs a name\n${PLAYBOOK_USAGE}`);
+    return name;
+  };
+
+  try {
+    const db = await storage(ctx);
+    switch (sub) {
+      case "list": {
+        reconcile(ctx, db);
+        const rows = list(ctx, db, { tag: splitTags(strs(values.tag))[0], limit });
+        if (json) {
+          emit(
+            rows.map((r) => ({
+              name: r.name,
+              title: r.title,
+              schedule: r.schedule,
+              tags: rowTags(r),
+              params: rowParams(r),
+              source: r.source,
+              private: !!r.private,
+              path: r.path,
+            })),
+          );
+          return 0;
+        }
+        if (!rows.length) {
+          io.out(
+            "no playbooks yet; add one with: eminiar playbook add <name> --title T --prompt P",
+          );
+          return 0;
+        }
+        for (const r of rows) {
+          const bits = [r.schedule, rowTags(r).join(","), r.private ? "private" : ""].filter(
+            Boolean,
+          );
+          io.out(`${r.name}  ${r.title}${bits.length ? `  [${bits.join(" | ")}]` : ""}`);
+        }
+        return 0;
+      }
+
+      case "show": {
+        if (!needName()) return 2;
+        reconcile(ctx, db);
+        const f = read(ctx, db, name as string);
+        if (!f) {
+          io.err(`no playbook named "${name}"`);
+          return 1;
+        }
+        if (json) {
+          const { row: _row, ...rest } = f;
+          emit(rest);
+          return 0;
+        }
+        io.out(
+          [
+            [
+              `${f.name}: ${f.title}`,
+              `path: ${f.path}${f.private ? " (private)" : ""}  source: ${f.source}`,
+              f.schedule ? `schedule: ${f.schedule} (a note; eminiar does not run it)` : "",
+              f.tags.length ? `tags: ${f.tags.join(", ")}` : "",
+              f.params.length
+                ? `params: ${f.params.map((p) => (p.default !== undefined ? `${p.name}=${p.default}` : p.name)).join(", ")}`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            "",
+            f.prompt,
+          ].join("\n"),
+        );
+        return 0;
+      }
+
+      case "add":
+      case "edit": {
+        if (!needName()) return 2;
+        const n = name as string;
+        reconcile(ctx, db);
+        const prev = sub === "edit" ? read(ctx, db, n) : undefined;
+        if (sub === "edit" && !prev) {
+          io.err(`no playbook named "${n}"`);
+          return 1;
+        }
+        let prompt = str(values.prompt);
+        if (prompt === undefined && str(values.file) !== undefined)
+          prompt = readFileSync(values.file as string, "utf8");
+        if (prompt === undefined && !prev) prompt = (await stdin()).trim() || undefined;
+        const title = str(values.title) ?? prev?.title;
+        if (!title || (prompt ?? prev?.prompt) === undefined) {
+          io.err(`playbook add needs --title and a prompt (--prompt, --file or stdin)`);
+          return 2;
+        }
+        const params = strs(values.param);
+        const tags = splitTags(strs(values.tag));
+        const r = write(ctx, db, {
+          name: n,
+          title,
+          prompt: (prompt ?? prev?.prompt) as string,
+          params: params.length ? parseParams(params) : prev?.params,
+          schedule: str(values.schedule) ?? prev?.schedule,
+          tags: tags.length ? tags : prev?.tags,
+          private: values.private === true ? true : prev?.private,
+          replace: sub === "edit" || values.replace === true,
+        });
+        if (json) emit({ name: r.name, path: r.path, created: r.created });
+        else io.out(`${r.created ? "added" : "updated"} ${r.name} (${r.path})`);
+        return 0;
+      }
+
+      case "rm": {
+        if (!needName()) return 2;
+        const gone = remove(ctx, db, name as string);
+        if (json) emit({ name, removed: gone });
+        else if (gone) io.out(`removed ${name}`);
+        else io.err(`no playbook named "${name}"`);
+        return gone ? 0 : 1;
+      }
+
+      case "run": {
+        if (!needName()) return 2;
+        reconcile(ctx, db);
+        const f = read(ctx, db, name as string);
+        if (!f) {
+          io.err(`no playbook named "${name}"`);
+          return 1;
+        }
+        const filled = fillPrompt(f, parseSets(strs(values.set)));
+        const missing = [...filled.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)].map(
+          (m) => m[1] as string,
+        );
+        let run: number | null = null;
+        try {
+          run = recordRun(ctx, db, {
+            playbook: f.name,
+            trigger: "cli",
+            status: "started",
+            note: str(values.note),
+          }).id;
+        } catch (e) {
+          // read-only playbooks still print the prompt, as the dashboard's copy does
+          if (!(e instanceof PlaybookGateError && e.key === "playbooks.adding")) throw e;
+          io.err(`run not recorded: ${e.message}`);
+        }
+        if (json) emit({ name: f.name, run, prompt: filled, unfilled: missing });
+        else {
+          io.out(filled);
+          if (missing.length)
+            io.err(
+              `unfilled parameters: ${[...new Set(missing)].join(", ")} (pass --set name=value)`,
+            );
+        }
+        return 0;
+      }
+
+      case "report": {
+        if (!needName()) return 2;
+        const status = str(values.status);
+        if (!status || !REPORT_STATUSES.includes(status)) {
+          io.err(`playbook report needs --status ${REPORT_STATUSES.join("|")}`);
+          return 2;
+        }
+        let runId: number | undefined;
+        if (str(values.run) !== undefined) {
+          runId = Number(values.run);
+          if (!Number.isInteger(runId) || runId < 1) {
+            io.err("--run needs a run id (a positive whole number)");
+            return 2;
+          }
+        }
+        reconcile(ctx, db);
+        // without --run: the newest run `playbook run` started here and nobody has closed yet
+        runId ??= runs(ctx, db, { playbook: name, limit: 1000 }).find(
+          (r) => r.status === "started" && r.trigger === "cli",
+        )?.id;
+        if (runId === undefined) {
+          io.err(`playbook ${name} has no started CLI run to report on; pass --run ID`);
+          return 1;
+        }
+        const { id } = closeRun(ctx, db, {
+          playbook: name as string,
+          runId,
+          status: status as "done" | "failed" | "skipped",
+          note: str(values.note),
+        });
+        if (json) emit({ name, run: id, status });
+        else io.out(`closed run ${id} of ${name} as ${status}`);
+        return 0;
+      }
+
+      case "export": {
+        if (!needName()) return 2;
+        const sets = parseSets(strs(values.set));
+        if (values.skill && scheduleFlag) {
+          io.err("choose one of --skill and --schedule");
+          return 2;
+        }
+        reconcile(ctx, db);
+        const n = name as string;
+        if (values.skill) {
+          if (values.user && values.target !== undefined) {
+            io.err("choose one of --user and --target");
+            return 2;
+          }
+          const r = exportSkill(ctx, db, n, {
+            targetDir: str(values.target),
+            userScope: !!values.user,
+            allowPrivate: !!values["allow-private"],
+            sideEffecting: !values["model-invocable"],
+            values: sets,
+          });
+          if (json)
+            emit({
+              name: r.name,
+              path: r.path,
+              created: r.created,
+              sideEffecting: r.sideEffecting,
+              escaped: r.escaped,
+            });
+          else {
+            io.out(`${r.created ? "wrote" : "updated"} skill ${r.name} at ${r.path}`);
+            if (r.escaped > 0)
+              io.out(
+                `escaped ${r.escaped} construct${r.escaped === 1 ? "" : "s"} Claude Code would run or substitute when the skill loads (!\`cmd\`, $ARGUMENTS, \${...})`,
+              );
+          }
+          return 0;
+        }
+        if (scheduleFlag) {
+          const t = schedulePrompt(ctx, db, n, sets);
+          if (json) emit({ name: n, prompt: t });
+          else io.out(t);
+          return 0;
+        }
+        const f = read(ctx, db, n);
+        if (!f) {
+          io.err(`no playbook named "${n}"`);
+          return 1;
+        }
+        const md = exportMarkdown(f);
+        if (json) emit({ name: f.name, markdown: md });
+        else io.out(md);
+        return 0;
+      }
+
+      case "runs": {
+        const rows = runs(ctx, db, { playbook: name, limit });
+        if (json) {
+          emit(rows);
+          return 0;
+        }
+        if (!rows.length) io.out("no runs recorded");
+        for (const r of rows)
+          io.out(
+            `${when(r.ts)}  ${r.playbook}  ${r.status}  via ${r.trigger}${r.note ? `  ${r.note}` : ""}`,
+          );
+        return 0;
+      }
+
+      case "scan": {
+        const dryRun = values["dry-run"] === true;
+        assertCanScan(ctx, { dryRun });
+        const r = await scan(ctx, db, { dryRun });
+        if (json) {
+          emit({ dryRun, ...r });
+          return 0;
+        }
+        io.out(
+          `scanned ${r.prompts} prompts in ${r.clusters} clusters (${r.mode}): ${r.candidates.length} new candidate${r.candidates.length === 1 ? "" : "s"}, ${r.known} already known`,
+        );
+        for (const c of r.candidates)
+          io.out(`  ${c.title}  (${c.sessions} sessions on ${c.days} days)`);
+        if (dryRun)
+          io.out(
+            r.candidates.length
+              ? "dry run: nothing saved; run without --dry-run to save them as suggestions"
+              : "dry run: nothing saved",
+          );
+        else if (r.suggested)
+          io.out(`saved ${r.suggested} suggestion${r.suggested === 1 ? "" : "s"} for review`);
+        return 0;
+      }
+
+      case "help":
+        io.out(PLAYBOOK_USAGE);
+        return 0;
+
+      default:
+        io.err(PLAYBOOK_USAGE);
+        return 2;
+    }
+  } catch (e) {
+    io.err(e instanceof Error ? e.message : String(e));
+    return e instanceof UsageError ? 2 : 1;
+  }
+}

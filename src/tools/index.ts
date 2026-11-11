@@ -12,6 +12,7 @@ import { emHistory } from "./em_history.js";
 import { emIndex } from "./em_index.js";
 import { emIndexStatus } from "./em_index_status.js";
 import { emMemory } from "./em_memory.js";
+import { emPlaybook } from "./em_playbook.js";
 import { emPurge } from "./em_purge.js";
 import { emRecall } from "./em_recall.js";
 import { emRemember } from "./em_remember.js";
@@ -41,6 +42,7 @@ export const tools: ToolDef<any>[] = [
   emGraphChanges,
   emHistory,
   emSwarm,
+  emPlaybook,
   emGraphAdd,
   emReindex,
   emIndexStatus,

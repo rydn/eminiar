@@ -71,6 +71,7 @@ import {
 } from "./history-api.js";
 import { historyGraphKnowledgePayload } from "./history-graph-api.js";
 import { knowledgePayload, scopeOf as knowledgeScope } from "./knowledge-api.js";
+import { playbooksRoute } from "./playbooks-api.js";
 import { swarmRoute } from "./swarm-api.js";
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -626,6 +627,17 @@ export async function serve(opts: { port: number; open: boolean; root?: string }
       // --- agent swarms (validates its own ids; writes are POST) ---------------------
       if (p === "/api/swarm" || p.startsWith("/api/swarm/")) {
         const r = await swarmRoute(ctx(), { path: p, method, query: q, body: () => readJson(req) });
+        return json(res, r.status, r.body);
+      }
+
+      // --- playbooks (stored recurring tasks; writes are POST, nothing is ever run) -------
+      if (p === "/api/playbooks" || p.startsWith("/api/playbooks/")) {
+        const r = await playbooksRoute(ctx(), {
+          path: p,
+          method,
+          query: q,
+          body: () => readJson(req),
+        });
         return json(res, r.status, r.body);
       }
 

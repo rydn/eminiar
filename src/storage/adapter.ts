@@ -26,6 +26,7 @@ import type {
   IndexRunSummary,
   MemoryInput,
   MemoryRow,
+  PlaybookStore,
   PurgeScope,
   SearchFilters,
   SessionRow,
@@ -55,6 +56,8 @@ export interface StorageAdapter {
   readonly swarm: SwarmStore;
   /** Adjudicator decisions, verdict cache, provider breakers and learned bias; see src/adjudicator. */
   readonly adjudicator: AdjudicatorStore;
+  /** Playbooks (stored recurring tasks), their runs and suggestions; see src/playbooks. */
+  readonly playbooks: PlaybookStore;
 
   // --- documents & chunks -------------------------------------------------
   /** Insert a document with its chunks. Same uri+hash → returns the existing id with created=false. */
