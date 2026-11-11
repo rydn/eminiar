@@ -85,6 +85,27 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     expect(stderr()).not.toContain("using defaults");
   });
 
+  it("a project file cannot list a variable the sandbox always withholds", () => {
+    project({
+      sandbox: {
+        envAllow: ["MY_TEAM_VAR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "FOO_*"],
+      },
+    });
+    const c = loadConfig(root);
+    // Only the withheld names go; ordinary names and globs stay.
+    expect(c.sandbox.envAllow).toEqual(["MY_TEAM_VAR", "FOO_*"]);
+    expect(stderr()).toContain(
+      'ignoring sandbox.envAllow ["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN"]',
+    );
+    expect(stderr()).toContain("eminiar.config.json");
+  });
+
+  it("the personal file may still list a withheld variable by its exact name", () => {
+    personal({ sandbox: { envAllow: ["ANTHROPIC_API_KEY"] } });
+    expect(loadConfig(root).sandbox.envAllow).toEqual(["ANTHROPIC_API_KEY"]);
+    expect(stderr()).not.toContain("ignoring sandbox.envAllow");
+  });
+
   it("a bad project value drops only the project file, keeping the personal one", () => {
     personal({ routing: { mode: "enforce" }, recall: { maxDocs: 4 } });
     project({ routing: { mode: "annotate" }, recall: { maxMemories: 11 } });

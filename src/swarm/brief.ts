@@ -4,7 +4,7 @@ import { renderProjectBrief } from "../session/brief.js";
 import { memoriesForFile, recallForText } from "../session/recall.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { MemoryRow } from "../storage/types.js";
-import { modelRangeText } from "./agents.js";
+import { modelRangeText, roleHasEmTool } from "./agents.js";
 import { OUTPUT_MAX } from "./format.js";
 import { inScope } from "./glob.js";
 import { clip, eligibility, type RunSnapshot, runSnapshot } from "./runtime.js";
@@ -102,6 +102,7 @@ async function memorySection(
   spec: ContextSpec,
   tags: string[],
   files: string[] = [],
+  canReadMemory = true,
 ): Promise<string | undefined> {
   const lines: string[] = [];
   const shown = new Set<string>();
@@ -146,7 +147,11 @@ async function memorySection(
   }
   lines.push(...taggedMemories(db, tags, Math.max(1, spec.memories), shown));
   if (!lines.length) return undefined;
-  return `Memories and docs (em_memory {action:"read", name} for the full text):\n${lines.slice(0, spec.memories + spec.docs + 3).join("\n")}`;
+  // A role without em_memory (a readonly profile) reads the memory file itself.
+  const more = canReadMemory
+    ? 'em_memory {action:"read", name}'
+    : "Read .eminiar/memories/<name>.md";
+  return `Memories and docs (${more} for the full text):\n${lines.slice(0, spec.memories + spec.docs + 3).join("\n")}`;
 }
 
 /** Bug-prone files among `paths` (or in `scope`), from the persisted history risk table. */
@@ -310,6 +315,7 @@ export async function workerBrief(
       spec,
       w.role.memoryTags,
       files,
+      roleHasEmTool(w.role, "em_memory"),
     ),
     spec.history ? historySection(db, files, w.role.scope) : undefined,
     spec.insights ? hotSection(db, files.length ? files : w.role.scope) : undefined,
@@ -348,6 +354,7 @@ export async function taskBrief(
       spec,
       role?.memoryTags ?? [],
       task.files,
+      !role || roleHasEmTool(role, "em_memory"),
     ),
     spec.history
       ? historySection(db, task.files, task.files.length ? [] : (role?.scope ?? []))

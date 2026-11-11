@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -292,6 +292,16 @@ describe("disallowedTools on an agent that inherits every tool", () => {
   });
 });
 
+describe("roleHasEmTool with a tools list", () => {
+  it("grants only the worker em_* tools, not every one the server has", () => {
+    expect(roleHasEmTool({ tools: ["Read"] }, "em_search")).toBe(true);
+    expect(roleHasEmTool({ tools: ["Read"] }, "em_graph_changes")).toBe(false);
+    expect(roleHasEmTool({ tools: ["Read"] }, "em_stats")).toBe(false);
+    // no tools key: every tool is inherited
+    expect(roleHasEmTool({}, "em_stats")).toBe(true);
+  });
+});
+
 describe("roleHasEmTool with disallowed_tools", () => {
   it("ignores bare names, other servers and a single install form", () => {
     for (const disallowedTools of [
@@ -313,5 +323,90 @@ describe("roleHasEmTool with disallowed_tools", () => {
       expect(roleHasEmTool({ disallowedTools }, "em_docs"), disallowedTools.join()).toBe(false);
     // the generated runner disallows (Bash off) still remove the command runners
     expect(roleHasEmTool({ disallowedTools: ["Bash"] }, "em_execute")).toBe(false);
+  });
+});
+
+describe("finding the agent file by its frontmatter name", () => {
+  const raw = (dir: string, file: string, name: string, tools: string): void => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, file),
+      `---\nname: ${name}\ndescription: x\ntools: ${tools}\n---\nbody\n`,
+    );
+  };
+
+  it("matches a project agent whose file name differs from its `name`", () => {
+    raw(join(root, ".claude", "agents"), "code-reviewer.md", "reviewer", "Read, Grep, Glob");
+    expect(agentLacksTool(root, "code-reviewer", "em_symbols")).toBe("all");
+    expect(agentLacksTool(root, "reviewer", "em_symbols")).toBe("all");
+    expect(agentLacksEmTools(root, "reviewer")).toBe(true);
+  });
+
+  it("reads a quoted name with a trailing comment", () => {
+    raw(join(root, ".claude", "agents"), "quoted.md", '"fancy-name" # shown in the list', "Read");
+    expect(agentLacksTool(root, "fancy-name", "em_symbols")).toBe("all");
+  });
+
+  it("looks in the user's agents directory too", () => {
+    const home = mkdtempSync(join(tmpdir(), "em-sar-claude-"));
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = home;
+    try {
+      raw(join(home, "agents"), "mine.md", "user-agent", "Read");
+      expect(agentLacksTool(root, "user-agent", "em_symbols")).toBe("all");
+      raw(join(home, "agents"), "user-direct.md", "other", "Read");
+      expect(agentLacksTool(root, "user-direct", "em_symbols")).toBe("all");
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = saved;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps denying for an unknown type, a plugin-namespaced type and an empty tools list", () => {
+    expect(agentLacksTool(root, "nobody", "em_symbols")).toBeUndefined();
+    expect(agentLacksTool(root, "myplugin:reviewer", "em_symbols")).toBeUndefined();
+    raw(join(root, ".claude", "agents"), "empty-list.md", "empty-list", "[]");
+    expect(agentLacksTool(root, "empty-list", "em_symbols")).toBeUndefined();
+  });
+
+  it("treats a bare or foreign-server name in `tools:` as unsure, so it keeps denying", () => {
+    raw(join(root, ".claude", "agents"), "bare.md", "bare", "Read, em_execute_file");
+    raw(
+      join(root, ".claude", "agents"),
+      "foreign.md",
+      "foreign",
+      "Read, mcp__other__em_execute_file",
+    );
+    expect(agentLacksTool(root, "bare", "em_execute_file")).toBeUndefined();
+    expect(agentLacksTool(root, "foreign", "em_execute_file")).toBeUndefined();
+  });
+});
+
+describe("the prompt prefix on a spawn", () => {
+  const spawn = (type: string) =>
+    handlers.PreToolUse!({
+      session_id: "s1",
+      cwd: root,
+      hook_event_name: "PreToolUse",
+      tool_name: "Agent",
+      tool_input: { subagent_type: type, description: "d", prompt: "look at it" },
+    });
+  const promptOf = (out: Awaited<ReturnType<typeof spawn>>): string | undefined =>
+    (out?.hookSpecificOutput as { updatedInput?: { prompt?: string } } | undefined)?.updatedInput
+      ?.prompt;
+
+  it("leaves the prompt alone for an agent that has no em_* tools", async () => {
+    expect(promptOf(await spawn("no-em"))).toBeUndefined();
+  });
+
+  it("prefixes an agent that has them", async () => {
+    expect(promptOf(await spawn("inherits"))).toMatch(/^Use the eminiar tools \(em_execute,/);
+  });
+
+  it("leaves out the runners an agent's own tools list lacks", async () => {
+    const out = promptOf(await spawn("ro"));
+    expect(out).toMatch(/^Use the eminiar tools \(/);
+    expect(out).not.toMatch(/^Use the eminiar tools \(em_execute/);
   });
 });

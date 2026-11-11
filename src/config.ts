@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { z } from "zod";
 import { MODES, PROVIDER_IDS, TIERS } from "./adjudicator/types.js";
 import { paths } from "./paths.js";
+import { isAlwaysWithheld } from "./sandbox/env.js";
 
 export const RoutingMode = z.enum(["off", "annotate", "enforce", "auto"]);
 export type RoutingMode = z.infer<typeof RoutingMode>;
@@ -1008,6 +1009,30 @@ function withoutUnsafePaths(raw: Record<string, unknown>, source: string): Recor
 }
 
 /**
+ * A project layer without the sandbox.envAllow entries that name a variable the sandbox always
+ * withholds (ANTHROPIC_*, CLAUDE_*, OPENAI_*, *_API_KEY): listing one by its exact name is what
+ * lets it through, and a cloned repo must not hand its own scripts your API keys. Only those
+ * entries go; the personal file and EMINIAR_* env are not cut. `source` names the file.
+ */
+function withoutWithheldEnvAllow(
+  raw: Record<string, unknown>,
+  source: string,
+): Record<string, unknown> {
+  const sb = raw.sandbox;
+  if (!isPlainObject(sb) || !Array.isArray(sb.envAllow)) return raw;
+  const dropped = sb.envAllow.filter((e) => typeof e === "string" && isAlwaysWithheld(e));
+  if (!dropped.length) return raw;
+  process.stderr.write(
+    `eminiar: ignoring sandbox.envAllow ${JSON.stringify(dropped)} in ${source}: the sandbox withholds these from a project file; list them in ~/.eminiar/config.json to pass them\n`,
+  );
+  const envAllow = sb.envAllow.filter((e) => !dropped.includes(e));
+  return {
+    ...(ownJson(raw) as Record<string, unknown>),
+    sandbox: { ...(ownJson(sb) as Record<string, unknown>), envAllow },
+  };
+}
+
+/**
  * The personal layer: paths().configFile as it is, unless it sets adjudicator keys the project
  * layer drops (droppedProjectAdjudicatorKeys) from a location the project could have put there
  * (personalConfigTrusted, task #54); then it gets the project layer's cut.
@@ -1030,8 +1055,11 @@ function personalLayer(projectRoot: string): Record<string, unknown> {
 export function loadConfig(projectRoot: string): Config {
   const layers = [
     personalLayer(projectRoot),
-    withoutUnsafePaths(
-      projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
+    withoutWithheldEnvAllow(
+      withoutUnsafePaths(
+        projectLayer(readJson(join(projectRoot, "eminiar.config.json"))),
+        "eminiar.config.json",
+      ),
       "eminiar.config.json",
     ),
     envOverrides(),

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, extname, join, relative, resolve } from "node:path";
@@ -6,6 +6,7 @@ import type { ProjectContext } from "../context.js";
 import { sessionContext } from "../context.js";
 import { type DocSource, readManifestAt } from "../docs/manifest.js";
 import { git } from "../history/log.js";
+import { claudeConfigDir } from "../paths.js";
 import { loadPermissionRules } from "../permissions/settings.js";
 import { confinePath } from "../sandbox/file.js";
 import { renderProjectBrief } from "../session/brief.js";
@@ -1626,7 +1627,18 @@ async function route(
   if (mode === "enforce") {
     if (s.prefixPrompt) {
       // A swarm worker lacking em_execute*, em_fetch_and_index or em_docs: do not point it at them.
-      const lacks = (tool: string) => swarmWorker && workerLacksTool(input, spawnType(input), tool);
+      const type = spawnType(input);
+      // An agent with no em_* tool at all is not told to use them; the rewrite is skipped.
+      if (!swarmWorker && agentLacksEmTools(ctx.root, type)) {
+        record("allow", "no-em-tools");
+        return withContext(undefined, hint);
+      }
+      // Nor does a typed agent's own tools / disallowedTools list (agent file) get pointed at
+      // a runner, fetcher or docs tool it lacks, any more than a swarm worker's role does.
+      const lacks = (tool: string) =>
+        swarmWorker
+          ? workerLacksTool(input, type, tool)
+          : agentLacksTool(ctx.root, type, tool) !== undefined;
       const prefix =
         lacks("em_execute") || lacks("em_fetch_and_index") || lacks("em_docs")
           ? subagentPrefix(!lacks("em_execute"), !lacks("em_fetch_and_index"), !lacks("em_docs"))
@@ -1729,9 +1741,49 @@ function grantsSomeUnder(entry: string, prefix: string): boolean {
   return !isEmFullName(entry) && /(^|__)em_[a-z_]+$/.test(entry);
 }
 
+/** An agent file is read for its `name:` only up to this size; a larger file is not one. */
+const AGENT_FILE_MAX_BYTES = 256 * 1024;
+/** At most this many files of an agents directory are scanned for a matching `name:`. */
+const AGENT_SCAN_MAX = 200;
+
 /**
- * Can the subagent `agentType` not call the em_* tool `tool`, by the project's
- * `.claude/agents/<type>.md` frontmatter? The agent may reach eminiar under either MCP name
+ * The file that defines the subagent `agentType`: `<type>.md` in the project's, then the user's
+ * agents directory, else the first file there whose frontmatter `name:` is the type (Claude Code
+ * names an agent by that field, not by its file). A cheap line match, so no YAML is parsed for
+ * files that are not the one. Plugin agents (`plugin:agent`) are not looked up: undefined.
+ */
+function findAgentFile(root: string, agentType: string): string | undefined {
+  const dirs = [join(root, ".claude", "agents"), join(claudeConfigDir(), "agents")];
+  for (const d of dirs) {
+    const f = join(d, `${agentType}.md`);
+    if (existsSync(f)) return f;
+  }
+  for (const d of dirs) {
+    let names: string[];
+    try {
+      names = readdirSync(d);
+    } catch {
+      continue;
+    }
+    for (const n of names.slice(0, AGENT_SCAN_MAX)) {
+      if (!n.endsWith(".md")) continue;
+      const f = join(d, n);
+      try {
+        if (statSync(f).size > AGENT_FILE_MAX_BYTES) continue;
+        const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(readFileSync(f, "utf8"))?.[1];
+        const name = fm && /^name:[ \t]*["']?([^"'\r\n#]+?)["']?[ \t]*(#.*)?$/m.exec(fm)?.[1];
+        if (name === agentType) return f;
+      } catch {
+        // unreadable: not this one
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Can the subagent `agentType` not call the em_* tool `tool`, by its agent file's
+ * (findAgentFile) frontmatter? The agent may reach eminiar under either MCP name
  * form (plugin or settings install), so it lacks the tool only when no form reaches it: its
  * `tools:` allowlist does not grant that form, or `disallowedTools` removes it by full name or a
  * server-wide entry. Bare names and other servers' tools never remove one (Claude Code does not
@@ -1748,7 +1800,8 @@ export function agentLacksTool(
   if (!agentType || !/^[A-Za-z0-9][\w.-]*$/.test(agentType)) return undefined;
   if (!/^em_[a-z_]+$/.test(tool)) return undefined;
   try {
-    const file = join(root, ".claude", "agents", `${agentType}.md`);
+    const file = findAgentFile(root, agentType);
+    if (!file) return undefined;
     const mtimeMs = statSync(file).mtimeMs;
     let hit = agentToolsCache.get(file);
     if (!hit || hit.mtimeMs !== mtimeMs) {

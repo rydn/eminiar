@@ -733,6 +733,34 @@ describe("swarm runtime", () => {
     finishRun(getContext(root), db, run, coordinator(), { status: "cancelled" });
   });
 
+  it("points a readonly worker at the memory file, as it has no em_memory", async () => {
+    const roCfg = ok(`
+swarms:
+  ro:
+    description: readonly swarm
+    agents:
+      scout: { description: scouts, tools_profile: readonly, memory_tags: [decision] }
+      maker: { description: makes, memory_tags: [decision] }
+`);
+    const swarm = roCfg.swarms[0]!;
+    db.memoryUpsertByName({
+      name: "decision/pick-a-map",
+      kind: "decision",
+      content: "Use a map for the lookup table.",
+    });
+    const run = startRun(db, roCfg, { swarm: "ro", goal: "scout it", sessionId: "RO" });
+    const [task] = addTasks(db, { root }, run, swarm, callerOf(roCfg, {}), [
+      { title: "look around", role: "scout" },
+    ]);
+    const ro = await taskBrief(db, run, swarm.roles[0], db.swarm.taskGet(task!.id)!);
+    expect(ro).toContain("decision/pick-a-map");
+    expect(ro).toContain("Read .eminiar/memories/<name>.md for the full text");
+    expect(ro).not.toContain("em_memory");
+    const rw = await taskBrief(db, run, swarm.roles[1], db.swarm.taskGet(task!.id)!);
+    expect(rw).toContain('em_memory {action:"read", name} for the full text');
+    finishRun(getContext(root), db, run, callerOf(roCfg, {}), { status: "cancelled" });
+  });
+
   it("registers a worker, which claims its task, records activity and auto-closes on stop", async () => {
     const swarm = cfg.swarms[0]!;
     const run = startRun(db, cfg, { swarm: "feat", goal: "lifecycle", sessionId: "LC" });
