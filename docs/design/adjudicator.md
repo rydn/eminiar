@@ -11,7 +11,7 @@ PreToolUse/UserPromptSubmit, model-config). The design depends on them.
 |---|---|
 | Subagent model precedence: the Agent call's `model` param, then the subagent frontmatter `model` (`inherit` means the main model), then `CLAUDE_CODE_SUBAGENT_MODEL`, then the main model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` overrides all of them. Claude Code substitutes a model when the requested one is outside the org's `availableModels`. | When FORCE is set, the adjudicator never tries to change the model. |
 | The Agent call's `model` accepts only `sonnet`, `opus`, `haiku` or `fable`: no `inherit` and no full ids. Frontmatter accepts aliases, full ids and `inherit`. | Tiers are limited to those four aliases. |
-| From Claude Code 2.1.292 the Agent call takes an `effort` parameter for a non-fork subagent; it overrides the agent file's `effort` and lasts across resumes, and `CLAUDE_CODE_EFFORT_LEVEL` outranks both (sub-agents "Choose an effort level"). Levels are `low`, `medium`, `high`, `xhigh`, `max`; a level the model lacks falls back to the highest one below it (model-config "Adjust effort level"). | Effort per dispatch is advice for the coordinator to pass as `effort` on the Agent call (informational while `CLAUDE_CODE_EFFORT_LEVEL` is set). The hook never injects an `effort` key, in apply mode too. |
+| From Claude Code 2.1.292 the Agent call takes an `effort` parameter for a non-fork subagent; it overrides the agent file's `effort` and lasts across resumes, and `CLAUDE_CODE_EFFORT_LEVEL` outranks both (sub-agents "Choose an effort level"). Levels are `low`, `medium`, `high`, `xhigh`, `max`; a level the model lacks falls back to the highest one below it (model-config "Adjust effort level"). | In advise mode, effort per dispatch is advice for the coordinator to pass as `effort` on the Agent call (informational while `CLAUDE_CODE_EFFORT_LEVEL` is set). In apply mode the hook sets the advised `effort` in the same `updatedInput` as `model`, on every dispatch in `apply.scope` except a fork, a denied or asked call, and while `CLAUDE_CODE_EFFORT_LEVEL` is set. A probe on Claude Code 2.1.311 (`claude -p`, swarm run `20261111-14ebfc` task #222, 22 runs; memory `adjudicator/hook-effort-probe`) showed the hook's `effort` winning over the call's and the agent file's, `CLAUDE_CODE_EFFORT_LEVEL` winning over the hook's, a fork dropping it, and a value outside the five levels failing the whole Agent call. Reconcile checks afterwards which level ran, from the transcript's per-call `effort` (§11). |
 | PreToolUse `updatedInput` replaces the whole input, so every unchanged field must be included. Rules are re-evaluated, and in auto mode a changed call without `permissionDecision` may be denied. A model set this way takes effect: a live probe on Claude Code 2.1.309 (`claude -p`, swarm run `20261104-672098` task #99, n=1 per case) ran the subagent on the hook's model, ahead of the agent file's pin and of a `model` passed on the call. A plugin mod's `agent.spawn` hook outranks the call's `model`. | The optional `apply` mode is opt-in and deterministic for the dispatches it may change; a test checks that the merge keeps every field. Advice to the coordinator stays the default: `em_swarm plan` shows a suggested model and effort per task and the coordinator passes `model` and `effort` on the Agent call, which works only as well as the coordinator follows the line. Both respect a model pin in the agent's definition: the advice names the pin, never a different `model` to pass, and apply leaves it. A swarm role opts in to model choice with `model_range` (§16). Reconcile still checks that the applied model ran (§11). |
 | UserPromptSubmit cannot change the main session's model. It can only add context or block. | Main-session model choice is advice text only. |
 
@@ -71,9 +71,10 @@ It can be blended with one provider:
 **P2 Advice first.**
 
 - The default path is advice: `em_swarm plan` lists a suggested role, model and effort for each
-  task, and the coordinator passes `model` on the Agent call.
-- `apply` mode is opt-in: it rewrites the Agent input through PreToolUse `updatedInput`. Claude
-  Code takes a hook-set model (verified on 2.1.309, see Constraints), and we still measure
+  task, and the coordinator passes `model` and `effort` on the Agent call.
+- `apply` mode is opt-in: it rewrites the Agent input through PreToolUse `updatedInput`, setting
+  the model and the effort. Claude Code takes a hook-set model (verified on 2.1.309) and a
+  hook-set effort (verified on 2.1.311; see Constraints), and we still measure
   whether it ran: FORCE, an organisation's `availableModels`, a mod's `agent.spawn` hook or a
   dispatch linked to the wrong calls can change or hide the outcome (§11).
 
@@ -165,7 +166,7 @@ Hot files get thin call-outs only, never logic: `routing.ts` (risk 0.56), `captu
 export const SCORER_VERSION = "1";
 export type Surface = "prompt" | "agent" | "plan" | "tool" | "mcp" | "test";
 export type Tier = "haiku" | "sonnet" | "opus" | "fable";          // the only Agent `model` values
-export type Effort = "low" | "medium" | "high" | "xhigh" | "max";    // advice: the coordinator passes it as `effort` (CC ≥ 2.1.292)
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";    // `effort` on the Agent call (CC ≥ 2.1.292): passed by the coordinator (advise) or set by the hook (apply)
 export type ProviderId = "heuristic" | "typesafe" | "openai-compatible" | "embedding";
 export type Source = "heuristic" | "blend" | "cache" | "fallback";
 export type ProviderStatus = "ok" | "timeout" | "http_error" | "rate_limited" | "invalid"
@@ -477,9 +478,10 @@ For each tier t in `config.tiers`:
 - softmax with τ = 0.5, so the scores sum to 1. Reasons cite c and the adjustments.
 
 Effort from c: < 1.5 low, < 2.5 medium, < 3.5 high, < 3.75 xhigh, otherwise max (`max` only at
-the very top of the scale, so defaults stay conservative). It is advice: the coordinator passes it
-as `effort` on the Agent call (Claude Code ≥ 2.1.292); the hook never injects it. A saturated
-brief's effort is informational (§7.9).
+the very top of the scale, so defaults stay conservative). In advise mode the coordinator passes
+it as `effort` on the Agent call (Claude Code ≥ 2.1.292); in apply mode the hook sets it (§11). A
+saturated brief's effort is informational in advise mode, and set but not counted in apply mode
+(§7.9, §11).
 
 ### 7.4 Tool table
 
@@ -712,7 +714,7 @@ Probe and detect results are cached for 60 s and never run in PreToolUse.
 | SessionStart: `src/hooks/session-start.ts`, next to the swarm line | 1 bool check | one line (≤ 200 chars) only when enabled but degraded (no_key, no_consent, breaker open, apply ineffective); ollama preset: an async keep-alive warm-up job | ≤ 5 ms, no network inline |
 | UserPromptSubmit: `src/hooks/capture.ts`, after recall (L117-133), before `budgetWarnings` | 1 bool check | skip harness envelopes (`hooks.ts` `isHarnessEnvelope`: the text starts, after whitespace, with `<agent-message`, `<task-notification`, `<ci-monitor-event` or `<system-reminder` followed by `>` or whitespace; leading closed `<system-reminder>…</system-reminder>` blocks are stripped first (`stripLeadingReminders`), and the turn is an envelope only when nothing is left or another envelope (or an unclosed reminder) follows; no row, no advice, no cooldown tick, no `closeToolHint`), then score the stripped text: below `minPromptChars`, slash commands and chat-only input are skipped on it; cache → heuristic → insert row (surface prompt) → one advice line. `promptMode` async spawns the provider job; blocking calls the provider with a deadline of `promptMs` (`localMs` for local presets) | ≤ 150 ms inline including the process (heuristic < 5 ms); blocking ≤ 1.2 s |
 | PreToolUse, non-Agent tools: `src/hooks/routing.ts` | nothing | only when `surfaces.tools` is on: one indexed SELECT of the session's latest prompt verdict; a hint at most once per prompt, when the raw tool contradicts the advised em_* tool and routing produced no hint | ≤ 2 ms |
-| PreToolUse Agent/Task: `routing.ts`, right after `swarmPreAgent` (L710) | nothing | `onPreAgent(ctx, input, spawn)` returns `{model?, note?}`: plan row (run, task) → cache → heuristic. On a miss in apply mode, call the provider with a deadline of `agentMs`. The result is merged into the ONE `updatedInput` routing returns (§11) | ≤ 10 ms advise; ≤ 800 ms on an apply-mode miss |
+| PreToolUse Agent/Task: `routing.ts`, right after `swarmPreAgent` (L710) | nothing | `onPreAgent(ctx, input, spawn)` returns `{model?, effort?, note?}`: plan row (run, task) → cache → heuristic. On a miss in apply mode, when the verdict will be applied (§11, provider call), call the provider with a deadline of `agentMs`. The result is merged into the ONE `updatedInput` routing returns (§11) | ≤ 10 ms advise; ≤ 800 ms on an apply-mode miss |
 | SessionEnd: `capture.ts` `sessionEnd` | nothing | `reconcile(db, {limit: 200})` | ≤ 20 ms |
 | `em_swarm plan` (MCP server, long-lived) | nothing | `adjudicatePlan`: one batched provider call | ≤ `planMs` (3 s) |
 | `em_adjudicate` (MCP) | not registered | score / explain / stats / feedback | ≤ `planMs` |
@@ -804,8 +806,9 @@ ignored like any pin.
 
 Then:
 
-- `updatedInput = {...tool_input, model: tier}`, with `permissionDecision` `"allow"`, the same
-  way routing's enforce path already returns it.
+- `updatedInput = {...tool_input, model: tier, effort}`, with `permissionDecision` `"allow"`, the
+  same way routing's enforce path already returns it. `model` and `effort` are each present only
+  when apply sets them; one `updatedInput` carries both.
 - Routing has three return paths, and the model must survive all of them:
   - enforce + `prefixPrompt`: merge the model into routing's `updatedInput`, which already holds
     the full input plus the prompt prefix. Two `updatedInput`s cannot coexist.
@@ -813,13 +816,57 @@ Then:
     `{...tool_input, model}` instead.
   - annotate, mode "off", or no suggestion: return an `updatedInput` with the model and keep
     `additionalContext`.
-- Implementation: one helper `withModel(output, input, model)` in `src/adjudicator/hooks.ts`,
-  applied at routing's return points. `routing.ts` gets only call-outs.
-- Never inject `effort`. Effort and role are advice: one `additionalContext` line, e.g.
-  "adjudicator: pass effort:'high' (Claude Code 2.1.292+), role reviewer" ("suggested effort
-  high" when the call already passes `effort` or `CLAUDE_CODE_EFFORT_LEVEL` is set; "effort
-  high: informational (brief saturated)" for a saturated brief, §7.9). The role is named only
-  from `ROLE_NOTE_MIN` (§7.5).
+- Implementation: one helper `withModel(output, input, model, effort?)` in
+  `src/adjudicator/hooks.ts`, applied at routing's return points. It merges into routing's own
+  `updatedInput` when there is one, else the full original input, returns a deny or ask
+  unchanged, and sends `effort` only when it is one of `EFFORTS` (`effortLevel`). `routing.ts`
+  gets only call-outs.
+- Apply mode sets `effort`. Within `apply.scope`, `onPreAgent` returns the advised level as
+  `effort` (`effortApply`) whatever the model branch decided: a pin, a ranged fallback, an
+  explicit `model`, FORCE, a confidence below `minConfidence` and an unknown pin all still get
+  the effort. It also overrides an `effort` the call passes and the agent file's `effort`. The
+  probe on Claude Code 2.1.311 (Constraints; memory `adjudicator/hook-effort-probe`) set the
+  rules:
+  - the hook's `effort` wins over the call's and the agent file's, so in apply mode it is always
+    what runs, unless `CLAUDE_CODE_EFFORT_LEVEL` is set, which outranks it and drops it silently:
+    then no effort is sent (the hook process inherits the env, `effortForced`)
+  - a fork drops it silently and runs at the parent's effort: no effort is sent for a fork
+  - a value outside `low|medium|high|xhigh|max` fails the whole Agent call schema validation, so
+    only a member of `EFFORTS` is ever sent; free text is dropped, never passed through
+  - no per-model clamp: haiku 5.5 and sonnet 5.5 take `xhigh` and `max`; a model without effort
+    support (claude-haiku-4-5) is accepted and sends no effort, so its `actualEffort` is unknown
+    and the row is not counted
+  - a denied or asked call is never rewritten (`blocked`), so it gets no effort either
+  - no version gate: the hook input carries no Claude Code version (only the transcript records
+    do, and the hot path does not read them). 2.1.311 strips an unknown `updatedInput` key
+    rather than rejecting it, so a CLI older than 2.1.292 probably drops `effort`; untested
+- Notes. Effort and role are one `additionalContext` line. Apply mode: "adjudicator: model haiku
+  applied (complexity 1, conf 0.82); effort low applied, role explorer" (also after a pin or
+  FORCE part: "…; effort low applied"), "effort low not applied: CLAUDE_CODE_EFFORT_LEVEL is set
+  and outranks it", and for a fork "adjudicator: fork runs on the main session's model; no
+  `model` to pass, effort not applied (a fork takes none; …)". A saturated brief gets the effort
+  applied too ("effort max applied"). Advise mode (and apply mode outside `apply.scope` or on a
+  blocked call): "adjudicator: pass effort:'high' (Claude Code 2.1.292+), role reviewer"
+  ("suggested effort high" when the call already passes `effort` or `CLAUDE_CODE_EFFORT_LEVEL` is
+  set; "effort high: informational (brief saturated)" for a saturated brief, §7.9). The role is
+  named only from `ROLE_NOTE_MIN` (§7.5).
+- The agent file's frontmatter `effort` (agent-pin.ts `agentEffort`: read only when every
+  definition found agrees on one known level; never for a fork) changes the advise-mode effort
+  part of the note: "effort low: the agent file already sets it" when it equals the advice; "pass
+  effort:'low' (Claude Code 2.1.292+) over the agent file's high" when it differs; "effort max:
+  informational (brief saturated); the agent file runs high" for a saturated brief whose call
+  passes no `effort`. "suggested effort X" is unchanged. In apply mode the note is "effort X
+  applied" whatever the file says. The hook only reads the file. The row's scores JSON records
+  `agentEffort`, `passedEffort` (the call's `effort`, a known level only), `effortApplied` (the
+  level the hook set, a known level only) and `effortEnv` (`CLAUDE_CODE_EFFORT_LEVEL`, `other`
+  for a non-level value) for the effort check below.
+- Provider call (`opts.call` in `onPreAgent`): inline only when apply mode is on, the dispatch is in
+  scope, there is no plan row, and the verdict will be applied: `mayApply` (the model may move: no
+  explicit `model`, and a `pass` or `ranged` rule before the verdict) or `willApplyEffort` (not
+  blocked, not a fork, `CLAUDE_CODE_EFFORT_LEVEL` unset). Otherwise `never`. So a pinned agent, an
+  explicit `model` or FORCE is asked for its effort alone, while a denied or asked call is asked only
+  when its model may move, and the call is then not rewritten. The cache is read first, so a hit
+  makes no call; the call has a deadline of `agentMs`.
 - In advise mode, `onPreAgent` never calls the network. It records the row and, when the
   coordinator passed no model and the advice differs from the baseline, adds one note:
   "adjudicator: model haiku would do (complexity 1, conf 0.8): pass model:'haiku'".
@@ -846,15 +893,20 @@ Then:
   | pin respected (pinned or unknown), or ranged with the fallback kept | none: the pin is kept | effort rule | `pinDeferred: true` (ranged: also `ranged`, `fallbackPin`) |
   | otherwise | pass | effort rule | none |
 
-  Effort rule: pass `effort` unless `CLAUDE_CODE_EFFORT_LEVEL` is set, the call already passes
-  one, or the brief is saturated (§7.9); then it is informational. Without the ranged and
-  saturated facts the table gives the same result as before them (an exhaustive test checks
-  it). The first matching row wins. A fork gets only an
+  Effort rule (`DispatchRule.effort`): with `effortApply` (apply mode in scope, a known advised
+  level, the call not blocked) it is `applied`, the hook sets it and nothing is passed, unless
+  `CLAUDE_CODE_EFFORT_LEVEL` is set (`informational`; only the env counts as `effortSet` here,
+  since the hook's level wins over the call's). A saturated brief does not change `applied`.
+  Without `effortApply`: pass `effort` unless `CLAUDE_CODE_EFFORT_LEVEL` is set, the call
+  already passes one, or the brief is saturated (§7.9); then it is informational. Without the
+  ranged, saturated and `effortApply` facts the table gives the same result as before them (an
+  exhaustive test checks it). The first matching row wins. A fork gets only an
   informational note ("adjudicator: fork runs on the main session's model; no `model` or
-  `effort` to pass (…)") and is never applied (`respected` in apply mode); `resolveAgentPin`
+  `effort` to pass (…)"; in apply mode "no `model` to pass, effort not applied (a fork takes
+  none; …)") and is never applied (`respected` in apply mode); `resolveAgentPin`
   treats `fork` as a built-in with no pin. Under FORCE the note is "adjudicator:
-  CLAUDE_CODE_SUBAGENT_MODEL_FORCE sets the model (adjudicator would pick X; …); pass effort:…",
-  and the baseline is `CLAUDE_CODE_SUBAGENT_MODEL` (else the session model), not the pin.
+  CLAUDE_CODE_SUBAGENT_MODEL_FORCE sets the model (adjudicator would pick X; …); pass effort:…"
+  (in apply mode "…; effort X applied"), and the baseline is `CLAUDE_CODE_SUBAGENT_MODEL` (else the session model), not the pin.
 - A flagged row (savings.ts `keptModel`: pin, force or fork) gets no follow detection and no
   credit; the follow rate leaves advised flagged rows out of its denominator
   (`summary().keptModel`), and `savingsReport` counts them apart from the suggested-tier ×
@@ -871,6 +923,60 @@ hook's model (Constraints), a mismatch points elsewhere: FORCE, an organisation'
 calls, such as a fork that runs on the main session's model, or calls not ingested yet). The
 transcript keeps the pre-hook input, without the `model`, so only `api_calls` show the applied
 model.
+
+Effort check (#170): reconcile verifies the effort after the fact, whether the coordinator passed
+it (advise) or the hook set it (apply, `effortApplied`). `learn.ts` `effortPatch` runs on every
+non-final row with calls and writes, into the scores JSON (no schema change; keys and helpers in
+`src/adjudicator/effort.ts`):
+
+- `actualEffort` (agent and plan rows): `dominantEffort` of the subagent's `api_calls.effort`,
+  the mode of the known levels, ties to the level seen last. `api_calls.effort` is the per-call
+  `effort` of the subagent's transcript. The subagent's `meta.json` `effort` only echoes the
+  Agent call's argument, so it cannot show a level fallback or the env override, and is not read.
+- `effortFollow` (agent rows only), from `effortFollowOf`: not counted (key absent) when the
+  advised level (`row.effort`) is not a known level, the ran level is unknown, the row is a fork
+  (`keptModel` "fork"), `effortEnv` is set, or the brief was saturated (the plan row's
+  `briefUnits` when there is one, else the row's own; in apply mode such a row still had its
+  effort applied). Otherwise:
+  - with `effortApplied` (apply): `followed` iff ran = advised, else `ignored`. The hook's level
+    overrides the call and the agent file, and a model without effort support records no level
+    (ran unknown, not counted), so the verdict is exact.
+  - without it (advise): `followed` when ran = advised or the effort set for the call = advised:
+    `passedEffort`, or `agentEffort` when nothing was passed (the hook says "the agent file
+    already sets it", so the coordinator passes nothing; `passedEffort` wins when both exist). A
+    model that lacks the level runs the next one down, so setting it is following. Else
+    `ignored`.
+
+`summary()` reads the keys through `scoresEffort` (sqlite/adjudicator.ts, a copy of `rowEffort`
+for these keys, since nothing from `src/adjudicator` may load at boot while the adjudicator is
+off) over dispatch rows. Its `set` is the effort set for the call: `effortApplied`, else
+`passedEffort`. `effortFollowed`, `effortIgnored`, `rates.effortFollow` = followed ÷ (followed +
+ignored), `effortChecked` (rows with both a `set` level and `actualEffort`) and
+`effortIneffective` (of those, set ≠ actual). `stats` adds "effort followed P (f followed, i
+ignored of f+i) · set but not run k" when f + i > 0 (k = `effortIneffective`, shown when
+non-zero); the Adjudicator tab shows "effort P" ("—", n/a, when nothing was counted) and, when
+k > 0, "effort set but not run k of `effortChecked`".
+The swarm view (swarm-decisions.ts) gives each dispatch an `effortSource`, the first that
+holds of `env` (`effortEnv` set), `applied` (`effortApplied`), `call` (`passedEffort`), `fork`,
+`agent-file` (`agentEffort`) and `agent-default` (a session or model default whose level is
+unknown), and the effective level in that order. `effortLabel` (decision-helpers.ts) shows
+`actualEffort`, else the effective level, with " (ignored)" when `effortFollow` is `ignored`,
+else " (applied)" when the source is `applied`; with no level it reads "applied", "env
+override", "session" (fork) or "default".
+
+Effort backfill (#227): reconcile skips final rows, so rows that were final before #170 would
+never get these keys and the rate would stay n/a. `Reconciler.backfillEffort` repairs them at the
+end of every `reconcile()` pass, and on a pass with no pending rows too. Newest first, it scans at
+most `EFFORT_BACKFILL_SCAN` (1000) agent rows and repairs at most `EFFORT_BACKFILL_LIMIT` (200):
+final rows with an `agentId` and a session whose scores lack `actualEffort` and whose `api_calls`
+for that agent (from 5 s before the row) have an effort. It reuses `effortPatch` and writes only
+`scores`, so nothing else on the row changes. Each scan page loads a session's `api_calls` once, from
+the oldest candidate row of that session less 5 s, so an older row of the session is not starved by
+a newer row that cannot be repaired (#251). A row that recorded none of `effortApplied`,
+`agentEffort`, `passedEffort` or `effortEnv` (a legacy row, `effortFactsRecorded` false) gets
+`actualEffort` only and no `effortFollow`, since its advice cannot be checked (#252). It is
+idempotent (a repaired row has the key and drops out), best-effort per row, and skipped when
+`learning.enabled` is false.
 
 In apply mode, `status` and doctor also say when every role of an opted-in swarm resolves to a
 plain pin (cli.ts `pinnedSwarms`, the same rule as the plan's `ALL_PINNED_NOTE`, §16; skipped
@@ -1006,6 +1112,9 @@ It is idempotent: rows with `final=1` are skipped. It looks at non-final rows ol
 
 - `actual_model`, `actual_tokens` and `actual_cost_usd` come from `api_calls`. Usage ingestion
   must be on; otherwise these stay null and the UI says so.
+- The same calls give `scores.actualEffort` and, for agent rows, `scores.effortFollow` (§11,
+  effort check). Final agent rows without `actualEffort` get them from the bounded effort
+  backfill at the end of each pass (§11, effort backfill).
 - A row becomes final once its outcome is known, or after 24 h.
 - When a row turns final, its bias buckets are updated (§7.7).
 
@@ -1151,6 +1260,11 @@ is embedding.
     …)". The head adds "; a saturated brief's effort is informational: pass no `effort`" when
     others are not saturated, and says "every brief is saturated, naming more work than its
     hardest statement scores" when all are.
+  - Apply mode (`PlanAdvice.effortApplied`, unless `CLAUDE_CODE_EFFORT_LEVEL` is set): the
+    effort reads "effort low (applied by the hook)", a saturated brief's included, and the head
+    and "Next:" tell the coordinator to pass no `effort` ("the hook sets `effort` on the Agent
+    call in apply mode, so pass no `effort`"; "Next:" adds "; the hook sets `effort` (apply
+    mode): pass no `effort`").
   - Add "role suggested: tester (planned: coder)" when the role differs and the role table's
     confidence is at least `ROLE_NOTE_MIN` (§7.5).
   - When every role of the swarm resolves to a plain pin (pins respected, FORCE off), the
@@ -1509,8 +1623,11 @@ Accept:
   `systemMessage` with cooldown
 - PreToolUse Agent, apply mode: `updatedInput` contains EVERY original field + model on all of
   routing's paths: the enforce prefix, the already-prefixed early return, annotate, mode off
-- FORCE env, an explicit model and a frontmatter pin are respected; `effort` is never injected;
-  nothing is ever denied
+- FORCE env, an explicit model and a frontmatter pin are respected; nothing is ever denied
+- apply mode puts the advised `effort` in the same `updatedInput` as `model`, also when the model
+  is kept (pin, ranged fallback, explicit model, FORCE) and over the call's or the agent file's
+  effort; never for a fork, under `CLAUDE_CODE_EFFORT_LEVEL`, on a denied or asked call, or as a
+  value outside `EFFORTS`; advise mode never sets it
 - advise mode makes no network call in `onPreAgent`
 - non-Agent PreToolUse: at most one SELECT when `surfaces.tools` is on, none when off
 - the Cursor client is skipped; SessionEnd calls reconcile

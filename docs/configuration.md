@@ -251,7 +251,7 @@ only:
 |---|---|---|
 | `enabled` | `false` | Turn the adjudicator on. `EMINIAR_ADJUDICATOR=0` is the kill switch |
 | `provider` | `"heuristic"` | `heuristic`, `embedding`, `typesafe` (Jev) or `openai-compatible` |
-| `mode` | `"advise"` | `advise` only suggests; `apply` sets the Agent `model` on the dispatches `apply.scope` covers. See [Advise and apply](adjudicator.md#advise-and-apply) |
+| `mode` | `"advise"` | `advise` only suggests; `apply` sets the Agent `model` and `effort` on the dispatches `apply.scope` covers (the effort also when the model is kept; never for a fork or while `CLAUDE_CODE_EFFORT_LEVEL` is set). See [Advise and apply](adjudicator.md#advise-and-apply) |
 | `surfaces.prompt` | `true` | Score prompts (UserPromptSubmit) |
 | `surfaces.agent` | `true` | Score subagent dispatches (PreToolUse on `Agent`) |
 | `surfaces.plan` | `true` | Add suggestions to `em_swarm plan` |
@@ -283,11 +283,11 @@ only:
 | `weights.lowConfidence` | `0.55` | A tier choice below this confidence moves one tier up |
 | `weights.tierCenters` | `{"haiku": 0.6, "sonnet": 2.0, "opus": 3.4}` | The complexity each tier fits best (at most 16 entries) |
 | `weights.features` | `{}` | Per-feature weight overrides, for example `{"design": 2.0}`. `asymmetry` (default 2) sets how strongly the tier leans up; `toolProvider` above 0 lets a provider vote on the tool. At most 64 entries |
-| `apply.scope` | `"swarm"` | In apply mode, set the model on swarm worker dispatches only (`swarm`) or on every dispatch (`all`) |
-| `apply.minConfidence` | `0.7` | Apply only at or above this tier confidence |
+| `apply.scope` | `"swarm"` | In apply mode, set the model and the effort on swarm worker dispatches only (`swarm`) or on every dispatch (`all`) |
+| `apply.minConfidence` | `0.7` | Apply a model only at or above this tier confidence (the effort is set whatever the confidence) |
 | `apply.floor` | `"haiku"` | Smallest tier apply mode sets |
 | `apply.ceiling` | `"opus"` | Largest tier apply mode sets |
-| `apply.respectFrontmatter` | `true` | Leave a dispatch alone when its agent file pins a `model` (`inherit` is not a pin). A swarm role with a `model_range` still moves inside its range ([Model ranges](swarms.md#model-ranges)). `false` ignores pins and ranges alike: a pinned or ranged agent is advised and set like one with no `model` line, between `apply.floor` and `apply.ceiling` |
+| `apply.respectFrontmatter` | `true` | Leave a dispatch's model alone when its agent file pins a `model` (`inherit` is not a pin; the effort is still set). A swarm role with a `model_range` still moves inside its range ([Model ranges](swarms.md#model-ranges)). `false` ignores pins and ranges alike: a pinned or ranged agent is advised and set like one with no `model` line, between `apply.floor` and `apply.ceiling` |
 | `advice.mainSession` | `"user"` | Main-session `/model` note: `user` (shown to you), `context` (to Claude) or `off` |
 | `advice.cooldownPrompts` | `8` | At most one main-session note per this many prompts |
 | `learning.enabled` | `true` | Learn a bias from outcomes and feedback |

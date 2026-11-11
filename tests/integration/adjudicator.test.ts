@@ -656,7 +656,8 @@ await import(${JSON.stringify(join(DIST, "hook.js"))});
       for (const [k, v] of Object.entries(sentInput)) if (k !== "prompt") expect(ui[k]).toEqual(v);
       expect(String(ui.prompt)).toContain(sentInput.prompt);
       expect(["haiku", "sonnet", "opus", "fable"]).toContain(ui.model);
-      expect(ui).not.toHaveProperty("effort");
+      // Apply mode sets the advised effort in the same updatedInput as the model (a valid level only).
+      expect(["low", "medium", "high", "xhigh", "max"]).toContain(ui.effort);
       if (routing === "enforce")
         expect(String(ui.prompt).startsWith("Use the eminiar tools")).toBe(true);
       else expect(ui.prompt).toBe(sentInput.prompt);

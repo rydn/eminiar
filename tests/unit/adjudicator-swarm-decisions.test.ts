@@ -362,3 +362,150 @@ describe("swarm decision view: review round 2", () => {
     expect(d[0]?.effortDiffers).toBe(false);
   });
 });
+
+describe("swarm decision view: agent-file effort and follow-through", () => {
+  const plan = (effort = "high"): AdjudicationRow => row("plan", { effort });
+
+  it("an agent file's effort is effective with source agent-file; call and env outrank it", () => {
+    const d = swarmDecisions(
+      dbOf([task(1), task(2), task(3), task(4)], {
+        1: [plan(), row("agent", { s: { agentEffort: "medium" } })],
+        2: [plan(), row("agent", { s: { agentEffort: "medium", passedEffort: "low" } })],
+        3: [
+          plan(),
+          row("agent", { s: { agentEffort: "medium", passedEffort: "low", effortEnv: "max" } }),
+        ],
+        4: [plan(), row("agent", { s: { agentEffort: "medium", effortEnv: "other" } })],
+      }),
+      "r",
+    );
+    expect(d[0]?.ran).toMatchObject({ effortEffective: "medium", effortSource: "agent-file" });
+    expect(d[0]?.effortDiffers).toBe(true);
+    expect(d[1]?.ran).toMatchObject({ effortEffective: "low", effortSource: "call" });
+    expect(d[2]?.ran).toMatchObject({ effortEffective: "max", effortSource: "env" });
+    expect(d[3]?.ran?.effortSource).toBe("env");
+    expect(d[3]?.ran?.effortEffective).toBeUndefined();
+  });
+
+  it("a fork ignores the agent file's effort", () => {
+    const [d] = swarmDecisions(
+      dbOf([task(1)], {
+        1: [
+          plan("high"),
+          row("agent", { s: { fork: true, agentEffort: "low", actualEffort: "low" } }),
+        ],
+      }),
+      "r",
+    );
+    expect(d?.ran?.effortEffective).toBeUndefined();
+    expect(d?.ran?.effortActual).toBe("low");
+    expect(d?.ran?.effortSource).toBe("fork");
+    // a fork inherits the parent's effort: advice does not apply, so no mismatch even though
+    // the level it ran at (low) differs from the advice (high)
+    expect(d?.effortDiffers).toBe(false);
+  });
+
+  it("an unrecognised agent file level is ignored", () => {
+    const [d] = swarmDecisions(
+      dbOf([task(1)], { 1: [plan(), row("agent", { s: { agentEffort: "ludicrous" } })] }),
+      "r",
+    );
+    expect(d?.ran?.effortSource).toBe("agent-default");
+    expect(d?.ran?.effortEffective).toBeUndefined();
+  });
+
+  it("effortActual is read from scores and beats the intended level for effortDiffers", () => {
+    const d = swarmDecisions(
+      dbOf([task(1), task(2), task(3), task(4)], {
+        // intended differs, actual matches the advice: no mismatch
+        1: [plan("high"), row("agent", { s: { passedEffort: "low", actualEffort: "high" } })],
+        // intended matches, actual differs: mismatch
+        2: [plan("high"), row("agent", { s: { passedEffort: "high", actualEffort: "low" } })],
+        // no actual: falls back to effective
+        3: [plan("high"), row("agent", { s: { passedEffort: "low" } })],
+        // invalid actual is dropped, effective is used
+        4: [plan("high"), row("agent", { s: { passedEffort: "high", actualEffort: "bogus" } })],
+      }),
+      "r",
+    );
+    expect(d[0]?.ran).toMatchObject({ effortActual: "high", effortEffective: "low" });
+    expect(d[0]?.effortDiffers).toBe(false);
+    expect(d[1]?.ran?.effortActual).toBe("low");
+    expect(d[1]?.effortDiffers).toBe(true);
+    expect(d[2]?.ran?.effortActual).toBeUndefined();
+    expect(d[2]?.effortDiffers).toBe(true);
+    expect(d[3]?.ran?.effortActual).toBeUndefined();
+    expect(d[3]?.effortDiffers).toBe(false);
+  });
+
+  it("effortDiffers needs advice: an actual level with no advised effort never differs", () => {
+    const [d] = swarmDecisions(
+      dbOf([task(1)], { 1: [row("agent", { effort: null as never, s: { actualEffort: "low" } })] }),
+      "r",
+    );
+    expect(d?.ran?.effortActual).toBe("low");
+    expect(d?.effortDiffers).toBe(false);
+  });
+
+  it("effortFollow comes from the dispatch row; anything else is absent", () => {
+    const d = swarmDecisions(
+      dbOf([task(1), task(2), task(3), task(4)], {
+        1: [plan(), row("agent", { s: { effortFollow: "followed" } })],
+        2: [plan(), row("agent", { s: { effortFollow: "ignored" } })],
+        3: [plan(), row("agent", { s: { effortFollow: "maybe" } })],
+        4: [plan()],
+      }),
+      "r",
+    );
+    expect(d.map((x) => x.effortFollow)).toEqual(["followed", "ignored", undefined, undefined]);
+  });
+});
+
+describe("swarm decision view: applied effort", () => {
+  const plan = (effort = "high"): AdjudicationRow => row("plan", { effort });
+  const ranOf = (s: object, effort = "high") =>
+    swarmDecisions(dbOf([task(1)], { 1: [plan(effort), row("agent", { s })] }), "r")[0];
+
+  it("an applied level is effective with source applied", () => {
+    const d = ranOf({ effortApplied: "high" });
+    expect(d?.ran).toMatchObject({ effortEffective: "high", effortSource: "applied" });
+    expect(d?.effortDiffers).toBe(false);
+  });
+
+  it("order: env > applied > call > agent file", () => {
+    const base = { effortApplied: "high", passedEffort: "low", agentEffort: "medium" };
+    const d = swarmDecisions(
+      dbOf([task(1), task(2), task(3), task(4)], {
+        1: [plan(), row("agent", { s: { ...base, effortEnv: "max" } })],
+        2: [plan(), row("agent", { s: base })],
+        3: [plan(), row("agent", { s: { passedEffort: "low", agentEffort: "medium" } })],
+        4: [plan(), row("agent", { s: { effortEnv: "other", ...base } })],
+      }),
+      "r",
+    );
+    expect(d[0]?.ran).toMatchObject({ effortEffective: "max", effortSource: "env" });
+    expect(d[1]?.ran).toMatchObject({ effortEffective: "high", effortSource: "applied" });
+    expect(d[2]?.ran).toMatchObject({ effortEffective: "low", effortSource: "call" });
+    expect(d[3]?.ran?.effortSource).toBe("env");
+    expect(d[3]?.ran?.effortEffective).toBeUndefined();
+  });
+
+  it("a fork never takes an applied level", () => {
+    const d = ranOf({ fork: true, effortApplied: "high" });
+    expect(d?.ran?.effortSource).toBe("fork");
+    expect(d?.ran?.effortEffective).toBeUndefined();
+    expect(d?.effortDiffers).toBe(false);
+  });
+
+  it("an unrecognised applied level is ignored", () => {
+    const d = ranOf({ effortApplied: "ludicrous", agentEffort: "medium" });
+    expect(d?.ran).toMatchObject({ effortEffective: "medium", effortSource: "agent-file" });
+  });
+
+  it("applied differing from the advice, or the actual level, shows in effortDiffers", () => {
+    expect(ranOf({ effortApplied: "low" })?.effortDiffers).toBe(true);
+    // actual beats the intended (applied) level
+    expect(ranOf({ effortApplied: "low", actualEffort: "high" })?.effortDiffers).toBe(false);
+    expect(ranOf({ effortApplied: "high", actualEffort: "low" })?.effortDiffers).toBe(true);
+  });
+});

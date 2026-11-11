@@ -48,6 +48,7 @@ swarms:
         model_range:
           floor: haiku
           ceiling: opus
+        effort: xhigh
         color: cyan
         count: 3
         disallowed_tools: [Edit, Write, NotebookEdit]
@@ -68,6 +69,7 @@ swarms:
         description: Designs the change from the code graph, history, past decisions and the research notes.
         model: opus
         model_range: {floor: sonnet, ceiling: fable} # never haiku; fable only for hard multi-subsystem designs
+        effort: xhigh
         color: purple
         disallowed_tools: [Edit, Write, NotebookEdit]
         memory_tags: [decision, constraint]
@@ -85,6 +87,7 @@ swarms:
         model_range:
           floor: haiku
           ceiling: opus
+        effort: high
         count: 4 # at most four coders at once
         color: blue
         scope: ["src/**", "bin/**", "scripts/**", "hooks/**", "skills/**", "docs/**"]
@@ -107,6 +110,7 @@ swarms:
         description: Builds dashboard views and their API endpoints (Preact web app under src/ui).
         model: opus
         model_range: {floor: sonnet, ceiling: opus}
+        effort: high
         color: green
         scope: ["src/ui/**", "docs/dashboard.md"]
         hooks:
@@ -128,6 +132,7 @@ swarms:
         model_range:
           floor: haiku
           ceiling: opus
+        effort: high
         count: 2
         color: yellow
         scope: ["tests/**"]

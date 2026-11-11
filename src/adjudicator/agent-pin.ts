@@ -28,7 +28,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { claudeConfigDir, claudePluginsDir } from "../paths.js";
 import { agentFileRange } from "../swarm/agents.js";
 import type { ModelRange } from "../swarm/types.js";
+import { effortLevel } from "./effort.js";
 import { isPinned, tierOf, tierRank } from "./savings.js";
+import type { Effort } from "./types.js";
 
 export type PinStatus = "pinned" | "ranged" | "unpinned" | "unknown";
 export type PinSource = "managed" | "project" | "user" | "plugin" | "builtin";
@@ -49,6 +51,12 @@ export interface AgentPin {
    */
   inherit?: boolean;
   source?: PinSource;
+  /**
+   * The thinking effort the definition's frontmatter `effort` sets, when every definition at the
+   * winning location names the same known level. Omitted for a built-in, a fork, an unreadable
+   * plugin agent, a missing, unknown (e.g. "auto") or disagreeing value.
+   */
+  effort?: Effort;
   /** The definition file, with the home directory shown as `~`. */
   file?: string;
   /** Why, in a few words (stored on the adjudication row). */
@@ -99,6 +107,8 @@ interface Def {
   file: string;
   name?: string | undefined;
   model?: string | undefined;
+  /** The raw frontmatter `effort` (a known level is read from it by decide). */
+  effort?: string | undefined;
   /** The marker's model range, when sync wrote the file and nobody edited it since. */
   range?: ModelRange | undefined;
 }
@@ -145,7 +155,12 @@ function readDef(file: string): Def | undefined {
     const text = readFileSync(file, "utf8");
     const fm = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1];
     if (!fm) return { file };
-    const def: Def = { file, name: scalar(fm, "name"), model: scalar(fm, "model") };
+    const def: Def = {
+      file,
+      name: scalar(fm, "name"),
+      model: scalar(fm, "model"),
+      effort: scalar(fm, "effort"),
+    };
     // Only a marker that names a range is hashed (agentFileRange verifies the whole file).
     if (text.includes(" range=")) def.range = agentFileRange(text);
     return def;
@@ -220,6 +235,14 @@ function shown(file: string, home: string): string {
  * the same name load in filesystem order, which is not documented).
  */
 function decide(defs: Def[], source: PinSource, home: string): AgentPin {
+  const pin = decideModel(defs, source, home);
+  // The same files already read for the model: no extra I/O.
+  const levels = new Set(defs.map((d) => effortLevel(d.effort)));
+  const effort = levels.size === 1 ? [...levels][0] : undefined;
+  return effort ? { ...pin, effort } : pin;
+}
+
+function decideModel(defs: Def[], source: PinSource, home: string): AgentPin {
   const pins = new Set(defs.map((d) => (isPinned(d.model) ? d.model.trim() : "")));
   const first = defs[0]!;
   const file = shown(first.file, home);

@@ -169,7 +169,7 @@ function generated(name: string, model: string, range: string, body = "\nYou are
 }
 
 /** A provider that answers every request with `tier` (confidence 0.9) and counts its calls. */
-function stubProvider(tier: Tier): AdjudicatorProvider & { calls: number } {
+function stubProvider(tier: Tier, complexity = 1): AdjudicatorProvider & { calls: number } {
   const p = {
     id: "openai-compatible" as const,
     remote: false,
@@ -180,7 +180,7 @@ function stubProvider(tier: Tier): AdjudicatorProvider & { calls: number } {
       return {
         answers: reqs.map((r) => ({
           key: r.key,
-          complexity: { value: 1, confidence: 0.9 },
+          complexity: { value: complexity, confidence: 0.9 },
           tier: { probs: { [tier]: 1 }, confidence: 0.9, calibrated: true },
         })),
         usage: { inTok: 10, outTok: 5, costUsd: 0 },
@@ -245,7 +245,11 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
       range: { floor: "haiku", ceiling: "sonnet" },
     });
     const reviewer = look(root, "swarm-rng-reviewer");
-    expect(reviewer).toMatchObject({ status: "pinned", model: "opus", source: "project" });
+    expect(reviewer).toMatchObject({
+      status: "pinned",
+      model: "opus",
+      source: "project",
+    });
     expect(reviewer.range).toBeUndefined();
   });
 
@@ -254,7 +258,10 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
     const dir = join(root, ".claude", "agents");
     const coder = join(dir, "swarm-rng-coder.md");
     writeFileSync(coder, `${readFileSync(coder, "utf8")}One more line.\n`);
-    expect(look(root, "swarm-rng-coder")).toMatchObject({ status: "pinned", model: "sonnet" });
+    expect(look(root, "swarm-rng-coder")).toMatchObject({
+      status: "pinned",
+      model: "sonnet",
+    });
 
     // the helper writes what sync would: its range is read back
     expect(agentFileRange(generated("ok", "sonnet", "haiku..opus"))).toEqual({
@@ -276,7 +283,10 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
     // a model id or a [1m] variant is a fallback like the alias
     writeFileSync(join(dir, "full.md"), generated("full", "claude-sonnet-4-5", "haiku..opus"));
     writeFileSync(join(dir, "wide.md"), generated("wide", "sonnet[1m]", "sonnet..fable"));
-    expect(look(root, "full")).toMatchObject({ status: "ranged", model: "claude-sonnet-4-5" });
+    expect(look(root, "full")).toMatchObject({
+      status: "ranged",
+      model: "claude-sonnet-4-5",
+    });
     expect(look(root, "wide")).toMatchObject({
       status: "ranged",
       model: "sonnet[1m]",
@@ -290,10 +300,16 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
     mkdirSync(join(dir, "more"), { recursive: true });
     writeFileSync(join(dir, "d1.md"), generated("dup", "sonnet", "haiku..opus"));
     writeFileSync(join(dir, "more", "d2.md"), generated("dup", "sonnet", "haiku..sonnet"));
-    expect(look(root, "dup")).toMatchObject({ status: "pinned", model: "sonnet" });
+    expect(look(root, "dup")).toMatchObject({
+      status: "pinned",
+      model: "sonnet",
+    });
     writeFileSync(join(dir, "s1.md"), generated("same", "sonnet", "haiku..opus"));
     writeFileSync(join(dir, "more", "s2.md"), generated("same", "sonnet", "haiku..opus"));
-    expect(look(root, "same")).toMatchObject({ status: "ranged", model: "sonnet" });
+    expect(look(root, "same")).toMatchObject({
+      status: "ranged",
+      model: "sonnet",
+    });
     writeFileSync(join(dir, "p1.md"), generated("part", "sonnet", "haiku..opus"));
     writeFileSync(join(dir, "more", "p2.md"), "---\nname: part\nmodel: sonnet\n---\nb\n");
     expect(look(root, "part").status).toBe("pinned");
@@ -301,8 +317,14 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
     writeFileSync(join(dir, "inh.md"), "---\nname: inh\nmodel: inherit\n---\nb\n");
     writeFileSync(join(dir, "bare.md"), "---\nname: bare\n---\nb\n");
     writeFileSync(join(dir, "inh-ranged.md"), generated("inh-ranged", "inherit", "haiku..opus"));
-    expect(look(root, "inh")).toMatchObject({ status: "unpinned", inherit: true });
-    expect(look(root, "inh-ranged")).toMatchObject({ status: "unpinned", inherit: true });
+    expect(look(root, "inh")).toMatchObject({
+      status: "unpinned",
+      inherit: true,
+    });
+    expect(look(root, "inh-ranged")).toMatchObject({
+      status: "unpinned",
+      inherit: true,
+    });
     expect(look(root, "bare").inherit).toBeUndefined();
     expect(look(root, "general-purpose").inherit).toBeUndefined();
   });
@@ -318,7 +340,10 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
 
     // a ranged user file alone is ranged, and says where it came from
     writeFileSync(join(userDir, "scope-solo.md"), generated("scope-solo", "sonnet", "haiku..opus"));
-    expect(look(root, "scope-solo")).toMatchObject({ status: "ranged", source: "user" });
+    expect(look(root, "scope-solo")).toMatchObject({
+      status: "ranged",
+      source: "user",
+    });
     // a plain project file of the same name hides it
     writeFileSync(join(dir, "scope-both.md"), plain("scope-both", "opus"));
     writeFileSync(join(userDir, "scope-both.md"), generated("scope-both", "sonnet", "haiku..opus"));
@@ -330,7 +355,10 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
     // and a ranged project file hides a plain user one
     writeFileSync(join(dir, "scope-up.md"), generated("scope-up", "sonnet", "haiku..opus"));
     writeFileSync(join(userDir, "scope-up.md"), plain("scope-up", "haiku"));
-    expect(look(root, "scope-up")).toMatchObject({ status: "ranged", source: "project" });
+    expect(look(root, "scope-up")).toMatchObject({
+      status: "ranged",
+      source: "project",
+    });
     // a managed definition outranks the project's
     writeFileSync(
       join(managed, ".claude", "agents", "m.md"),
@@ -338,9 +366,16 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
     );
     writeFileSync(join(dir, "scope-managed.md"), plain("scope-managed", "haiku"));
     expect(
-      resolveAgentPin("scope-managed", { root, env: { HOME: home }, managedDir: managed }),
+      resolveAgentPin("scope-managed", {
+        root,
+        env: { HOME: home },
+        managedDir: managed,
+      }),
     ).toMatchObject({ status: "ranged", source: "managed", model: "sonnet" });
-    expect(look(root, "scope-managed")).toMatchObject({ status: "pinned", model: "haiku" });
+    expect(look(root, "scope-managed")).toMatchObject({
+      status: "pinned",
+      model: "haiku",
+    });
   });
 
   it("a marker range that names no real range is an edit, and a file too large to read pins nothing (#107)", () => {
@@ -388,7 +423,14 @@ describe("resolveAgentPin: ranged swarm agents (#104)", () => {
 
 describe("dispatchRule and plan lines: the ranged row (#104)", () => {
   it("ranged sits after the fork and FORCE and before the pin; saturation makes effort informational", () => {
-    expect(dispatchRule({ fork: true, forced: true, ranged: true, effortSet: false })).toEqual({
+    expect(
+      dispatchRule({
+        fork: true,
+        forced: true,
+        ranged: true,
+        effortSet: false,
+      }),
+    ).toEqual({
       model: "fork",
       effort: "fork",
     });
@@ -396,11 +438,25 @@ describe("dispatchRule and plan lines: the ranged row (#104)", () => {
       model: "forced",
       effort: "pass",
     });
-    expect(dispatchRule({ forced: false, ranged: true, pin: true, effortSet: false })).toEqual({
+    expect(
+      dispatchRule({
+        forced: false,
+        ranged: true,
+        pin: true,
+        effortSet: false,
+      }),
+    ).toEqual({
       model: "ranged",
       effort: "pass",
     });
-    expect(dispatchRule({ forced: false, pin: true, effortSet: false, saturated: true })).toEqual({
+    expect(
+      dispatchRule({
+        forced: false,
+        pin: true,
+        effortSet: false,
+        saturated: true,
+      }),
+    ).toEqual({
       model: "pin",
       effort: "informational",
     });
@@ -422,7 +478,14 @@ describe("dispatchRule and plan lines: the ranged row (#104)", () => {
             const label = JSON.stringify({ fork, forced, pin, effortSet });
             expect(dispatchRule({ fork, forced, pin, effortSet }), label).toEqual(old);
             expect(
-              dispatchRule({ fork, forced, pin, effortSet, ranged: false, saturated: false }),
+              dispatchRule({
+                fork,
+                forced,
+                pin,
+                effortSet,
+                ranged: false,
+                saturated: false,
+              }),
               label,
             ).toEqual(old);
           }
@@ -451,7 +514,11 @@ describe("dispatchRule and plan lines: the ranged row (#104)", () => {
     expect(rangedTier("haiku", R, "sonnet", "haiku")).toBe("sonnet");
   });
 
-  const range: PlanRange = { floor: "haiku", ceiling: "opus", fallback: "sonnet" };
+  const range: PlanRange = {
+    floor: "haiku",
+    ceiling: "opus",
+    fallback: "sonnet",
+  };
   const base: PlanAdvice = {
     taskId: 3,
     role: "coder",
@@ -467,7 +534,12 @@ describe("dispatchRule and plan lines: the ranged row (#104)", () => {
       planLines([
         { ...base, model: "haiku", range },
         { ...base, taskId: 4, model: "sonnet", range },
-        { ...base, taskId: 5, model: "sonnet", range: { ...range, fallback: "claude-sonnet-4-5" } },
+        {
+          ...base,
+          taskId: 5,
+          model: "sonnet",
+          range: { ...range, fallback: "claude-sonnet-4-5" },
+        },
         { ...base, taskId: 6, range },
       ]),
     ).toEqual([
@@ -481,8 +553,16 @@ describe("dispatchRule and plan lines: the ranged row (#104)", () => {
   it("the head and Next pass `model` for a moving pick and keep the fallback like a pin", () => {
     const moves: PlanAdvice = { ...base, model: "haiku", range };
     const stays: PlanAdvice = { ...base, taskId: 4, model: "sonnet", range };
-    expect(planPassing([moves], {})).toMatchObject({ model: true, pinned: false, effort: true });
-    expect(planPassing([stays], {})).toMatchObject({ model: false, pinned: true, effort: true });
+    expect(planPassing([moves], {})).toMatchObject({
+      model: true,
+      pinned: false,
+      effort: true,
+    });
+    expect(planPassing([stays], {})).toMatchObject({
+      model: false,
+      pinned: true,
+      effort: true,
+    });
     expect(planNextHint([moves], {})).toBe(
       ", passing `model` and `effort` as each suggestion below says",
     );
@@ -510,7 +590,10 @@ describe("dispatchRule and plan lines: the ranged row (#104)", () => {
       `Adjudicator suggestions: pass the model as \`model\` on each Agent call (effort is informational: ${why}):`,
     );
     expect(planNextHint([sat], {})).toBe(", passing `model` as each suggestion below says");
-    const pinnedSat: PlanAdvice = { ...sat, pin: { status: "pinned", model: "opus" } };
+    const pinnedSat: PlanAdvice = {
+      ...sat,
+      pin: { status: "pinned", model: "opus" },
+    };
     expect(planNextHint([pinnedSat], {})).toBe(
       `; the suggestions below are informational: leave \`model\` unset for pinned agents and pass no \`effort\` (${why})`,
     );
@@ -525,13 +608,15 @@ describe("dispatchRule and plan lines: the ranged row (#104)", () => {
     );
     // under FORCE the effort is the only thing to pass, and a saturated one is not
     expect(
-      planAdviceHead([{ ...sat, forced: true }], { CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" }),
+      planAdviceHead([{ ...sat, forced: true }], {
+        CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
+      }),
     ).toMatch(new RegExp(`the model is informational; ${why}, so effort is too\\):$`));
   });
 
   it("the block nudges when every role pins a model, right under its head", () => {
     expect(ALL_PINNED_NOTE).toBe(
-      "every role pins a model: the adjudicator cannot change any worker (add model_range in swarm.yaml)",
+      "every role pins a model: the adjudicator cannot change any worker's model (add model_range in swarm.yaml)",
     );
     const pinned: PlanAdvice = {
       ...base,
@@ -569,7 +654,10 @@ describe("adjudicatePlan with ranged swarm agents (#104)", () => {
     adjudicator: Record<string, unknown> = {},
     env: NodeJS.ProcessEnv = {},
   ) => {
-    const ctx = { root: p.root, config: configWith({ enabled: true, ...adjudicator }) };
+    const ctx = {
+      root: p.root,
+      config: configWith({ enabled: true, ...adjudicator }),
+    };
     const db = getStorage(getContext(p.root), { vectors: false });
     const run = db.swarm.runCreate({
       id: `rng-${Math.random().toString(36).slice(2, 8)}`,
@@ -603,11 +691,19 @@ describe("adjudicatePlan with ranged swarm agents (#104)", () => {
     const [coder, tester, reviewer] = advice;
     expect(coder).toMatchObject({
       model: "haiku",
-      range: { floor: "haiku", ceiling: "opus", fallback: "sonnet", source: "project" },
+      range: {
+        floor: "haiku",
+        ceiling: "opus",
+        fallback: "sonnet",
+        source: "project",
+      },
     });
     expect(coder!.pin).toBeUndefined();
     // haiku is the tester's own fallback: nothing to pass
-    expect(tester).toMatchObject({ model: "haiku", range: { fallback: "haiku" } });
+    expect(tester).toMatchObject({
+      model: "haiku",
+      range: { fallback: "haiku" },
+    });
     expect(reviewer!.pin).toMatchObject({ status: "pinned", model: "opus" });
     expect(advice.some((a) => a.allRolesPinned)).toBe(false);
 
@@ -628,10 +724,18 @@ describe("adjudicatePlan with ranged swarm agents (#104)", () => {
     expect(scores(coder)).toMatchObject({
       [RANGED_FLAG]: true,
       [FALLBACK_PIN_FIELD]: "sonnet",
-      pin: { status: "ranged", model: "sonnet", range: { floor: "haiku", ceiling: "opus" } },
+      pin: {
+        status: "ranged",
+        model: "sonnet",
+        range: { floor: "haiku", ceiling: "opus" },
+      },
     });
     expect(scores(coder).pinDeferred).toBeUndefined();
-    expect(scores(tester)).toMatchObject({ ranged: true, fallbackPin: "haiku", pinDeferred: true });
+    expect(scores(tester)).toMatchObject({
+      ranged: true,
+      fallbackPin: "haiku",
+      pinDeferred: true,
+    });
     expect(scores(reviewer)).toMatchObject({ pinDeferred: true });
     expect(scores(reviewer).ranged).toBeUndefined();
     const coderRow = db.adjudicator.get(coder!.rowId!)!;
@@ -647,8 +751,14 @@ describe("adjudicatePlan with ranged swarm agents (#104)", () => {
     const task: Array<[string, string]> = [["Rename a variable in the coder module", "coder"]];
     // haiku, raised to the apply floor sonnet: the coder's fallback, so it is kept
     const floor = await plan(p, task, { apply: { floor: "sonnet" } });
-    expect(floor.advice[0]).toMatchObject({ model: "sonnet", range: { fallback: "sonnet" } });
-    expect(floor.scores(floor.advice[0])).toMatchObject({ ranged: true, pinDeferred: true });
+    expect(floor.advice[0]).toMatchObject({
+      model: "sonnet",
+      range: { fallback: "sonnet" },
+    });
+    expect(floor.scores(floor.advice[0])).toMatchObject({
+      ranged: true,
+      pinDeferred: true,
+    });
 
     const forced = await plan(p, task, {}, { CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" });
     expect(forced.advice[0]).toMatchObject({ forced: true, model: "haiku" });
@@ -744,7 +854,10 @@ describe("adjudicatePlan with ranged swarm agents (#104)", () => {
     const p = project();
     const task: Array<[string, string]> = [["Rename a variable in the coder module", "coder"]];
     for (const off of [{ enabled: false }, { surfaces: { plan: false } }]) {
-      const ctx = { root: p.root, config: configWith({ enabled: true, ...off }) };
+      const ctx = {
+        root: p.root,
+        config: configWith({ enabled: true, ...off }),
+      };
       const db = getStorage(getContext(p.root), { vectors: false });
       const run = db.swarm.runCreate({
         id: `off-${Math.random().toString(36).slice(2, 8)}`,
@@ -858,14 +971,22 @@ swarms:
     const task: Array<[string, string]> = [["Rename a variable in the tester module", "tester"]];
     // the tester ranges haiku..sonnet around haiku: an apply floor of sonnet moves it up
     const up = await plan(p, task, { apply: { floor: "sonnet" } });
-    expect(up.advice[0]).toMatchObject({ model: "sonnet", range: { fallback: "haiku" } });
+    expect(up.advice[0]).toMatchObject({
+      model: "sonnet",
+      range: { fallback: "haiku" },
+    });
     expect(planLines(up.advice)[0]).toMatch(
       /^#\d+ → swarm-rng-tester · model sonnet \(range haiku–sonnet, fallback haiku\) · /,
     );
-    expect(up.scores(up.advice[0])).toMatchObject({ ranged: true, fallbackPin: "haiku" });
+    expect(up.scores(up.advice[0])).toMatchObject({
+      ranged: true,
+      fallbackPin: "haiku",
+    });
     expect(up.scores(up.advice[0]).pinDeferred).toBeUndefined();
     // apply bounds above the whole range: nothing to pick, the fallback stays and the row says so
-    const miss = await plan(p, task, { apply: { floor: "opus", ceiling: "fable" } });
+    const miss = await plan(p, task, {
+      apply: { floor: "opus", ceiling: "fable" },
+    });
     expect(miss.advice[0]!.model).toBeUndefined();
     expect(planLines(miss.advice)[0]).toMatch(
       /^#\d+ → swarm-rng-tester · fallback haiku \(range haiku–sonnet; no pick inside apply\.floor\.\.ceiling\) · /,
@@ -875,7 +996,10 @@ swarms:
       fallbackPin: "haiku",
       pinDeferred: true,
     });
-    expect(planPassing(miss.advice, {})).toMatchObject({ model: false, pinned: true });
+    expect(planPassing(miss.advice, {})).toMatchObject({
+      model: false,
+      pinned: true,
+    });
   });
 
   it("a role's own ceiling clamps a hard task although apply allows more (#107)", async () => {
@@ -923,10 +1047,15 @@ swarms:
     // every plan row stores the tier its line names, for follow detection
     expect(scores(advice[0])[ADVISED_PICK_FIELD]).toBe("sonnet");
     expect(scores(advice[0]).pinDeferred).toBeUndefined();
-    expect(scores(advice[1])).toMatchObject({ pinDeferred: true, [ADVISED_PICK_FIELD]: "sonnet" });
+    expect(scores(advice[1])).toMatchObject({
+      pinDeferred: true,
+      [ADVISED_PICK_FIELD]: "sonnet",
+    });
 
     // under FORCE the model is informational, and still the clamped tier
-    const forced = await plan(p, tasks, ceiling, { CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" });
+    const forced = await plan(p, tasks, ceiling, {
+      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
+    });
     expect(planLines(forced.advice)[0]).toMatch(/ · model sonnet \(informational\) · /);
     expect(forced.scores(forced.advice[0])).toMatchObject({
       forced: true,
@@ -967,6 +1096,7 @@ describe("onPreAgent: ranged swarm agents (#104)", () => {
       routing?: boolean;
       /** The role actually dispatched, when it is not the planned one (mesh topology). */
       agentRole?: string;
+      provider?: AdjudicatorProvider | null;
     } = {},
   ) {
     const ctx: ProjectContext = getContext(p.root);
@@ -1011,57 +1141,106 @@ describe("onPreAgent: ranged swarm agents (#104)", () => {
       cwd: p.root,
       hook_event_name: "PreToolUse",
       tool_name: "Agent",
-      tool_input: { subagent_type: agentType, prompt: `task #${task.id}`, ...opts.input },
+      tool_input: {
+        subagent_type: agentType,
+        prompt: `task #${task.id}`,
+        ...opts.input,
+      },
     };
-    const spawn = { kind: "worker" as const, agentType, runId: run.id, taskId: task.id };
-    const deps = { env: { HOME: home, ...opts.env }, provider: null };
+    const spawn = {
+      kind: "worker" as const,
+      agentType,
+      runId: run.id,
+      taskId: task.id,
+    };
+    const deps = {
+      env: { HOME: home, ...opts.env },
+      provider: opts.provider ?? null,
+    };
     const a = await onPreAgent(ctx, input, spawn, deps);
     const row = db.adjudicator.get(a!.rowId!)!;
     const routed = opts.routing
       ? await afterRouting(ctx, input, spawn, undefined, deps)
       : undefined;
-    return { a: a!, row, sc: JSON.parse(row.scores ?? "{}") as Record<string, unknown>, routed };
+    return {
+      a: a!,
+      row,
+      sc: JSON.parse(row.scores ?? "{}") as Record<string, unknown>,
+      routed,
+    };
   }
 
   const EFFORT = "pass effort:'low' (Claude Code 2.1.292+)";
+  // Apply mode sets the advised effort itself, in the same updatedInput as the model.
+  const APPLIED = "effort low applied";
 
-  it("apply sets the pick inside the range, never effort; the baseline is the fallback", async () => {
+  it("apply sets the pick inside the range and the advised effort; the baseline is the fallback", async () => {
     const p = project();
     const { a, row, sc, routed } = await dispatch(p, { tier: "haiku" }, { routing: true });
     expect(a.model).toBe("haiku");
     expect(a.action).toBe("applied");
     expect(a.note).toBe(
-      `adjudicator: model haiku applied (range haiku–opus, fallback sonnet; complexity 1, conf 0.90); ${EFFORT}, role coder`,
+      `adjudicator: model haiku applied (range haiku–opus, fallback sonnet; complexity 1, conf 0.90); ${APPLIED}, role coder`,
     );
-    expect(row).toMatchObject({ action: "applied", modelFinal: "haiku", baselineModel: "sonnet" });
+    expect(a.effort).toBe("low");
+    expect(row).toMatchObject({
+      action: "applied",
+      modelFinal: "haiku",
+      baselineModel: "sonnet",
+    });
     expect(sc).toMatchObject({
       [RANGED_FLAG]: true,
       [FALLBACK_PIN_FIELD]: "sonnet",
-      pin: { status: "ranged", model: "sonnet", range: { floor: "haiku", ceiling: "opus" } },
+      pin: {
+        status: "ranged",
+        model: "sonnet",
+        range: { floor: "haiku", ceiling: "opus" },
+      },
     });
     expect(sc.pinDeferred).toBeUndefined();
     const ui = routed?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
     expect(routed?.hookSpecificOutput?.permissionDecision).toBe("allow");
-    expect(ui).toMatchObject({ model: "haiku", subagent_type: "swarm-rng-coder" });
-    expect(ui).not.toHaveProperty("effort");
+    expect(ui).toMatchObject({
+      model: "haiku",
+      effort: "low",
+      subagent_type: "swarm-rng-coder",
+    });
+    expect(sc.effortApplied).toBe("low");
   });
 
   it("a pick above the range is clamped to its ceiling", async () => {
-    const { a, row } = await dispatch(project(), { tier: "fable", complexity: 4, effort: "max" });
+    const { a, row } = await dispatch(project(), {
+      tier: "fable",
+      complexity: 4,
+      effort: "max",
+    });
     expect(a.model).toBe("opus");
     expect(row.modelFinal).toBe("opus");
   });
 
-  it("a pick that is the fallback's tier passes no model and counts as a kept pin", async () => {
+  it("a pick that is the fallback's tier passes no model, still sets the effort, and counts as a kept pin", async () => {
     const p = project();
-    const kept = await dispatch(p, { tier: "sonnet", complexity: 2, effort: "medium" });
+    const kept = await dispatch(p, {
+      tier: "sonnet",
+      complexity: 2,
+      effort: "medium",
+    });
     expect(kept.a.model).toBeUndefined();
     expect(kept.a.action).toBe("respected");
     expect(kept.a.note).toBe(
-      "adjudicator: fallback sonnet (range haiku–opus; matches the adjudicator's pick); pass effort:'medium' (Claude Code 2.1.292+), role coder",
+      "adjudicator: fallback sonnet (range haiku–opus; matches the adjudicator's pick); effort medium applied, role coder",
     );
-    expect(kept.row).toMatchObject({ modelFinal: "sonnet", baselineModel: "sonnet" });
-    expect(kept.sc).toMatchObject({ ranged: true, fallbackPin: "sonnet", pinDeferred: true });
+    expect(kept.a.effort).toBe("medium");
+    expect(kept.sc.effortApplied).toBe("medium");
+    expect(kept.row).toMatchObject({
+      modelFinal: "sonnet",
+      baselineModel: "sonnet",
+    });
+    expect(kept.sc).toMatchObject({
+      ranged: true,
+      fallbackPin: "sonnet",
+      pinDeferred: true,
+    });
     // apply.ceiling sonnet clamps opus down to the fallback: kept as well
     const capped = await dispatch(
       p,
@@ -1072,22 +1251,27 @@ describe("onPreAgent: ranged swarm agents (#104)", () => {
     expect(capped.sc.pinDeferred).toBe(true);
   });
 
-  it("a kept fallback leaves the call's input alone and only adds the note (#107)", async () => {
+  it("a kept fallback sends no model: the updatedInput carries only the effort, and the note (#107)", async () => {
     const kept = await dispatch(
       project(),
       { tier: "sonnet", complexity: 2, effort: "medium" },
       { routing: true },
     );
     const h = kept.routed?.hookSpecificOutput;
-    expect(h?.updatedInput).toBeUndefined();
-    expect(h?.permissionDecision).toBeUndefined();
+    expect(h?.updatedInput).toEqual({
+      subagent_type: "swarm-rng-coder",
+      prompt: expect.stringMatching(/^task #\d+$/),
+      effort: "medium",
+    });
+    expect(h?.updatedInput).not.toHaveProperty("model");
+    expect(h?.permissionDecision).toBe("allow");
     expect(h?.additionalContext).toBe(kept.a.note);
     expect(h?.additionalContext).toMatch(
       /^adjudicator: fallback sonnet \(range haiku–opus; matches the adjudicator's pick\); /,
     );
   });
 
-  it("an explicit model, FORCE or a low confidence leaves the call alone", async () => {
+  it("an explicit model, FORCE or a low confidence leaves the model alone (effort is still set)", async () => {
     const p = project();
     const explicit = await dispatch(
       p,
@@ -1101,26 +1285,38 @@ describe("onPreAgent: ranged swarm agents (#104)", () => {
       modelRequested: "opus",
       baselineModel: "sonnet",
     });
-    expect(explicit.routed?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    expect(explicit.routed?.hookSpecificOutput?.updatedInput).toMatchObject({
+      model: "opus",
+      effort: "low",
+    });
 
     const forced = await dispatch(
       p,
       { tier: "haiku" },
-      { env: { CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1", CLAUDE_CODE_SUBAGENT_MODEL: "opus" } },
+      {
+        env: {
+          CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
+          CLAUDE_CODE_SUBAGENT_MODEL: "opus",
+        },
+      },
     );
     expect(forced.a.model).toBeUndefined();
     expect(forced.a.note).toMatch(/^adjudicator: CLAUDE_CODE_SUBAGENT_MODEL_FORCE sets the model/);
     expect(forced.sc).toMatchObject({ forced: true });
     expect(forced.sc.ranged).toBeUndefined();
     expect(forced.row.baselineModel).toBe("opus");
+    expect(forced.a.effort).toBe("low");
+    expect(forced.a.note).toMatch(/; effort low applied, role coder$/);
 
     const unsure = await dispatch(p, { tier: "haiku", confidence: 0.5 });
     expect(unsure.a.model).toBeUndefined();
     expect(unsure.a.action).toBe("advised");
     expect(unsure.row.modelFinal).toBe("sonnet");
     expect(unsure.a.note).toBe(
-      `adjudicator: model haiku would do (range haiku–opus, fallback sonnet; complexity 1, conf 0.50): pass model:'haiku'; ${EFFORT}, role coder`,
+      `adjudicator: model haiku would do (range haiku–opus, fallback sonnet; complexity 1, conf 0.50): pass model:'haiku'; ${APPLIED}, role coder`,
     );
+    // minConfidence gates the model only: apply mode in scope still sets the advised effort
+    expect(unsure.a.effort).toBe("low");
     expect(unsure.sc.pinDeferred).toBeUndefined();
   });
 
@@ -1154,7 +1350,15 @@ describe("onPreAgent: ranged swarm agents (#104)", () => {
     const free = await dispatch(
       p,
       { tier: "haiku", role: "lead" },
-      { adjudicator: { apply: { scope: "swarm", minConfidence: 0.7, respectFrontmatter: false } } },
+      {
+        adjudicator: {
+          apply: {
+            scope: "swarm",
+            minConfidence: 0.7,
+            respectFrontmatter: false,
+          },
+        },
+      },
     );
     expect(free.a.model).toBe("haiku");
     expect(free.sc.ranged).toBeUndefined();
@@ -1196,7 +1400,11 @@ swarms:
             const r = await dispatch(
               p,
               { role, tier },
-              { adjudicator: { apply: { scope: "swarm", minConfidence: 0.7, floor, ceiling } } },
+              {
+                adjudicator: {
+                  apply: { scope: "swarm", minConfidence: 0.7, floor, ceiling },
+                },
+              },
             );
             if (want !== undefined && want !== fallback) {
               seen.moved++;
@@ -1228,14 +1436,39 @@ swarms:
     const below = await dispatch(p, { tier: "haiku", confidence: 0.69 });
     expect(below.a.action).toBe("advised");
     expect(below.a.model).toBeUndefined();
-    expect(below.row).toMatchObject({ action: "advised", modelFinal: "sonnet" });
-    const strict = { adjudicator: { apply: { scope: "swarm", minConfidence: 0.95 } } };
+    expect(below.row).toMatchObject({
+      action: "advised",
+      modelFinal: "sonnet",
+    });
+    const strict = {
+      adjudicator: { apply: { scope: "swarm", minConfidence: 0.95 } },
+    };
     expect((await dispatch(p, { tier: "haiku", confidence: 0.9 }, strict)).a.action).toBe(
       "advised",
     );
     expect((await dispatch(p, { tier: "haiku", confidence: 0.95 }, strict)).a.action).toBe(
       "applied",
     );
+  });
+
+  it("a dispatch with a plan row never asks the provider: the plan's verdict is the decision, effort included", async () => {
+    const p = project();
+    const adjudicator = {
+      provider: "openai-compatible",
+      openai: { preset: "ollama" },
+      apply: { scope: "all", minConfidence: 0 },
+    };
+    for (const role of ["coder", "reviewer"]) {
+      const provider = stubProvider("opus", 4);
+      const r = await dispatch(
+        p,
+        { role, tier: "haiku", effort: "medium" },
+        { adjudicator, provider },
+      );
+      expect(provider.calls, role).toBe(0);
+      expect(r.a.effort, role).toBe("medium");
+      expect(r.row.parentId, role).not.toBeNull();
+    }
   });
 
   describe("a ranged agent outside a swarm run (#107)", () => {
@@ -1247,13 +1480,19 @@ swarms:
         agent?: string;
         input?: Record<string, unknown>;
         env?: NodeJS.ProcessEnv;
+        /** Routing denied or asked this call. */
+        blocked?: boolean;
       } = {},
     ) {
       const p = project();
       const ctx = getContext(p.root);
       ctx.config = {
         ...ctx.config,
-        adjudicator: configWith({ enabled: true, mode: "apply", ...adjudicator }).adjudicator,
+        adjudicator: configWith({
+          enabled: true,
+          mode: "apply",
+          ...adjudicator,
+        }).adjudicator,
       };
       const db = getStorage(ctx, { vectors: false });
       const a = await onPreAgent(
@@ -1272,9 +1511,14 @@ swarms:
         },
         undefined,
         { env: { HOME: home, ...opts.env }, provider: opts.provider ?? null },
+        opts.blocked,
       );
       const row = db.adjudicator.get(a!.rowId!)!;
-      return { a: a!, row, sc: JSON.parse(row.scores ?? "{}") as Record<string, unknown> };
+      return {
+        a: a!,
+        row,
+        sc: JSON.parse(row.scores ?? "{}") as Record<string, unknown>,
+      };
     }
 
     it("is only advised under apply.scope swarm, the default", async () => {
@@ -1284,7 +1528,11 @@ swarms:
       expect(r.a.note).toMatch(
         /^adjudicator: model haiku would do \(range haiku–opus, fallback sonnet; complexity \d, conf 0\.\d\d\): pass model:'haiku'; /,
       );
-      expect(r.row).toMatchObject({ action: "advised", modelFinal: null, baselineModel: "sonnet" });
+      expect(r.row).toMatchObject({
+        action: "advised",
+        modelFinal: null,
+        baselineModel: "sonnet",
+      });
       expect(r.sc).toMatchObject({ ranged: true, fallbackPin: "sonnet" });
       expect(r.sc.pinDeferred).toBeUndefined();
     });
@@ -1292,7 +1540,10 @@ swarms:
     it("gets the pick inside its range under apply.scope all", async () => {
       const r = await loose({ apply: { scope: "all", minConfidence: 0.7 } });
       expect(r.a).toMatchObject({ action: "applied", model: "haiku" });
-      expect(r.row).toMatchObject({ modelFinal: "haiku", baselineModel: "sonnet" });
+      expect(r.row).toMatchObject({
+        modelFinal: "haiku",
+        baselineModel: "sonnet",
+      });
       expect(r.sc).toMatchObject({ ranged: true, fallbackPin: "sonnet" });
     });
 
@@ -1316,7 +1567,10 @@ swarms:
       expect(asked).toBe(1);
       expect(Date.now() - t0).toBeLessThan(5000);
       expect(r.a).toMatchObject({ action: "applied", model: "haiku" });
-      expect(r.row).toMatchObject({ modelFinal: "haiku", baselineModel: "sonnet" });
+      expect(r.row).toMatchObject({
+        modelFinal: "haiku",
+        baselineModel: "sonnet",
+      });
     });
 
     it("costs nothing while the adjudicator or its agent surface is off (#107)", async () => {
@@ -1340,7 +1594,10 @@ swarms:
             cwd: p.root,
             hook_event_name: "PreToolUse",
             tool_name: "Agent",
-            tool_input: { subagent_type: "swarm-rng-coder", prompt: "Rename a variable" },
+            tool_input: {
+              subagent_type: "swarm-rng-coder",
+              prompt: "Rename a variable",
+            },
           },
           undefined,
           { env: { HOME: home }, provider },
@@ -1352,13 +1609,13 @@ swarms:
       }
     });
 
-    it("asks the provider inline only when its verdict could move the model", async () => {
+    it("asks the provider inline only when its verdict could be applied: the model, or the effort alone", async () => {
       const cfg = {
         provider: "openai-compatible",
         openai: { preset: "ollama" },
         apply: { scope: "all", minConfidence: 0 },
       };
-      // the heuristic rates a rename haiku; the provider is asked, and its answer counts
+      // the heuristic rates a rename haiku and low effort; the provider is asked, and its answer counts
       const ranged = stubProvider("opus");
       const moved = await loose(cfg, { provider: ranged });
       expect(ranged.calls).toBe(1);
@@ -1366,17 +1623,57 @@ swarms:
       expect(moved.a.model).not.toBe("haiku");
       expect(moved.row.modelFinal).toBe(moved.a.model);
 
-      // nothing to move, so nothing to ask: a plain pin, a model on the call, FORCE, advise mode
-      const quiet: Array<[string, Parameters<typeof loose>]> = [
+      // the model cannot move (a pin, a model on the call, FORCE), but the effort still applies,
+      // and the provider's verdict (complexity 4, blended with the heuristic: high), not the
+      // heuristic's own low, is what gets applied
+      const effortOnly: Array<[string, Parameters<typeof loose>]> = [
         ["a pinned agent", [cfg, { agent: "swarm-rng-reviewer" }]],
         ["a model on the call", [cfg, { input: { model: "haiku" } }]],
         ["FORCE", [cfg, { env: { CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1" } }]],
+      ];
+      for (const [what, [adjudicator, opts]] of effortOnly) {
+        const provider = stubProvider("opus", 4);
+        const r = await loose(adjudicator, { ...opts, provider });
+        expect(provider.calls, what).toBe(1);
+        expect(r.a.effort, what).toBe("high");
+        expect(r.sc.effortApplied, what).toBe("high");
+        expect(r.row.effort, what).toBe("high");
+        // the model stays respected
+        expect(r.a.model, what).toBeUndefined();
+        expect(r.a.action, what).not.toBe("applied");
+      }
+      // and the same verdict from the heuristic alone is lower: the provider's answer is what applied
+      const heuristic = await loose(cfg, { agent: "swarm-rng-reviewer" });
+      expect(heuristic.a.effort).toBe("low");
+
+      // nothing to apply, so nothing to ask: advise mode, CLAUDE_CODE_EFFORT_LEVEL, a fork, a
+      // blocked (deny/ask) call
+      const quiet: Array<[string, Parameters<typeof loose>]> = [
         ["advise mode", [{ ...cfg, mode: "advise" }, {}]],
+        [
+          "advise mode, a pinned agent",
+          [{ ...cfg, mode: "advise" }, { agent: "swarm-rng-reviewer" }],
+        ],
+        [
+          "CLAUDE_CODE_EFFORT_LEVEL on a pinned agent",
+          [
+            cfg,
+            {
+              agent: "swarm-rng-reviewer",
+              env: { CLAUDE_CODE_EFFORT_LEVEL: "high" },
+            },
+          ],
+        ],
+        ["a fork", [cfg, { agent: "fork" }]],
+        ["a blocked call, a pinned agent", [cfg, { agent: "swarm-rng-reviewer", blocked: true }]],
+        ["a blocked call, an explicit model", [cfg, { input: { model: "haiku" }, blocked: true }]],
       ];
       for (const [what, [adjudicator, opts]] of quiet) {
-        const provider = stubProvider("opus");
-        await loose(adjudicator, { ...opts, provider });
+        const provider = stubProvider("opus", 4);
+        const r = await loose(adjudicator, { ...opts, provider });
         expect(provider.calls, what).toBe(0);
+        expect(r.a.effort, what).toBeUndefined();
+        expect(r.sc.effortApplied, what).toBeUndefined();
       }
       // pins ignored: the range goes with them and the agent is open to the provider again
       const free = stubProvider("opus");
@@ -1388,31 +1685,41 @@ swarms:
     });
   });
 
-  it("never adds effort: the call's own stays and the pick is still applied (#107)", async () => {
+  it("the hook's effort overrides the call's own; only CLAUDE_CODE_EFFORT_LEVEL outranks it (#107)", async () => {
     const p = project();
     const own = await dispatch(p, { tier: "haiku" }, { input: { effort: "high" }, routing: true });
     expect(own.a.model).toBe("haiku");
     expect(own.a.note).toBe(
-      "adjudicator: model haiku applied (range haiku–opus, fallback sonnet; complexity 1, conf 0.90); suggested effort low, role coder",
+      `adjudicator: model haiku applied (range haiku–opus, fallback sonnet; complexity 1, conf 0.90); ${APPLIED}, role coder`,
     );
     expect(own.routed?.hookSpecificOutput?.updatedInput).toMatchObject({
       model: "haiku",
-      effort: "high",
+      effort: "low",
     });
-    // CLAUDE_CODE_EFFORT_LEVEL outranks `effort` too: the pick is applied, no effort is added
+    // the row keeps what the call passed, next to what the hook sent
+    expect(own.sc).toMatchObject({
+      passedEffort: "high",
+      effortApplied: "low",
+    });
+    // CLAUDE_CODE_EFFORT_LEVEL outranks the hook: the pick is applied, no effort is added
     const env = await dispatch(
       p,
       { tier: "haiku" },
       { env: { CLAUDE_CODE_EFFORT_LEVEL: "max" }, routing: true },
     );
     expect(env.a.model).toBe("haiku");
-    expect(env.a.note).toMatch(/; suggested effort low, role coder$/);
+    expect(env.a.note).toMatch(
+      /; effort low not applied: CLAUDE_CODE_EFFORT_LEVEL is set and outranks it, role coder$/,
+    );
+    expect(env.a.effort).toBeUndefined();
+    expect(env.sc.effortApplied).toBeUndefined();
+    expect(env.sc.effortEnv).toBe("max");
     const ui = env.routed?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
     expect(ui).toMatchObject({ model: "haiku" });
     expect(ui).not.toHaveProperty("effort");
   });
 
-  it("a ranged file another file shadows with a different model is an unknown pin: nothing is applied (#107)", async () => {
+  it("a ranged file another file shadows with a different model is an unknown pin: no model is applied (#107)", async () => {
     const p = project();
     writeFileSync(
       join(p.root, ".claude", "agents", "shadow.md"),
@@ -1422,10 +1729,13 @@ swarms:
     expect(r.a.model).toBeUndefined();
     expect(r.a.action).toBe("advised");
     expect(r.a.note).toBe(
-      `adjudicator: model pin is unknown (adjudicator would pick haiku; not overridden while the agent's definition cannot be read); ${EFFORT}, role coder`,
+      `adjudicator: model pin is unknown (adjudicator would pick haiku; not overridden while the agent's definition cannot be read); ${APPLIED}, role coder`,
     );
     expect(r.row).toMatchObject({ action: "advised", modelFinal: null });
-    expect(r.sc).toMatchObject({ pinDeferred: true, pin: { status: "unknown" } });
+    expect(r.sc).toMatchObject({
+      pinDeferred: true,
+      pin: { status: "unknown" },
+    });
     expect(r.sc.ranged).toBeUndefined();
     expect(r.sc.fallbackPin).toBeUndefined();
   });
@@ -1452,7 +1762,10 @@ swarms:
       );
       expect(r.a.model, force).toBe("haiku");
       expect(r.sc.forced, force).toBeUndefined();
-      expect(r.sc, force).toMatchObject({ ranged: true, fallbackPin: "sonnet" });
+      expect(r.sc, force).toMatchObject({
+        ranged: true,
+        fallbackPin: "sonnet",
+      });
       // the fallback is what ran without the adjudicator, whatever CLAUDE_CODE_SUBAGENT_MODEL says
       expect(r.row.baselineModel, force).toBe("sonnet");
     }
@@ -1516,7 +1829,10 @@ swarms:
       // priced at the env model, the same calls would have credited something else
       expect(repriceAt(calls, "opus")! - ran).not.toBeCloseTo(base - ran, 6);
       const report = savingsReport(db);
-      expect(report).toMatchObject({ creditedRows: 1, keptModel: { pin: 0, force: 0, fork: 0 } });
+      expect(report).toMatchObject({
+        creditedRows: 1,
+        keptModel: { pin: 0, force: 0, fork: 0 },
+      });
       expect(report.realisedUsd).toBeCloseTo(base - ran, 12);
       expect(report.matrix).toEqual([{ suggested: "haiku", actual: "haiku", n: 1 }]);
     });
@@ -1559,7 +1875,11 @@ swarms:
 
     it("a pick that is the fallback is no saving and no disagreement: a kept pin (#107)", async () => {
       const p = project();
-      const d = await dispatch(p, { tier: "sonnet", complexity: 2, effort: "medium" });
+      const d = await dispatch(p, {
+        tier: "sonnet",
+        complexity: 2,
+        effort: "medium",
+      });
       expect(d.a.action).toBe("respected");
       const { db, row } = settle(p, d.row, "claude-sonnet-5-5");
       expect(row).toMatchObject({
@@ -1581,7 +1901,10 @@ swarms:
         { tier: "haiku" },
         { adjudicator: { mode: "advise" }, input: { model: "haiku" } },
       );
-      expect(d.row).toMatchObject({ action: "advised", modelRequested: "haiku" });
+      expect(d.row).toMatchObject({
+        action: "advised",
+        modelRequested: "haiku",
+      });
       const { row, calls } = settle(p, d.row, "claude-haiku-4-5");
       expect(row.action).toBe("followed");
       expect(row.baselineModel).toBe("sonnet");
@@ -1610,7 +1933,11 @@ swarms:
         { role: "steady", tier: "haiku" },
         { adjudicator: { mode: "advise" }, input: { model: "sonnet" } },
       );
-      expect(d.row).toMatchObject({ action: "advised", tier: "haiku", modelRequested: "sonnet" });
+      expect(d.row).toMatchObject({
+        action: "advised",
+        tier: "haiku",
+        modelRequested: "sonnet",
+      });
       expect(d.row.baselineModel).toBe("opus");
       const { row, calls } = settle(p, d.row, "claude-sonnet-5-5");
       expect(row.action).toBe("followed");
@@ -1628,7 +1955,11 @@ swarms:
         { tier: "fable" },
         { adjudicator: { mode: "advise" }, input: { model: "opus" } },
       );
-      expect(d.row).toMatchObject({ action: "advised", tier: "fable", modelRequested: "opus" });
+      expect(d.row).toMatchObject({
+        action: "advised",
+        tier: "fable",
+        modelRequested: "opus",
+      });
       const { row, calls } = settle(p, d.row, "claude-opus-4-5");
       expect(row.action).toBe("followed");
       const base = repriceAt(calls, "sonnet")!;
@@ -1647,11 +1978,21 @@ swarms:
         {
           role: "tester",
           tier: "opus",
-          scores: JSON.stringify({ role: { confidence: 0.9 }, [ADVISED_PICK_FIELD]: "sonnet" }),
+          scores: JSON.stringify({
+            role: { confidence: 0.9 },
+            [ADVISED_PICK_FIELD]: "sonnet",
+          }),
         },
-        { adjudicator: { mode: "advise" }, agentRole: "coder", input: { model: "opus" } },
+        {
+          adjudicator: { mode: "advise" },
+          agentRole: "coder",
+          input: { model: "opus" },
+        },
       );
-      expect(d.row).toMatchObject({ action: "advised", modelRequested: "opus" });
+      expect(d.row).toMatchObject({
+        action: "advised",
+        modelRequested: "opus",
+      });
       expect(d.row.parentId).not.toBeNull();
       expect(advisedPick(d.row)).toBe("opus");
       const { row } = settle(p, d.row, "claude-opus-4-5");
@@ -1671,7 +2012,11 @@ swarms:
           input: { model: "haiku" },
         },
       );
-      expect(d.row).toMatchObject({ action: "advised", tier: "opus", modelRequested: "haiku" });
+      expect(d.row).toMatchObject({
+        action: "advised",
+        tier: "opus",
+        modelRequested: "haiku",
+      });
       const { row, calls } = settle(p, d.row, "claude-haiku-4-5");
       expect(row.action).toBe("followed");
       const base = repriceAt(calls, "sonnet")!;
@@ -1704,9 +2049,11 @@ swarms:
       const d = await dispatch(p, { tier: "fable" }, { adjudicator: { mode: "advise" } });
       expect(d.sc[ADVISED_PICK_FIELD]).toBe("opus");
       expect(advisedPick(d.row)).toBe("opus");
-      expect(advisedPick({ scores: JSON.stringify({ ranged: true, advisedPick: "sonnet" }) })).toBe(
-        "sonnet",
-      );
+      expect(
+        advisedPick({
+          scores: JSON.stringify({ ranged: true, advisedPick: "sonnet" }),
+        }),
+      ).toBe("sonnet");
       // a non-ranged row's clamped tier is read too (#128)
       expect(advisedPick({ scores: JSON.stringify({ advisedPick: "haiku" }) })).toBe("haiku");
       // not a tier, no field, or not JSON: no pick
@@ -1745,7 +2092,11 @@ swarms:
       const bare = await dispatch(p, { role: "free", tier: "opus" }, CLAMPED);
       expect(bare.a.note).toContain("pass model:'haiku'");
       expect(bare.sc[ADVISED_PICK_FIELD]).toBe("haiku");
-      expect(d.row).toMatchObject({ action: "advised", tier: "opus", modelRequested: "haiku" });
+      expect(d.row).toMatchObject({
+        action: "advised",
+        tier: "opus",
+        modelRequested: "haiku",
+      });
       const { row, calls } = settle(p, d.row, "claude-haiku-4-5");
       expect(row.action).toBe("followed");
       expect(tierOf(row.baselineModel)).not.toBe("haiku");
@@ -1803,7 +2154,10 @@ swarms:
         role: "free",
       });
       const env = { HOME: home };
-      const [advice] = await adjudicatePlan(ctx, db, run, p.swarm, [task], { provider: null, env });
+      const [advice] = await adjudicatePlan(ctx, db, run, p.swarm, [task], {
+        provider: null,
+        env,
+      });
       const planRow = db.adjudicator.get(advice!.rowId!)!;
       expect(planRow.tier).toBe("opus");
       expect(advice!.model).toBe("haiku");
@@ -1817,12 +2171,24 @@ swarms:
         cwd: p.root,
         hook_event_name: "PreToolUse",
         tool_name: "Agent",
-        tool_input: { subagent_type: agentType, prompt: `task #${task.id}`, model: advice!.model },
+        tool_input: {
+          subagent_type: agentType,
+          prompt: `task #${task.id}`,
+          model: advice!.model,
+        },
       };
-      const spawn = { kind: "worker" as const, agentType, runId: run.id, taskId: task.id };
+      const spawn = {
+        kind: "worker" as const,
+        agentType,
+        runId: run.id,
+        taskId: task.id,
+      };
       const a = await onPreAgent(ctx, input, spawn, { env, provider: null });
       const dispatched = db.adjudicator.get(a!.rowId!)!;
-      expect(dispatched).toMatchObject({ action: "advised", modelRequested: "haiku" });
+      expect(dispatched).toMatchObject({
+        action: "advised",
+        modelRequested: "haiku",
+      });
       expect(advisedPick(dispatched)).toBe("haiku");
       const { row } = settle(p, dispatched, "claude-haiku-4-5");
       expect(row.action).toBe("followed");
@@ -1860,7 +2226,11 @@ describe("Agent notes: the role gate and saturated briefs (#104)", () => {
       goal: "g",
       topology: "hierarchical",
     });
-    const task = db.swarm.taskAdd({ run_id: run.id, title: "Rename a variable", role: "coder" });
+    const task = db.swarm.taskAdd({
+      run_id: run.id,
+      title: "Rename a variable",
+      role: "coder",
+    });
     db.adjudicator.insert({
       surface: "plan",
       inputHash: "h",
@@ -1880,9 +2250,18 @@ describe("Agent notes: the role gate and saturated briefs (#104)", () => {
         cwd: p.root,
         hook_event_name: "PreToolUse",
         tool_name: "Agent",
-        tool_input: { subagent_type: "swarm-pin-coder", prompt: "task", ...call },
+        tool_input: {
+          subagent_type: "swarm-pin-coder",
+          prompt: "task",
+          ...call,
+        },
       },
-      { kind: "worker", agentType: "swarm-pin-coder", runId: run.id, taskId: task.id },
+      {
+        kind: "worker",
+        agentType: "swarm-pin-coder",
+        runId: run.id,
+        taskId: task.id,
+      },
       { env: { HOME: home, ...env }, provider: null },
     );
     return a!.note!;
@@ -2008,7 +2387,10 @@ describe("baselines read CLAUDE_CODE_SUBAGENT_MODEL only for an agent without a 
     expect(await baselineOf("general-purpose", env)).toBe("haiku");
     // "off" is off for Claude Code: the hook passes the variable on without the FORCE flag
     expect(
-      await baselineOf("general-purpose", { ...env, CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "off" }),
+      await baselineOf("general-purpose", {
+        ...env,
+        CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "off",
+      }),
     ).toBe("haiku");
     expect(await baselineOf("inh", env)).toBe("claude-opus-5-5");
     expect(await baselineOf("fork", env)).toBe("claude-opus-5-5");
@@ -2071,10 +2453,20 @@ describe("dispatchRule: every combination of facts (#107)", () => {
           for (const pin of FLAGS)
             for (const effortSet of FLAGS)
               for (const saturated of FLAGS) {
-                const facts: DispatchFacts = { fork, forced, ranged, pin, effortSet, saturated };
+                const facts: DispatchFacts = {
+                  fork,
+                  forced,
+                  ranged,
+                  pin,
+                  effortSet,
+                  saturated,
+                };
                 const model = MODEL_ORDER.find(([fact]) => facts[fact])?.[1] ?? "pass";
                 const effort = fork ? "fork" : effortSet || saturated ? "informational" : "pass";
-                expect(dispatchRule(facts), JSON.stringify(facts)).toEqual({ model, effort });
+                expect(dispatchRule(facts), JSON.stringify(facts)).toEqual({
+                  model,
+                  effort,
+                });
                 checked++;
               }
     expect(checked).toBe(64);
@@ -2160,7 +2552,11 @@ describe("the ranged pick: rangedTier, rangedPasses, rangedPart (#107)", () => {
   });
 
   it("names the pick, or the kept fallback with the reason it is kept", () => {
-    const range: PlanRange = { floor: "haiku", ceiling: "opus", fallback: "sonnet[1m]" };
+    const range: PlanRange = {
+      floor: "haiku",
+      ceiling: "opus",
+      fallback: "sonnet[1m]",
+    };
     expect(rangedPart(range, "haiku")).toBe("model haiku (range haiku–opus, fallback sonnet[1m])");
     expect(rangedPart(range, "sonnet")).toBe(
       "fallback sonnet[1m] (range haiku–opus; matches the adjudicator's pick)",
@@ -2206,7 +2602,9 @@ describe("model_range from swarm.yaml to the adjudicator (#103, #107)", () => {
     const refused: Array<[string, string, string, RegExp]> = [
       [
         "floor above ceiling",
-        file({ a: "model: sonnet, model_range: { floor: opus, ceiling: haiku }" }),
+        file({
+          a: "model: sonnet, model_range: { floor: opus, ceiling: haiku }",
+        }),
         "swarms.s.agents.a.model_range",
         /floor must not be above ceiling \(haiku < sonnet < opus < fable\)/,
       ],
@@ -2338,7 +2736,11 @@ describe("model_range from swarm.yaml to the adjudicator (#103, #107)", () => {
     const p = project();
     const path = join(p.root, ".claude", "agents", "swarm-rng-coder.md");
     const pinOf = () =>
-      resolveAgentPin("swarm-rng-coder", { root: p.root, env: { HOME: home }, managedDir: null });
+      resolveAgentPin("swarm-rng-coder", {
+        root: p.root,
+        env: { HOME: home },
+        managedDir: null,
+      });
     const sync = (yaml: string) => syncAgents(p.root, ok(yaml));
 
     const text = readFileSync(path, "utf8");
@@ -2406,7 +2808,11 @@ describe("savings: the ranged row fields, the baseline order and the assumptions
   });
 
   it("withKeptModel sets one KeptModel flag, clears the others and keeps the ranged fields", () => {
-    const stored = JSON.stringify({ role: { confidence: 0.9 }, forced: true, fork: true });
+    const stored = JSON.stringify({
+      role: { confidence: 0.9 },
+      forced: true,
+      fork: true,
+    });
     const extra = { [RANGED_FLAG]: true, [FALLBACK_PIN_FIELD]: "sonnet" };
     const pin = withKeptModel(stored, "pin", extra)!;
     expect(JSON.parse(pin)).toEqual({
@@ -2473,7 +2879,10 @@ describe("savings: the ranged row fields, the baseline order and the assumptions
     it("reads CLAUDE_CODE_SUBAGENT_MODEL only from the env it is given, with FORCE off by Claude Code's rule (#124)", () => {
       const db = dbOf();
       const bare = { sessionId: sid, ts: Date.now() };
-      const withEnv = (vars: Record<string, string>) => ({ ...bare, env: vars });
+      const withEnv = (vars: Record<string, string>) => ({
+        ...bare,
+        env: vars,
+      });
       process.env.CLAUDE_CODE_SUBAGENT_MODEL = "haiku";
       process.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = "0";
       try {
@@ -2494,7 +2903,10 @@ describe("savings: the ranged row fields, the baseline order and the assumptions
         expect(resolveBaseline(db, env(force)), force).toEqual(session);
       // off, empty or undocumented: the env model is
       for (const force of ["0", "false", "no", "off", "OFF", "", "2", "y", "enabled"])
-        expect(resolveBaseline(db, env(force)), force).toEqual({ model: "sonnet", source: "env" });
+        expect(resolveBaseline(db, env(force)), force).toEqual({
+          model: "sonnet",
+          source: "env",
+        });
       // no model, or inherit: nothing to price against
       for (const model of ["", "  ", "inherit"])
         expect(resolveBaseline(db, withEnv({ CLAUDE_CODE_SUBAGENT_MODEL: model })), model).toEqual(

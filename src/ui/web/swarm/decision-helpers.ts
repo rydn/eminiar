@@ -1,9 +1,23 @@
-import type { SwarmDecision } from "../../../adjudicator/swarm-decisions.js";
+import type { SwarmDecision } from "../../../adjudicator/swarm-decision-types.js";
 
-/** Effort as shown: a level, "env override" (level unknown), "session" (fork) or "default" (agent file). */
+/**
+ * Effort as shown: the level the subagent actually ran at (read from its transcript), else the
+ * level that decided the run (env, the effort apply mode set, the call, the agent file's `effort`), else "env override"
+ * (level unknown), "session" (fork) or "default" (a session or model default). A dispatch whose
+ * effort verdict is "ignored" carries an "(ignored)" marker; a level apply mode set carries
+ * "(applied)". The verdict follows effortFollowOf: when apply mode set the effort, a dispatch is
+ * followed only if it ran at the advised level (the level set is always the advised one), else
+ * "ignored"; otherwise it is followed when it ran at the advised level or the level passed on the
+ * call (else the agent file's) equals the advice, else "ignored".
+ */
 export function effortLabel(d: SwarmDecision): string | undefined {
   if (!d.ran) return undefined;
-  if (d.ran.effortEffective) return d.ran.effortEffective;
+  const level = d.ran.effortActual ?? d.ran.effortEffective;
+  if (level) {
+    if (d.effortFollow === "ignored") return `${level} (ignored)`;
+    return d.ran.effortSource === "applied" ? `${level} (applied)` : level;
+  }
+  if (d.ran.effortSource === "applied") return "applied";
   if (d.ran.effortSource === "env") return "env override";
   if (d.ran.effortSource === "fork") return "session";
   return "default";
