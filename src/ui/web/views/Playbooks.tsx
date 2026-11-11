@@ -6,6 +6,7 @@ import {
   fillPrompt,
   type PlaybookDraft,
   type PlaybookRunUi,
+  type PlaybookScanResult,
   type PlaybookSuggestionUi,
   type PlaybookUi,
   playbooksApi,
@@ -414,10 +415,77 @@ function Suggested({
   );
 }
 
+function ScanPanel({
+  found,
+  adding,
+  onClose,
+  onSaved,
+}: {
+  found: PlaybookScanResult;
+  adding: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}): JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const n = found.candidates.length;
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await playbooksApi.scan(false);
+      toast(`saved ${r.suggested} suggestion${r.suggested === 1 ? "" : "s"}`);
+      onSaved();
+    } catch (e) {
+      toast((e as Error).message, true);
+      setBusy(false);
+    }
+  };
+  return (
+    <Card
+      title="Scan history"
+      sub={`Looked at ${found.prompts} prompts (${found.mode} matching). Nothing is saved yet.`}
+    >
+      {n ? (
+        <>
+          <div class="small">
+            Found {n} new recurring task{n === 1 ? "" : "s"}
+            {found.known ? `; ${found.known} already seen before` : ""}.
+          </div>
+          <ul class="small" style={{ margin: "6px 0", paddingLeft: 18 }}>
+            {found.candidates.map((c) => (
+              <li key={c.title}>
+                {c.title}{" "}
+                <span class="muted">
+                  ({c.sessions} sessions on {c.days} days)
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <div class="small muted">
+          No new recurring tasks found{found.known ? ` (${found.known} already seen before)` : ""}.
+        </div>
+      )}
+      <div class="row" style={{ gap: 8 }}>
+        {n > 0 && adding && (
+          <button type="button" class="primary" disabled={busy} onClick={save}>
+            {busy ? "Saving…" : `Save ${n} as suggestion${n === 1 ? "" : "s"}`}
+          </button>
+        )}
+        <button type="button" disabled={busy} onClick={onClose}>
+          {n > 0 && adding ? "Cancel" : "Close"}
+        </button>
+      </div>
+    </Card>
+  );
+}
+
 export function Playbooks(): JSX.Element {
   const q = useAsync(() => playbooksApi.overview(), []);
   const [tab, setTab] = useState<Tab>("playbooks");
   const [form, setForm] = useState<Form | null>(null);
+  const [found, setFound] = useState<PlaybookScanResult | null>(null);
+  const [scanning, setScanning] = useState(false);
   const d = q.data;
   if (q.error && !d) return <ErrorBox error={q.error} onRetry={q.reload} />;
   if (!d)
@@ -434,6 +502,16 @@ export function Playbooks(): JSX.Element {
       </EmptyState>
     );
   const changed = () => q.reload();
+  const startScan = async () => {
+    setScanning(true);
+    try {
+      setFound(await playbooksApi.scan(true));
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setScanning(false);
+    }
+  };
   const titles = new Map(d.playbooks.map((p) => [p.name, p.title]));
   const tabs: Array<{ id: Tab; label: string }> = [
     { id: "playbooks", label: `Playbooks (${d.playbooks.length})` },
@@ -457,17 +535,36 @@ export function Playbooks(): JSX.Element {
           </>
         }
         aside={
-          d.adding && !form ? (
-            <button type="button" class="primary" onClick={() => setForm(emptyForm())}>
-              New playbook
-            </button>
-          ) : undefined
+          <div class="row" style={{ gap: 8 }}>
+            {d.extraction && (
+              <button type="button" disabled={scanning} onClick={startScan}>
+                {scanning ? "Scanning…" : "Scan history"}
+              </button>
+            )}
+            {d.adding && !form && (
+              <button type="button" class="primary" onClick={() => setForm(emptyForm())}>
+                New playbook
+              </button>
+            )}
+          </div>
         }
       />
       {d.skipped.length > 0 && (
         <div class="small muted">
           Skipped (unreadable or not a valid name): {d.skipped.join(", ")}
         </div>
+      )}
+      {found && d.extraction && (
+        <ScanPanel
+          found={found}
+          adding={d.adding}
+          onClose={() => setFound(null)}
+          onSaved={() => {
+            setFound(null);
+            setTab("suggested");
+            changed();
+          }}
+        />
       )}
       {form && (
         <PlaybookForm

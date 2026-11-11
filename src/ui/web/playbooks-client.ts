@@ -31,6 +31,16 @@ export interface PlaybooksOverview {
   skipped: string[];
 }
 
+export interface PlaybookScanResult {
+  dryRun: boolean;
+  mode: "embeddings" | "lexical";
+  prompts: number;
+  clusters: number;
+  suggested: number;
+  known: number;
+  candidates: Array<{ title: string; sessions: number; days: number; servers: string[] }>;
+}
+
 export interface PlaybookDraft {
   name?: string | undefined;
   title: string;
@@ -53,6 +63,7 @@ export const playbooksApi = {
       id,
       private: priv,
     }),
+  scan: (dryRun: boolean) => post<PlaybookScanResult>("/api/playbooks/scan", { dryRun }),
   dismiss: (id: number) =>
     post<{ dismissed: boolean }>("/api/playbooks/suggestion/dismiss", { id }),
 };

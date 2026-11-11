@@ -9,6 +9,50 @@ import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 let root: string;
 let ctx: ProjectContext;
 
+const DAY = 86_400_000;
+const T0 = Date.UTC(2026, 0, 5, 9);
+/** Three sessions on three days that repeat one Slack task: the smallest thing scan() proposes. */
+function seedRecurring(c: ProjectContext, tag: string): void {
+  const db = getStorage(c);
+  [0, 1, 2].forEach((d, i) => {
+    const id = `${tag}-${i}`;
+    const ts = T0 + d * DAY;
+    db.eventInsert({
+      sessionId: id,
+      ts,
+      category: "user_prompt",
+      priority: 1,
+      payload: { text: "Check Slack for open pull requests and review them for me" },
+    });
+    db.eventInsert({
+      sessionId: id,
+      ts: ts + 1000,
+      category: "mcp_tool",
+      priority: 3,
+      tool: "mcp__claude_ai_Slack__slack_read_channel",
+      payload: { tool: "mcp__claude_ai_Slack__slack_read_channel" },
+    });
+  });
+}
+
+const scanCtx = (): ProjectContext => ({
+  ...ctx,
+  config: {
+    ...ctx.config,
+    playbooks: { ...ctx.config.playbooks, extraction: { enabled: true } },
+  } as ProjectContext["config"],
+});
+
+async function runScan(args: string[]) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await playbookCommand(args, scanCtx(), {
+    out: (s) => out.push(s),
+    err: (s) => err.push(s),
+  });
+  return { code, out: out.join("\n"), err: err.join("\n") };
+}
+
 async function run(args: string[], stdin = "") {
   const out: string[] = [];
   const err: string[] = [];
@@ -167,5 +211,29 @@ describe("eminiar playbook", () => {
     expect((await run(["show"])).code).toBe(2);
     expect((await run(["runs", "--limit", "0"])).code).toBe(2);
     expect((await run(["add", "x", "--title"])).code).toBe(2);
+  });
+
+  it("scan refuses when extraction is off", async () => {
+    const r = await run(["scan"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("playbooks.extraction.enabled");
+  });
+
+  it("scan --dry-run reports candidates and saves nothing; scan saves suggestions", async () => {
+    seedRecurring(scanCtx(), "cli-scan");
+    const dry = await runScan(["scan", "--dry-run"]);
+    expect(dry.code).toBe(0);
+    expect(dry.out).toContain("1 new candidate");
+    expect(dry.out).toContain("nothing saved");
+    expect(getStorage(ctx).playbooks.suggestions({ limit: 10 })).toHaveLength(0);
+    const j = await runScan(["scan", "--dry-run", "--json"]);
+    const parsed = JSON.parse(j.out) as { dryRun: boolean; candidates: unknown[] };
+    expect(parsed.dryRun).toBe(true);
+    expect(parsed.candidates).toHaveLength(1);
+    const real = await runScan(["scan"]);
+    expect(real.code).toBe(0);
+    expect(real.out).toContain("saved 1 suggestion");
+    expect(getStorage(ctx).playbooks.suggestions({ limit: 10 })).toHaveLength(1);
+    expect((await runScan(["scan"])).out).toContain("0 new candidates");
   });
 });

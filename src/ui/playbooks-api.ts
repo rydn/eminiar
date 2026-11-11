@@ -5,6 +5,7 @@
  * The server has already checked the loopback origin and the JSON content type of every write.
  */
 import type { ProjectContext } from "../context.js";
+import { scan } from "../playbooks/extract.js";
 import * as store from "../playbooks/store.js";
 import { getStorage } from "../storage/index.js";
 import type { PlaybookParam, PlaybookRow, PlaybookSuggestionRow } from "../storage/types.js";
@@ -201,6 +202,28 @@ export async function playbooksRoute(
       const id = Number(b.id);
       if (!Number.isInteger(id)) return fail(400, "id must be a suggestion id");
       return ok({ dismissed: store.dismissSuggestion(ctx, db, id) });
+    }
+    if (path === "/api/playbooks/scan") {
+      if (!c.extraction.enabled)
+        return fail(403, "playbook extraction is off: playbooks.extraction.enabled is false");
+      const dryRun = b.dryRun === true;
+      if (!dryRun && !c.adding)
+        return fail(403, "playbooks are read-only: playbooks.adding is false");
+      const r = await scan(ctx, db, { dryRun });
+      return ok({
+        dryRun,
+        mode: r.mode,
+        prompts: r.prompts,
+        clusters: r.clusters,
+        suggested: r.suggested,
+        known: r.known,
+        candidates: r.candidates.map((x) => ({
+          title: x.title,
+          sessions: x.sessions,
+          days: x.days,
+          servers: x.servers,
+        })),
+      });
     }
     return fail(404, "not found");
   } catch (err) {

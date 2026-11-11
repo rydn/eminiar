@@ -4,6 +4,7 @@ import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { PlaybookParam } from "../storage/types.js";
 import { exportMarkdown, exportSkill, schedulePrompt } from "./export.js";
+import { scan } from "./extract.js";
 import {
   fillPrompt,
   list,
@@ -34,7 +35,7 @@ const defaultIO: CliIO = {
 };
 
 export const PLAYBOOK_USAGE =
-  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR] [--model-invocable]] [--schedule] [--set k=v]> [--json]";
+  "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR] [--model-invocable]] [--schedule] [--set k=v] | scan [--dry-run]> [--json]";
 
 async function storage(ctx: ProjectContext): Promise<StorageAdapter> {
   const { getStorage } = await import("../storage/index.js");
@@ -95,6 +96,7 @@ export async function playbookCommand(
       skill: { type: "boolean" },
       "model-invocable": { type: "boolean" },
       target: { type: "string" },
+      "dry-run": { type: "boolean" },
     },
     allowPositionals: true,
     strict: false,
@@ -316,6 +318,35 @@ export async function playbookCommand(
           io.out(
             `${when(r.ts)}  ${r.playbook}  ${r.status}  via ${r.trigger}${r.note ? `  ${r.note}` : ""}`,
           );
+        return 0;
+      }
+
+      case "scan": {
+        if (!ctx.config.playbooks.extraction.enabled) {
+          io.err(
+            "playbook extraction is off: set playbooks.extraction.enabled to true in eminiar.config.json to scan your history for recurring tasks",
+          );
+          return 1;
+        }
+        const dryRun = values["dry-run"] === true;
+        const r = await scan(ctx, db, { dryRun });
+        if (json) {
+          emit({ dryRun, ...r });
+          return 0;
+        }
+        io.out(
+          `scanned ${r.prompts} prompts in ${r.clusters} clusters (${r.mode}): ${r.candidates.length} new candidate${r.candidates.length === 1 ? "" : "s"}, ${r.known} already known`,
+        );
+        for (const c of r.candidates)
+          io.out(`  ${c.title}  (${c.sessions} sessions on ${c.days} days)`);
+        if (dryRun)
+          io.out(
+            r.candidates.length
+              ? "dry run: nothing saved; run without --dry-run to save them as suggestions"
+              : "dry run: nothing saved",
+          );
+        else if (r.suggested)
+          io.out(`saved ${r.suggested} suggestion${r.suggested === 1 ? "" : "s"} for review`);
         return 0;
       }
 
