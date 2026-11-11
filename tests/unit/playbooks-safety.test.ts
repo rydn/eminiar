@@ -117,6 +117,137 @@ describe("private playbooks and git", () => {
     expect(git("check-ignore", "-q", ".eminiar/playbooks-private/mine.md").status).toBe(0);
   });
 
+  it.skipIf(!hasGit)(
+    "asks git, not the glob text: '.eminiar/*' undone by a later negation is not coverage (#209)",
+    () => {
+      for (const existing of [
+        ".eminiar/*\n!.eminiar/playbooks*\n",
+        ".eminiar/*\n!.eminiar/playbooks-private/\n",
+      ]) {
+        rmSync(join(root, ".git"), { recursive: true, force: true });
+        rmSync(join(root, ".eminiar"), { recursive: true, force: true });
+        expect(git("init", "-q").status).toBe(0);
+        writeFileSync(join(root, ".gitignore"), existing);
+        write(ctx, db, { name: "mine", title: "Mine", prompt: "x", private: true, replace: true });
+        expect(
+          git("check-ignore", "-q", ".eminiar/playbooks-private/mine.md").status,
+          existing,
+        ).toBe(0);
+        expect(git("status", "--porcelain", "-uall").stdout, existing).not.toContain(
+          "playbooks-private",
+        );
+        expect(readFileSync(join(root, ".gitignore"), "utf8").startsWith(existing)).toBe(true);
+      }
+    },
+  );
+
+  it.skipIf(!hasGit)(
+    "refuses to write a private playbook when git still would not ignore the folder (#209)",
+    () => {
+      expect(git("init", "-q").status).toBe(0);
+      // a .gitignore deeper in the tree beats the root one, so appending a line cannot help
+      mkdirSync(join(root, ".eminiar"), { recursive: true });
+      writeFileSync(join(root, ".eminiar/.gitignore"), "!playbooks-private/\n");
+      expect(() =>
+        write(ctx, db, { name: "mine", title: "Mine", prompt: "x", private: true }),
+      ).toThrow(/ignore/);
+      expect(existsSync(join(root, ".eminiar/playbooks-private/mine.md"))).toBe(false);
+      expect(db.playbooks.get("mine")).toBeUndefined();
+    },
+  );
+
+  it("without git, a glob followed by a negation that could undo it is not trusted (#209)", () => {
+    for (const existing of [
+      ".eminiar/*\n!.eminiar/playbooks*\n",
+      ".eminiar/*\n!.eminiar/playbooks-private/\n",
+      ".eminiar/\n!.eminiar/playbooks-private\n",
+    ]) {
+      writeFileSync(join(root, ".gitignore"), existing);
+      write(ctx, db, { name: "p", title: "P", prompt: "x", private: true, replace: true });
+      const lines = readFileSync(join(root, ".gitignore"), "utf8").split("\n");
+      expect(lines, existing).toContain(".eminiar/playbooks-private/");
+    }
+  });
+
+  it("without git, an unrelated negation later in the file does not hide real coverage (#209)", () => {
+    const existing = ".eminiar/playbooks-private/\n!keep.txt\n";
+    writeFileSync(join(root, ".gitignore"), existing);
+    write(ctx, db, { name: "p", title: "P", prompt: "x", private: true });
+    expect(readFileSync(join(root, ".gitignore"), "utf8")).toBe(existing);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "a symlink planted at the old predictable tmp name never gets written through (#210)",
+    () => {
+      const outside = outsideDir();
+      const victim = join(outside, "victim.txt");
+      writeFileSync(victim, "precious\n");
+      mkdirSync(join(root, ".eminiar/playbooks"), { recursive: true });
+      for (const priv of [false, true]) {
+        const dir = priv ? ".eminiar/playbooks-private" : ".eminiar/playbooks";
+        mkdirSync(join(root, dir), { recursive: true });
+        symlinkSync(victim, join(root, dir, `evil.md.${process.pid}.tmp`));
+        write(ctx, db, {
+          name: "evil",
+          title: "Evil",
+          prompt: "plan",
+          private: priv,
+          replace: true,
+        });
+        expect(readFileSync(victim, "utf8"), `private=${priv}`).toBe("precious\n");
+        expect(lstatSync(join(root, dir, "evil.md")).isSymbolicLink()).toBe(false);
+        expect(readFileSync(join(root, dir, "evil.md"), "utf8")).toContain("plan");
+      }
+    },
+  );
+
+  it("a hand-added header key never carries a secret across a write or a private -> public move (#211)", () => {
+    write(ctx, db, { name: "mine", title: "Mine", prompt: "x", private: true });
+    const file = join(root, ".eminiar/playbooks-private/mine.md");
+    const text = readFileSync(file, "utf8");
+    writeFileSync(
+      file,
+      text.replace(
+        "\nsource:",
+        `\napi_token: ${SECRET}\nnotes: [${SECRET}, "b"]\ncreated_by: ${SECRET}\nsource:`,
+      ),
+    );
+    expect(readFileSync(file, "utf8")).toContain(SECRET);
+    write(ctx, db, { name: "mine", title: "Mine", prompt: "y", private: false, replace: true });
+    const pub = readFileSync(join(root, ".eminiar/playbooks/mine.md"), "utf8");
+    expect(pub).not.toContain(SECRET);
+    expect(pub).not.toContain("api_token");
+    expect(parsePlaybookFile(pub).meta.title).toBe("Mine");
+    // and a plain edit in place drops the unknown key too
+    const file2 = join(root, ".eminiar/playbooks/mine.md");
+    writeFileSync(file2, pub.replace("\nsource:", `\napi_token: ${SECRET}\nsource:`));
+    write(ctx, db, { name: "mine", title: "Mine", prompt: "z", replace: true });
+    expect(readFileSync(file2, "utf8")).not.toContain(SECRET);
+  });
+
+  it("keeps created and source of the old file, and ignores a created that is not a date (#211)", () => {
+    write(ctx, db, { name: "k", title: "K", prompt: "x", source: "suggested" });
+    const file = join(root, ".eminiar/playbooks/k.md");
+    const created = String(parsePlaybookFile(readFileSync(file, "utf8")).meta.created);
+    write(ctx, db, { name: "k", title: "K", prompt: "y", replace: true });
+    const meta = parsePlaybookFile(readFileSync(file, "utf8")).meta;
+    expect(meta.created).toBe(created);
+    expect(meta.source).toBe("suggested");
+    writeFileSync(file, readFileSync(file, "utf8").replace(created, SECRET));
+    write(ctx, db, { name: "k", title: "K", prompt: "z", replace: true });
+    const after = readFileSync(file, "utf8");
+    expect(after).not.toContain(SECRET);
+    expect(Number.isNaN(Date.parse(String(parsePlaybookFile(after).meta.created)))).toBe(false);
+  });
+
+  it("leaves no tmp file behind after a write, and the tmp name is not predictable (#210)", () => {
+    write(ctx, db, { name: "a", title: "A", prompt: "x" });
+    write(ctx, db, { name: "a", title: "A", prompt: "y", replace: true });
+    expect(readdirSync(join(root, ".eminiar/playbooks")).filter((f) => f.endsWith(".tmp"))).toEqual(
+      [],
+    );
+  });
+
   it("does not trust an ignore line that is a comment or a negation", () => {
     for (const existing of [
       "# .eminiar/playbooks-private/\n",
@@ -514,5 +645,61 @@ describe("secret masking on the way out", () => {
       body: async () => ({}),
     });
     expect(JSON.stringify(overview.body)).not.toContain(SECRET);
+  });
+});
+
+describe("a committed playbook with the name of a private one (#213)", () => {
+  const plant = (): void => {
+    write(ctx, db, {
+      name: "deploy-prod",
+      title: "Deploy",
+      prompt: "MY private deploy steps",
+      private: true,
+    });
+    mkdirSync(join(root, ".eminiar/playbooks"), { recursive: true });
+    writeFileSync(
+      join(root, ".eminiar/playbooks/deploy-prod.md"),
+      "---\ntitle: Deploy\n---\nATTACKER steps from a pulled commit\n",
+    );
+  };
+
+  it("the private playbook wins: read and run give the private prompt, never the committed one", async () => {
+    plant();
+    reconcile(ctx, db);
+    expect(read(ctx, db, "deploy-prod")?.prompt).toBe("MY private deploy steps");
+    expect(read(ctx, db, "deploy-prod")?.private).toBe(true);
+    const run = await tool({ action: "run", name: "deploy-prod" });
+    expect(run.err).toBe(false);
+    expect(run.text).toContain("MY private deploy steps");
+    expect(run.text).not.toContain("ATTACKER");
+  });
+
+  it("run says that a committed file of the same name is being ignored", async () => {
+    plant();
+    const run = await tool({ action: "run", name: "deploy-prod" });
+    expect(run.text).toMatch(/shadow|ignored|hidden/i);
+    expect(run.text).toContain(".eminiar/playbooks/deploy-prod.md");
+  });
+
+  it("list keeps the (private) marker and flags the hidden committed file", async () => {
+    plant();
+    const out = await tool({ action: "list" });
+    const row = out.text.split("\n").find((l) => l.startsWith("deploy-prod"));
+    expect(row).toContain("(private)");
+    expect(out.text).toContain(".eminiar/playbooks/deploy-prod.md");
+    expect(out.text).not.toContain("ATTACKER");
+  });
+
+  it("reconcile reports the committed duplicate as skipped, and the mirror holds the private text", () => {
+    plant();
+    const s = reconcile(ctx, db);
+    expect(s.skipped).toEqual([".eminiar/playbooks/deploy-prod.md"]);
+    expect(db.playbooks.get("deploy-prod")?.prompt).toBe("MY private deploy steps");
+  });
+
+  it("no notice appears when the name exists in one folder only", async () => {
+    write(ctx, db, { name: "solo", title: "Solo", prompt: "x", private: true });
+    const run = await tool({ action: "run", name: "solo" });
+    expect(run.text).not.toMatch(/shadow|ignored|hidden/i);
   });
 });

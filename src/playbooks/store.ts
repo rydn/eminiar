@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -11,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { redactSecrets } from "../adjudicator/redact.js";
+import { isSecretName, redactSecrets } from "../adjudicator/redact.js";
 import { hashText } from "../chunker/types.js";
 import type { ProjectContext } from "../context.js";
 import { within } from "../docs/manifest.js";
@@ -154,18 +156,48 @@ function assertFolders(ctx: ProjectContext): void {
     );
 }
 
-/** True when a .gitignore line ignores `rel` or a folder above it. */
+/**
+ * Text fallback, used only when git cannot answer: true when a .gitignore line ignores `rel` or
+ * a folder above it and no later negation could undo it. Lines apply in order, so a negation
+ * that names `rel`, a folder above it or anything below it, or that holds a glob, counts as
+ * undoing the cover (a false "not covered" only adds a line; a false "covered" leaks).
+ */
 function ignoreCovers(lines: string[], rel: string): boolean {
   const parts = rel.split("/");
   const prefixes = new Set<string>();
   for (let i = 1; i <= parts.length; i++) prefixes.add(parts.slice(0, i).join("/"));
-  return lines.some((l) => {
-    const t = l
-      .trim()
-      .replace(/^\//, "")
-      .replace(/\/\*{0,2}$/, "");
-    return t !== "" && !t.startsWith("#") && !t.startsWith("!") && prefixes.has(t);
-  });
+  let covered = false;
+  for (const l of lines) {
+    const raw = l.trim();
+    if (raw === "" || raw.startsWith("#")) continue;
+    const neg = raw.startsWith("!");
+    const t = (neg ? raw.slice(1) : raw).replace(/^\//, "").replace(/\/\*{0,2}$/, "");
+    if (t === "") continue;
+    if (!neg) {
+      if (prefixes.has(t)) covered = true;
+    } else if (prefixes.has(t) || t.startsWith(`${rel}/`) || /[*?[\\]/.test(t)) {
+      covered = false;
+    }
+  }
+  return covered;
+}
+
+/** Does git ignore a file in the private folder? undefined when git cannot say (no git, no repo). */
+function gitIgnores(ctx: ProjectContext, rel: string): boolean | undefined {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
+  ) as NodeJS.ProcessEnv;
+  try {
+    execFileSync("git", ["check-ignore", "-q", "--no-index", "--", `${rel}/probe.md`], {
+      cwd: ctx.root,
+      env,
+      stdio: "ignore",
+      timeout: 10_000,
+    });
+    return true; // exit 0: ignored
+  } catch (e) {
+    return (e as { status?: unknown }).status === 1 ? false : undefined;
+  }
 }
 
 /**
@@ -178,16 +210,55 @@ export function ensurePrivateIgnored(ctx: ProjectContext): void {
   const file = join(ctx.root, ".gitignore");
   assertInside(ctx, file);
   const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  if (ignoreCovers(text.split(/\r?\n/), rel)) return;
+  // Git is the authority: a glob and a later negation can undo each other in ways a text scan
+  // misreads. Without git (or outside a repo) the text check stands in.
+  const before = gitIgnores(ctx, rel);
+  if (before === true || (before === undefined && ignoreCovers(text.split(/\r?\n/), rel))) return;
   const sep = text === "" || text.endsWith("\n") ? "" : "\n";
   writeFileSync(file, `${text}${sep}# eminiar: private playbooks stay local\n${rel}/\n`);
+  if (before === false && gitIgnores(ctx, rel) !== true)
+    throw new Error(
+      `git would still track ${rel} after adding it to .gitignore (a later rule or a nested .gitignore un-ignores it); refusing to write a private playbook there`,
+    );
+}
+
+const KNOWN_KEYS = new Set([
+  "name",
+  "title",
+  "params",
+  "schedule",
+  "tags",
+  "source",
+  "created",
+  "updated",
+]);
+
+/** Header keys eminiar does not know, safe to write back: values masked, secret-named keys gone. */
+function carryOver(extra: PlaybookMeta): PlaybookMeta {
+  const out: PlaybookMeta = {};
+  for (const [k, v] of Object.entries(extra)) {
+    if (KNOWN_KEYS.has(k) || isSecretName(k) || mask(k) !== k) continue;
+    out[k] = Array.isArray(v) ? v.map((x) => mask(oneLine(x))) : mask(oneLine(v));
+  }
+  return out;
 }
 
 function writeAtomic(abs: string, text: string, priv: boolean): void {
   mkdirSync(dirname(abs), { recursive: true, ...(priv ? { mode: 0o700 } : {}) });
-  const tmp = `${abs}.${process.pid}.tmp`;
-  writeFileSync(tmp, text, { mode: priv ? 0o600 : 0o644 });
-  renameSync(tmp, abs);
+  // A random name opened with `wx` (never follows a link, never reuses a file): a planted
+  // symlink at a guessable tmp name must not lead the write to a file outside the project.
+  const tmp = `${abs}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmp, text, { flag: "wx", mode: priv ? 0o600 : 0o644 });
+    renameSync(tmp, abs);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
+    throw e;
+  }
 }
 
 // --- field rules -----------------------------------------------------------------------
@@ -411,11 +482,26 @@ function fileOf(row: PlaybookRow): PlaybookFile {
   };
 }
 
-/** Which folder holds `name`: the public one wins when a name exists in both. */
+/**
+ * Which folder holds `name`. The private one wins when a name exists in both: that file is the
+ * user's own, while a committed file of the same name can arrive with any pull and must not
+ * replace what a person wrote for themselves. `shadowedBy` tells callers about the loser.
+ */
 function locate(ctx: ProjectContext, name: string): boolean | undefined {
-  if (lstatSync(absOf(ctx, name, false), { throwIfNoEntry: false })) return false;
   if (lstatSync(absOf(ctx, name, true), { throwIfNoEntry: false })) return true;
+  if (lstatSync(absOf(ctx, name, false), { throwIfNoEntry: false })) return false;
   return undefined;
+}
+
+/**
+ * The project-relative path of a committed playbook that a private one of the same name hides,
+ * or undefined when `name` is not in both folders.
+ */
+export function shadowedBy(ctx: ProjectContext, name: string): string | undefined {
+  if (!isValidName(name) || locate(ctx, name) !== true) return undefined;
+  return lstatSync(absOf(ctx, name, false), { throwIfNoEntry: false })
+    ? relOf(ctx, name, false)
+    : undefined;
 }
 
 export interface ReconcileSummary {
@@ -432,7 +518,8 @@ export function reconcile(ctx: ProjectContext, db: StorageAdapter): ReconcileSum
   const out: ReconcileSummary = { files: 0, synced: 0, removed: 0, skipped: [] };
   const seen = new Set<string>();
   let readable = true;
-  for (const priv of [false, true]) {
+  for (const priv of [true, false]) {
+    // private first: on a repeated name the private file is the one that counts (see locate)
     const rel = relDir(ctx, priv);
     const dir = join(ctx.root, rel);
     if (!lstatSync(dir, { throwIfNoEntry: false })) continue;
@@ -565,10 +652,18 @@ export function write(
     }
   }
   const now = new Date().toISOString();
-  const created =
-    str(extra.created) ?? (prev ? new Date(prev.created_at).toISOString() : undefined) ?? now;
+  // `created` survives only as a real date, re-serialised: a free-text value is never copied.
+  const oldCreated = Date.parse(str(extra.created) ?? "");
+  const created = Number.isNaN(oldCreated)
+    ? prev
+      ? new Date(prev.created_at).toISOString()
+      : now
+    : new Date(oldCreated).toISOString();
+  // A key a person added by hand is carried over only as masked text, so a private -> public
+  // move cannot commit a secret that rode along; a key named like a secret (api_token) or one
+  // whose name masking changes is dropped, as no mask can vouch for a free-text value there.
   const meta: PlaybookMeta = {
-    ...extra,
+    ...carryOver(extra),
     name,
     title: c.title,
     created,
