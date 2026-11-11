@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -8,7 +9,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { redactSecrets } from "../adjudicator/redact.js";
 import type { ProjectContext } from "../context.js";
 import { within } from "../docs/manifest.js";
@@ -41,10 +43,21 @@ const TOOL_BAD_RE = /[\u0000-\u001f\u007f"\\]/;
 export interface ExportSkillOptions {
   /**
    * Directory the `<name>/SKILL.md` folder goes in. Relative paths resolve against the project
-   * root and must stay inside it; an absolute path (for example ~/.claude/skills) is used as given.
-   * Default: `.claude/skills` in the project.
+   * root; the resolved folder (symlinks followed) must stay inside the project, an absolute path
+   * included. Default: `.claude/skills` in the project.
    */
   targetDir?: string | undefined;
+  /**
+   * Write to the user-level skills folder (`~/.claude/skills`, a skill every project sees) instead
+   * of the project. Only a human at a terminal may ask for this: the CLI sets it from `--user`,
+   * the MCP tool and the dashboard never do. Cannot be combined with `targetDir`.
+   */
+  userScope?: boolean | undefined;
+  /**
+   * Export a private playbook even though the target folder is not git-ignored (it will be
+   * committable). CLI only (`--allow-private`); the MCP tool never sets it.
+   */
+  allowPrivate?: boolean | undefined;
   /**
    * The playbook changes things outside the repo (posts, merges, deploys). A side-effecting skill
    * gets `disable-model-invocation: true`, so only the person can start it. Default true: the
@@ -65,9 +78,36 @@ export interface ExportSkillResult {
   created: boolean;
   sideEffecting: boolean;
   content: string;
+  /**
+   * How many Claude Code constructs in the playbook text were defused so the skill does not run
+   * or substitute them when it loads: a bang-backtick command, a fenced bang block, $ARGUMENTS,
+   * $0 or ${NAME}.
+   */
+  escaped: number;
 }
 
 const mask = (s: string): string => redactSecrets(s);
+
+/**
+ * Claude Code expands some text in a SKILL.md before the model reads it: !`cmd` and a ```! block
+ * run a shell command; $ARGUMENTS, $0/$1 and ${NAME} are substituted. A stored prompt is data, so
+ * each is defused with a space that breaks the syntax and keeps the text readable. `count.n`
+ * says how many were changed.
+ */
+const SKILL_SYNTAX: ReadonlyArray<readonly [RegExp, string]> = [
+  [/(`{3,})!/g, "$1 !"],
+  [/!(?=`)/g, "! "],
+  [/\$(?=ARGUMENTS|\d|\{)/g, "$ "],
+];
+export function neutraliseSkillSyntax(s: string, count: { n: number }): string {
+  let out = s;
+  for (const [re, to] of SKILL_SYNTAX)
+    out = out.replace(re, (...m) => {
+      count.n++;
+      return to.replace("$1", m[1] as string);
+    });
+  return out;
+}
 
 /** A YAML scalar that cannot break out of its line: JSON string syntax is valid YAML. */
 const yamlString = (s: string): string => JSON.stringify(oneLine(s));
@@ -105,60 +145,121 @@ function describe(file: PlaybookFile): string {
   return d;
 }
 
-/** The skill text. Masked again here: the stored playbook may predate a new redaction rule. */
-export function renderSkill(
+/**
+ * The skill text and how many Claude Code constructs were defused in it. Masked again here: the
+ * stored playbook may predate a new redaction rule.
+ */
+function renderSkillParts(
   file: PlaybookFile,
   opts: Pick<ExportSkillOptions, "sideEffecting" | "allowedTools" | "values"> = {},
-): string {
+): { content: string; escaped: number } {
   assertSkillName(file.name);
   const sideEffecting = opts.sideEffecting ?? true;
   const tools = cleanTools(opts.allowedTools);
-  const head = ["---", `name: ${file.name}`, `description: ${yamlString(describe(file))}`];
+  const count = { n: 0 };
+  const safe = (s: string): string => neutraliseSkillSyntax(s, count);
+  const head = ["---", `name: ${file.name}`, `description: ${yamlString(safe(describe(file)))}`];
   if (sideEffecting) head.push("disable-model-invocation: true");
   if (tools.length > 0) head.push(`allowed-tools: ${yamlString(tools.join(", "))}`);
   head.push("---");
 
   const body: string[] = [`${EXPORT_MARKER} name=${file.name} -->`, ""];
-  body.push(`# ${mask(oneLine(file.title))}`, "");
-  body.push(mask(fillPrompt(file, opts.values)).trim(), "");
+  body.push(`# ${safe(mask(oneLine(file.title)))}`, "");
+  body.push(safe(mask(fillPrompt(file, opts.values))).trim(), "");
   if (file.params.length > 0) {
     body.push(
       "Parameters (pass them as arguments; a missing one keeps its default):",
       ...file.params.map(
         (p) =>
-          `- ${p.name}${p.default !== undefined ? ` (default: ${mask(oneLine(p.default))})` : ""}`,
+          `- ${p.name}${p.default !== undefined ? ` (default: ${safe(mask(oneLine(p.default)))})` : ""}`,
       ),
       "",
+      // eminiar's own substitution, added after the stored text was defused
       "Arguments: $ARGUMENTS",
       "",
     );
   }
-  return `${head.join("\n")}\n\n${body.join("\n")}`;
+  return { content: `${head.join("\n")}\n\n${body.join("\n")}`, escaped: count.n };
 }
 
-/** Lexical and real-path check that `dir` is inside the project when it is meant to be. */
-function resolveTarget(ctx: ProjectContext, targetDir: string | undefined): string {
+export function renderSkill(
+  file: PlaybookFile,
+  opts: Pick<ExportSkillOptions, "sideEffecting" | "allowedTools" | "values"> = {},
+): string {
+  return renderSkillParts(file, opts).content;
+}
+
+/**
+ * Where the skill folder goes. The project's own folders only (the resolved real path must stay
+ * inside the project, an absolute `targetDir` included), or, for a human at the CLI, the user's
+ * `~/.claude/skills`. A caller-supplied path never reaches outside the project.
+ */
+function resolveTarget(
+  ctx: ProjectContext,
+  targetDir: string | undefined,
+  userScope: boolean,
+): { dir: string; inProject: boolean } {
+  if (userScope) {
+    if (targetDir !== undefined) throw new Error("a user-level export has no target directory");
+    return { dir: join(homedir(), ".claude", "skills"), inProject: false };
+  }
   const root = resolve(ctx.root);
   const raw = targetDir ?? DEFAULT_SKILLS_DIR;
   if (raw.includes("\0")) throw new Error("invalid target directory");
-  const abs = isAbsolute(raw) ? resolve(raw) : resolve(root, raw);
-  const inProject = !isAbsolute(raw) || within(abs, root);
+  let realRoot = root;
+  try {
+    realRoot = realpathSync.native(root);
+  } catch {
+    /* keep root */
+  }
+  const abs = resolve(root, raw);
   if (!isAbsolute(raw) && !within(abs, root))
     throw new Error("target directory must stay inside the project");
-  if (inProject) {
-    // the nearest existing parent must really resolve inside the project (no symlink out)
-    let probe = abs;
-    while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
-    let realRoot = root;
-    try {
-      realRoot = realpathSync.native(root);
-    } catch {
-      /* keep root */
-    }
-    if (!within(realpathSync.native(probe), realRoot))
-      throw new Error("target directory resolves outside the project");
+  // The nearest existing parent must really resolve inside the project: no symlink out, and an
+  // absolute path (spelled with or without the real root) is judged by where it lands.
+  let probe = abs;
+  while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
+  if (!within(realpathSync.native(probe), realRoot))
+    throw new Error(
+      "target directory must stay inside the project: it resolves outside the project",
+    );
+  return { dir: abs, inProject: true };
+}
+
+/**
+ * A private playbook must not land in a folder that is committed. git decides (`check-ignore`
+ * knows later negations, nested ignore files and the global excludes); anything but "ignored" -
+ * not ignored, not a repository, git missing, a timeout - refuses.
+ */
+function assertGitIgnored(ctx: ProjectContext, path: string, name: string): void {
+  const root = resolve(ctx.root);
+  let realRoot = root;
+  try {
+    realRoot = realpathSync.native(root);
+  } catch {
+    /* keep root */
   }
-  return abs;
+  // name the file by where it really lands (the root may be spelled through a symlink)
+  let probe = path;
+  while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
+  const real = join(realpathSync.native(probe), relative(probe, path));
+  const rel = relative(realRoot, real);
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")),
+  ) as NodeJS.ProcessEnv;
+  const why = `playbook ${name} is private and ${rel} is not git-ignored, so the skill could be committed`;
+  try {
+    execFileSync("git", ["check-ignore", "-q", "--", rel], {
+      cwd: root,
+      env,
+      stdio: "ignore",
+      timeout: 5000,
+    });
+  } catch {
+    throw new Error(
+      `refusing to export: ${why} (or git could not say). Add the folder to .gitignore, or make the playbook public; the CLI can override with --allow-private`,
+    );
+  }
 }
 
 /** True when the marker is the exact line eminiar writes: first body line after the front matter. */
@@ -181,10 +282,12 @@ export function exportSkill(
   assertSkillName(name);
   const file = read(ctx, db, name);
   if (!file) throw new Error(`no playbook named ${JSON.stringify(name)}`);
-  const content = renderSkill(file, opts);
-  const target = resolveTarget(ctx, opts.targetDir);
+  const { content, escaped } = renderSkillParts(file, opts);
+  const { dir: target, inProject } = resolveTarget(ctx, opts.targetDir, opts.userScope === true);
   const dir = join(target, name);
   if (!within(dir, target)) throw new Error("invalid skill name");
+  if (file.private && inProject && !opts.allowPrivate)
+    assertGitIgnored(ctx, join(dir, "SKILL.md"), name);
   try {
     const ds = lstatSync(dir);
     if (ds.isSymbolicLink() || !ds.isDirectory())
@@ -225,7 +328,7 @@ export function exportSkill(
     }
     throw e;
   }
-  return { name, path, created, sideEffecting: opts.sideEffecting ?? true, content };
+  return { name, path, created, sideEffecting: opts.sideEffecting ?? true, content, escaped };
 }
 
 /**
