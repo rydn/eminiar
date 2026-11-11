@@ -17,6 +17,9 @@ type Db = ReturnType<typeof getStorage>;
 
 function fresh(enabled = true): Db {
   process.env.EMINIAR_HOME = mkdtempSync(join(tmpdir(), "em-home-"));
+  // The "MCP tool" test scans with the configured provider: without this it would construct the
+  // real embedding model and start warming (downloading) it. No network, no model in unit tests.
+  process.env.EMINIAR_EMBEDDINGS = "0";
   const root = mkdtempSync(join(tmpdir(), "em-root-"));
   writeFileSync(join(root, "package.json"), "{}");
   if (enabled)
@@ -61,7 +64,10 @@ function recurring(db: Db, prompt = P, days = [0, 1, 2], tools = SLACK) {
 
 const opts = { embeddings: false } as const;
 
-afterAll(() => closeAllStorage());
+afterAll(() => {
+  closeAllStorage();
+  delete process.env.EMINIAR_EMBEDDINGS;
+});
 
 describe("playbook extraction", () => {
   beforeEach(() => {
