@@ -125,7 +125,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
 
   // src/playbooks/export.ts exportSkill: only the target directory is checked for leaving the
   // project; <target>/<name> may be a link out, and SKILL.md is then written there.
-  it.fails("export refuses to write through a <name> folder that links out of the project", () => {
+  it("export refuses to write through a <name> folder that links out of the project", () => {
     write(ctx, db, { name: "exp", title: "E", prompt: "x" });
     const outside = mkdtempSync(join(tmpdir(), "em-out-"));
     mkdirSync(join(root, ".claude/skills"), { recursive: true });
@@ -136,7 +136,7 @@ describe("known defects (flip it.fails to it when fixed)", () => {
 
   // src/playbooks/export.ts exportSkill: the "made by eminiar" check is `includes(marker)`
   // anywhere in the file, so a hand-written skill that merely mentions the marker is replaced.
-  it.fails("export does not overwrite a skill that only mentions the marker in its text", () => {
+  it("export does not overwrite a skill that only mentions the marker in its text", () => {
     write(ctx, db, { name: "exp", title: "E", prompt: "x" });
     mkdirSync(join(root, ".claude/skills/exp"), { recursive: true });
     const p = join(root, ".claude/skills/exp/SKILL.md");

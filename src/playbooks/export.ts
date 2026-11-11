@@ -161,6 +161,17 @@ function resolveTarget(ctx: ProjectContext, targetDir: string | undefined): stri
   return abs;
 }
 
+/** True when the marker is the exact line eminiar writes: first body line after the front matter. */
+function hasExportMarker(text: string, name: string): boolean {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+  if (lines[0] !== "---") return false;
+  const end = lines.indexOf("---", 1);
+  if (end < 0) return false;
+  let i = end + 1;
+  while (i < lines.length && lines[i]?.trim() === "") i++;
+  return lines[i] === `${EXPORT_MARKER} name=${name} -->`;
+}
+
 export function exportSkill(
   ctx: ProjectContext,
   db: StorageAdapter,
@@ -171,8 +182,16 @@ export function exportSkill(
   const file = read(ctx, db, name);
   if (!file) throw new Error(`no playbook named ${JSON.stringify(name)}`);
   const content = renderSkill(file, opts);
-  const dir = join(resolveTarget(ctx, opts.targetDir), name);
-  if (!within(dir, resolveTarget(ctx, opts.targetDir))) throw new Error("invalid skill name");
+  const target = resolveTarget(ctx, opts.targetDir);
+  const dir = join(target, name);
+  if (!within(dir, target)) throw new Error("invalid skill name");
+  try {
+    const ds = lstatSync(dir);
+    if (ds.isSymbolicLink() || !ds.isDirectory())
+      throw new Error(`refusing to write into ${dir}: not a plain directory`);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
   const path = join(dir, "SKILL.md");
 
   let created = true;
@@ -185,13 +204,15 @@ export function exportSkill(
   if (st) {
     if (st.isSymbolicLink() || !st.isFile())
       throw new Error(`refusing to overwrite ${path}: not a regular file`);
-    if (!readFileSync(path, "utf8").includes(EXPORT_MARKER))
+    if (!hasExportMarker(readFileSync(path, "utf8"), name))
       throw new Error(
         `refusing to overwrite ${path}: it was not created by eminiar (no export marker)`,
       );
     created = false;
   }
   mkdirSync(dir, { recursive: true });
+  if (dirname(realpathSync.native(dir)) !== realpathSync.native(target))
+    throw new Error(`refusing to write into ${dir}: it resolves outside the target directory`);
   const tmp = `${path}.${process.pid}.tmp`;
   try {
     writeFileSync(tmp, content, { flag: "wx" });
