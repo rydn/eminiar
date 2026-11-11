@@ -341,7 +341,7 @@ describe("L10 accepting a suggestion is atomic", () => {
       return s && { ...s, status: "pending" };
     };
     try {
-      expect(() => acceptSuggestion(ctx, db, id)).toThrow(/already/);
+      expect(() => acceptSuggestion(on(), db, id)).toThrow(/already/);
     } finally {
       db.playbooks.suggestionGet = real;
     }
