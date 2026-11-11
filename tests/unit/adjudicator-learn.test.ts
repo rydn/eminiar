@@ -14,6 +14,8 @@ import {
   computeBias,
   DEFAULT_LEARNING,
   decayFactor,
+  EFFORT_BACKFILL_LIMIT,
+  EFFORT_BACKFILL_SCAN,
   FINAL_AFTER_MS,
   feedbackOf,
   matchDispatches,
@@ -1430,5 +1432,619 @@ describe("feedback retracts exactly what was taught (task #53)", () => {
     expect(withTaught("[1]", [])).toBeUndefined();
     expect(JSON.parse(withTaught(null, []) as string)).toEqual({ taught: [] });
     expect(taughtOf({ scores: JSON.stringify({ features: {} }) })).toBeUndefined();
+  });
+});
+
+describe("reconcile: effort follow-through (#170)", () => {
+  const SATURATED_UNITS = {
+    scored: 3,
+    dropped: 0,
+    skipped: 0,
+    winner: 2,
+    sum: 5,
+    saturated: true,
+    roleConfidence: 0.6,
+  };
+  const sc = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ features: { intents: { implement: 1 } }, ...extra });
+  const scoresOf = (id: number) => JSON.parse(db.adjudicator.get(id)?.scores ?? "{}");
+
+  /** A done task whose worker ran `n` calls at these efforts, after an opus main thread. */
+  function ran(agent: string, efforts: Array<string | null>, model = "claude-haiku-4-5") {
+    const t = swarmTask("done", agent);
+    db.apiCallsUpsert(
+      efforts.map((e) => call({ agent_id: agent, sidechain: 1, model, effort: e })),
+    );
+    return t;
+  }
+
+  it("(a) ignored effort is recorded, and the model follow and savings stay as before", () => {
+    db.apiCallsUpsert([call({ ts: NOW - 40 * MIN })]);
+    const t = ran("A1", ["medium", "medium", "medium"]);
+    const id = row({
+      runId: "R1",
+      taskId: t,
+      action: "advised",
+      tier: "haiku",
+      modelRequested: "haiku",
+      effort: "high",
+      scores: sc(),
+    });
+    reconcile(db, { now: NOW });
+    const r = db.adjudicator.get(id);
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "medium", effortFollow: "ignored" });
+    // The model follow and its credit are untouched by the effort verdict.
+    expect(r?.action).toBe("followed");
+    expect(r?.savingsUsd).toBeCloseTo(3 * (OPUS - HAIKU), 10);
+    expect(r?.actualCostUsd).toBeCloseTo(3 * HAIKU, 10);
+  });
+
+  it("(a) the actual effort is the mode of the calls; null and unknown values are skipped", () => {
+    const t = ran("A1", [null, "low", "bogus", "high", "high"]);
+    const id = row({ runId: "R1", taskId: t, effort: "high", scores: sc() });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+  });
+
+  it("(b) passed effort equal to the advice and to what ran is followed", () => {
+    const t = ran("A1", ["high", "high"]);
+    const id = row({
+      runId: "R1",
+      taskId: t,
+      effort: "high",
+      scores: sc({ passedEffort: "high" }),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({
+      passedEffort: "high",
+      actualEffort: "high",
+      effortFollow: "followed",
+    });
+  });
+
+  it("(c) advised max, passed max, ran high (the model's cap) is followed", () => {
+    const t = ran("A1", ["high", "high"]);
+    const id = row({
+      runId: "R1",
+      taskId: t,
+      effort: "max",
+      scores: sc({ passedEffort: "max" }),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+  });
+
+  it("ignored when the advised level was neither passed nor run", () => {
+    const t = ran("A1", ["low"]);
+    const id = row({
+      runId: "R1",
+      taskId: t,
+      effort: "high",
+      scores: sc({ passedEffort: "medium" }),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "low", effortFollow: "ignored" });
+  });
+
+  it("(d) a fork, the env override and a saturated brief keep actualEffort but no verdict", () => {
+    const fork = row({
+      runId: "R1",
+      taskId: ran("F", ["low"]),
+      effort: "high",
+      scores: sc({ fork: true }),
+    });
+    const env = row({
+      runId: "R1",
+      taskId: ran("E", ["low"]),
+      effort: "high",
+      scores: sc({ effortEnv: "low" }),
+    });
+    const envOther = row({
+      runId: "R1",
+      taskId: ran("O", ["low"]),
+      effort: "high",
+      scores: sc({ effortEnv: "other" }),
+    });
+    const satPlanTask = ran("S", ["low"]);
+    const plan = row({
+      surface: "plan",
+      runId: "R1",
+      taskId: satPlanTask,
+      scores: sc({ units: SATURATED_UNITS }),
+    });
+    const sat = row({
+      runId: "R1",
+      taskId: satPlanTask,
+      parentId: plan,
+      effort: "high",
+      scores: sc(),
+    });
+    reconcile(db, { now: NOW });
+    for (const id of [fork, env, envOther, sat]) {
+      const s = scoresOf(id);
+      expect(s.actualEffort).toBe("low");
+      expect(s.effortFollow).toBeUndefined();
+    }
+  });
+
+  it("no advice, or no effort data on the calls: no verdict, and no actualEffort without data", () => {
+    const noAdvice = row({ runId: "R1", taskId: ran("N", ["high"]), scores: sc() });
+    const noData = row({
+      runId: "R1",
+      taskId: ran("D", [null, null]),
+      effort: "high",
+      scores: sc(),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(noAdvice)).toMatchObject({ actualEffort: "high" });
+    expect(scoresOf(noAdvice).effortFollow).toBeUndefined();
+    expect(scoresOf(noData).actualEffort).toBeUndefined();
+    expect(scoresOf(noData).effortFollow).toBeUndefined();
+    // the rest of the reconcile still ran for it
+    expect(db.adjudicator.get(noData)).toMatchObject({ final: true, outcome: "success" });
+  });
+
+  it("(e) the finalising commit keeps taught AND the effort keys", () => {
+    const t = ran("A1", ["medium"]);
+    const id = row({ runId: "R1", taskId: t, effort: "high", scores: sc() });
+    reconcile(db, { now: NOW });
+    const s = scoresOf(id);
+    expect(db.adjudicator.get(id)?.final).toBe(true);
+    expect(s).toMatchObject({ actualEffort: "medium", effortFollow: "ignored" });
+    expect(Array.isArray(s.taught)).toBe(true);
+    expect(s.taught.length).toBeGreaterThan(0);
+    expect(taughtOf(db.adjudicator.get(id) as never)?.length).toBe(s.taught.length);
+    // the original scores survive too
+    expect(s.features).toEqual({ intents: { implement: 1 } });
+  });
+
+  it("(e) learning off: taught is empty but the effort keys are still kept", () => {
+    const t = ran("A1", ["medium"]);
+    const id = row({ runId: "R1", taskId: t, effort: "high", scores: sc() });
+    reconcile(db, { now: NOW, learning: { enabled: false } });
+    expect(scoresOf(id)).toMatchObject({
+      actualEffort: "medium",
+      effortFollow: "ignored",
+      taught: [],
+    });
+  });
+
+  it("(f) a second reconcile writes nothing", () => {
+    // not yet final: the task is active, calls keep arriving
+    const t = swarmTask("active", "A1");
+    db.apiCallsUpsert([
+      call({ agent_id: "A1", sidechain: 1, model: "claude-haiku-4-5", effort: "low" }),
+    ]);
+    const id = row({ runId: "R1", taskId: t, effort: "high", scores: sc() });
+    const first = reconcile(db, { now: NOW });
+    expect(first.updated).toBe(1);
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "low", effortFollow: "ignored" });
+    expect(db.adjudicator.get(id)?.final).toBe(false);
+    const before = db.adjudicator.get(id);
+    const second = reconcile(db, { now: NOW });
+    expect(second.updated).toBe(0);
+    expect(db.adjudicator.get(id)).toEqual(before);
+  });
+
+  it("a verdict that changes as more calls arrive is rewritten", () => {
+    const t = swarmTask("active", "A1");
+    db.apiCallsUpsert([
+      call({ agent_id: "A1", sidechain: 1, model: "claude-haiku-4-5", effort: "low" }),
+    ]);
+    const id = row({ runId: "R1", taskId: t, effort: "high", scores: sc() });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id).effortFollow).toBe("ignored");
+    db.apiCallsUpsert(
+      [1, 2, 3].map(() =>
+        call({ agent_id: "A1", sidechain: 1, model: "claude-haiku-4-5", effort: "high" }),
+      ),
+    );
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+  });
+
+  it("a stale verdict that no longer applies is removed", () => {
+    const t = ran("A1", ["high"]);
+    // the verdict was written before the env override showed up: it is not counted any more
+    const id = row({
+      runId: "R1",
+      taskId: t,
+      effort: "high",
+      scores: sc({ effortEnv: "low", effortFollow: "followed" }),
+    });
+    reconcile(db, { now: NOW });
+    const s = scoresOf(id);
+    expect(s.effortFollow).toBeUndefined();
+    expect(s.actualEffort).toBe("high");
+    expect(s.effortEnv).toBe("low");
+  });
+
+  it("the agent file's effort equal to the advice counts as followed when nothing was passed", () => {
+    const t = ran("A1", ["high", "high"]);
+    const id = row({
+      runId: "R1",
+      taskId: t,
+      effort: "xhigh",
+      scores: sc({ agentEffort: "xhigh" }),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+  });
+
+  it("the agent file's effort is ignored when the call passed another level", () => {
+    const t = ran("A1", ["high"]);
+    const id = row({
+      runId: "R1",
+      taskId: t,
+      effort: "xhigh",
+      scores: sc({ agentEffort: "xhigh", passedEffort: "low" }),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "high", effortFollow: "ignored" });
+  });
+
+  it("(g) a plan row with worker calls gets actualEffort and no verdict", () => {
+    const t = ran("A1", ["high", "high"]);
+    const plan = row({ surface: "plan", runId: "R1", taskId: t, effort: "high", scores: sc() });
+    reconcile(db, { now: NOW });
+    const s = scoresOf(plan);
+    expect(s.actualEffort).toBe("high");
+    expect(s.effortFollow).toBeUndefined();
+  });
+
+  it("a linked non-swarm agent row gets the verdict too", () => {
+    const start = NOW - 10 * MIN;
+    db.apiCallsUpsert([
+      call({
+        ts: start + 5_000,
+        agent_id: "G1",
+        sidechain: 1,
+        model: "claude-haiku-4-5",
+        effort: "low",
+      }),
+    ]);
+    // ingestion has passed the row's 60 s link window
+    db.apiCallsUpsert([call({ ts: start + 2 * MIN })]);
+    const id = row({ ts: start, effort: "high", scores: sc() });
+    reconcile(db, { now: NOW });
+    expect(db.adjudicator.get(id)?.agentId).toBe("G1");
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "low", effortFollow: "ignored" });
+  });
+
+  it("a prompt row gets no effort keys", () => {
+    db.apiCallsUpsert([call({ ts: NOW - 5 * MIN, effort: "high" })]);
+    const id = row({ surface: "prompt", ts: NOW - 6 * MIN, effort: "high", scores: sc() });
+    reconcile(db, { now: NOW });
+    expect(db.adjudicator.get(id)?.scores).toBe(sc());
+  });
+});
+
+describe("reconcile: applied effort (effortPatch passes applied)", () => {
+  const sc = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ features: { intents: { implement: 1 } }, ...extra });
+  const scoresOf = (id: number) => JSON.parse(db.adjudicator.get(id)?.scores ?? "{}");
+  function ran(agent: string, efforts: string[]) {
+    const t = swarmTask("done", agent);
+    db.apiCallsUpsert(
+      efforts.map((e) =>
+        call({ agent_id: agent, sidechain: 1, model: "claude-haiku-4-5", effort: e }),
+      ),
+    );
+    return t;
+  }
+
+  it("applied == advised but a lower level ran is ignored (passed alone would say followed)", () => {
+    const id = row({
+      runId: "R1",
+      taskId: ran("A1", ["low", "low"]),
+      effort: "high",
+      scores: sc({ passedEffort: "high", effortApplied: "high" }),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "low", effortFollow: "ignored" });
+  });
+
+  it("applied == advised and it ran there is followed", () => {
+    const id = row({
+      runId: "R1",
+      taskId: ran("A1", ["high", "high"]),
+      effort: "high",
+      scores: sc({ effortApplied: "high" }),
+    });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+  });
+});
+
+describe("reconcile: effort backfill of final agent rows", () => {
+  const sc = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ features: { intents: { implement: 1 } }, ...extra });
+  const scoresOf = (id: number) => JSON.parse(db.adjudicator.get(id)?.scores ?? "{}");
+  const OFF = { adjudicator: { learning: { enabled: false } } };
+
+  /** A final agent row for `agent` with calls at `effort`; `rowOver` overrides the row. */
+  function finalRow(
+    agent: string,
+    effort: string | null,
+    rowOver: Partial<AdjudicationInput> = {},
+    session = "S",
+  ): number {
+    const ts = rowOver.ts ?? NOW - 10 * MIN;
+    db.apiCallsUpsert([
+      call({ session_id: session, agent_id: agent, sidechain: 1, ts: ts + 1000, effort }),
+    ]);
+    return row({
+      ts,
+      sessionId: session,
+      agentId: agent,
+      final: true,
+      effort: "high",
+      action: "followed",
+      savingsUsd: 0.5,
+      scores: sc(),
+      ...rowOver,
+    });
+  }
+
+  it("repairs a final row that lacks actualEffort and touches only the effort keys", () => {
+    const id = finalRow("G1", "low", { scores: sc({ passedEffort: "medium" }) });
+    const before = db.adjudicator.get(id);
+    reconcile(db, { now: NOW });
+    const after = db.adjudicator.get(id);
+    expect(scoresOf(id)).toMatchObject({
+      actualEffort: "low",
+      effortFollow: "ignored",
+      passedEffort: "medium",
+      features: { intents: { implement: 1 } },
+    });
+    expect({ ...after, scores: null, updatedAt: null }).toEqual({
+      ...before,
+      scores: null,
+      updatedAt: null,
+    });
+    expect(after?.final).toBe(true);
+    expect(after?.action).toBe("followed");
+    expect(after?.savingsUsd).toBe(0.5);
+  });
+
+  it("uses applied: ran at the advised level is followed", () => {
+    const id = finalRow("G1", "high", { scores: sc({ effortApplied: "high" }) });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+  });
+
+  it("is idempotent: a second pass updates nothing and the scores do not change", () => {
+    const id = finalRow("G1", "low");
+    reconcile(db, { now: NOW });
+    const first = db.adjudicator.get(id)?.scores;
+    const r2 = reconcile(db, { now: NOW });
+    expect(r2.updated).toBe(0);
+    expect(db.adjudicator.get(id)?.scores).toBe(first);
+  });
+
+  it("skips rows with an actualEffort key, no agentId, no calls with an effort, or non-final", () => {
+    const has = finalRow("G1", "low", { scores: sc({ actualEffort: "high" }) });
+    const noAgent = finalRow("G2", "low", { agentId: null });
+    const noCalls = row({ ts: NOW - 10 * MIN, agentId: "G3", final: true, scores: sc() });
+    const noEffort = finalRow("G4", null);
+    const prompt = finalRow("G5", "low", { surface: "prompt" });
+    expect(reconcile(db, { now: NOW }).updated).toBe(0);
+    expect(scoresOf(has).actualEffort).toBe("high");
+    expect(scoresOf(noAgent).actualEffort).toBeUndefined();
+    expect(scoresOf(noCalls).actualEffort).toBeUndefined();
+    expect(scoresOf(noEffort).actualEffort).toBeUndefined();
+    expect(scoresOf(prompt).actualEffort).toBeUndefined();
+  });
+
+  it("matches calls by agent: another agent's effort is not used", () => {
+    db.apiCallsUpsert([call({ agent_id: "OTHER", sidechain: 1, effort: "max" })]);
+    const id = finalRow("G1", "low");
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id).actualEffort).toBe("low");
+  });
+
+  it("learning disabled is a no-op", () => {
+    const id = finalRow("G1", "low");
+    const before = db.adjudicator.get(id)?.scores;
+    expect(reconcile(db, { now: NOW, config: OFF }).updated).toBe(0);
+    expect(db.adjudicator.get(id)?.scores).toBe(before);
+  });
+
+  it("also runs when there are pending rows to reconcile (not only the early return)", () => {
+    const id = finalRow("G1", "low");
+    row({ ts: NOW - 20 * MIN, scores: sc() });
+    reconcile(db, { now: NOW });
+    expect(scoresOf(id).actualEffort).toBe("low");
+  });
+
+  it("repairs at most EFFORT_BACKFILL_LIMIT rows per pass, newest first, the rest next pass", () => {
+    const extra = 30;
+    const total = EFFORT_BACKFILL_LIMIT + extra;
+    const ids: number[] = [];
+    for (let i = 0; i < total; i++)
+      ids.push(finalRow(`G${i}`, "low", { ts: NOW - HOUR + i * 1000 }));
+    const r1 = reconcile(db, { now: NOW });
+    expect(r1.updated).toBe(EFFORT_BACKFILL_LIMIT);
+    const done = ids.filter((id) => scoresOf(id).actualEffort === "low");
+    expect(done.length).toBe(EFFORT_BACKFILL_LIMIT);
+    // the oldest `extra` rows are the ones left
+    for (const id of ids.slice(0, extra)) expect(scoresOf(id).actualEffort).toBeUndefined();
+    const r2 = reconcile(db, { now: NOW });
+    expect(r2.updated).toBe(extra);
+    expect(ids.every((id) => scoresOf(id).actualEffort === "low")).toBe(true);
+    expect(reconcile(db, { now: NOW }).updated).toBe(0);
+  });
+
+  describe("a row that records no dispatch facts is legacy (effortFactsRecorded)", () => {
+    it("gets actualEffort but no effortFollow even when advised != ran", () => {
+      // advised "high" (finalRow default), ran at "low": with a verdict this would be "ignored"
+      const id = finalRow("G1", "low", { scores: sc() });
+      reconcile(db, { now: NOW });
+      const s = scoresOf(id);
+      expect(s.actualEffort).toBe("low");
+      expect(s).not.toHaveProperty("effortFollow");
+    });
+
+    it("agentEffort alone is a recorded fact: the verdict is written", () => {
+      const ign = finalRow("G1", "low", { scores: sc({ agentEffort: "high" }) });
+      const fol = finalRow("G2", "high", { scores: sc({ agentEffort: "high" }) });
+      // the agent file sets the advised level, so it counts as followed even though it ran lower
+      reconcile(db, { now: NOW });
+      expect(scoresOf(ign)).toMatchObject({ actualEffort: "low", effortFollow: "followed" });
+      expect(scoresOf(fol)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+      const other = finalRow("G3", "low", {
+        effort: "high",
+        scores: sc({ agentEffort: "medium" }),
+      });
+      reconcile(db, { now: NOW });
+      expect(scoresOf(other)).toMatchObject({ actualEffort: "low", effortFollow: "ignored" });
+    });
+
+    it("passedEffort alone is a recorded fact: followed or ignored", () => {
+      const fol = finalRow("G1", "low", { scores: sc({ passedEffort: "high" }) });
+      const ign = finalRow("G2", "low", { scores: sc({ passedEffort: "medium" }) });
+      reconcile(db, { now: NOW });
+      expect(scoresOf(fol)).toMatchObject({ actualEffort: "low", effortFollow: "followed" });
+      expect(scoresOf(ign)).toMatchObject({ actualEffort: "low", effortFollow: "ignored" });
+    });
+
+    it("effortApplied alone is a recorded fact: the exact verdict is written", () => {
+      const ign = finalRow("G1", "low", { scores: sc({ effortApplied: "high" }) });
+      reconcile(db, { now: NOW });
+      expect(scoresOf(ign)).toMatchObject({ actualEffort: "low", effortFollow: "ignored" });
+    });
+
+    it("effortEnv alone is a recorded fact, but the env override is not counted: actualEffort, no verdict", () => {
+      const a = finalRow("G1", "low", { scores: sc({ effortEnv: "low" }) });
+      const b = finalRow("G2", "low", { scores: sc({ effortEnv: "other" }) });
+      reconcile(db, { now: NOW });
+      for (const id of [a, b]) {
+        expect(scoresOf(id).actualEffort).toBe("low");
+        expect(scoresOf(id)).not.toHaveProperty("effortFollow");
+      }
+    });
+
+    it("a legacy row repaired once is idempotent: the second pass writes nothing", () => {
+      const id = finalRow("G1", "low");
+      reconcile(db, { now: NOW });
+      const first = db.adjudicator.get(id)?.scores;
+      expect(reconcile(db, { now: NOW }).updated).toBe(0);
+      expect(db.adjudicator.get(id)?.scores).toBe(first);
+    });
+  });
+
+  describe("an old row of a busy session is not starved by a newer unrepairable one (#251)", () => {
+    const HAIKU = "claude-haiku-4-5";
+    /**
+     * Session S: final agent row B (14 h old) whose agent ran at effort high, and a newer final
+     * row A (1 h old) whose only call is a haiku call with no effort, so A can never be repaired.
+     * A pass keyed to the newest row's window never loaded B's calls.
+     */
+    function seed(): { a: number; b: number } {
+      const bTs = NOW - 14 * HOUR;
+      const aTs = NOW - 1 * HOUR;
+      db.apiCallsUpsert([
+        call({ session_id: "S", agent_id: "B", sidechain: 1, ts: bTs + 1000, effort: "high" }),
+        call({
+          session_id: "S",
+          agent_id: "A",
+          sidechain: 1,
+          ts: aTs + 1000,
+          model: HAIKU,
+          effort: null,
+        }),
+      ]);
+      const mk = (agent: string, ts: number) =>
+        row({
+          ts,
+          sessionId: "S",
+          agentId: agent,
+          final: true,
+          effort: "high",
+          action: "followed",
+          scores: sc({ passedEffort: "high" }),
+        });
+      return { b: mk("B", bTs), a: mk("A", aTs) };
+    }
+
+    it("idle path: repairs B, leaves A untouched, and the second pass writes nothing", () => {
+      const { a, b } = seed();
+      const aBefore = db.adjudicator.get(a);
+      expect(reconcile(db, { now: NOW }).updated).toBe(1);
+      expect(scoresOf(b)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+      expect(db.adjudicator.get(a)).toEqual(aBefore);
+      expect(scoresOf(a).actualEffort).toBeUndefined();
+      const bAfter = db.adjudicator.get(b)?.scores;
+      expect(reconcile(db, { now: NOW }).updated).toBe(0);
+      expect(db.adjudicator.get(b)?.scores).toBe(bAfter);
+      expect(db.adjudicator.get(a)).toEqual(aBefore);
+    });
+
+    it("pending path: a pending row in the same session does not change that", () => {
+      const { a, b } = seed();
+      const aBefore = db.adjudicator.get(a);
+      const pending = row({ ts: NOW - 20 * MIN, sessionId: "S", scores: sc() });
+      reconcile(db, { now: NOW });
+      expect(scoresOf(b)).toMatchObject({ actualEffort: "high", effortFollow: "followed" });
+      expect(db.adjudicator.get(a)).toEqual(aBefore);
+      // the pending row was scanned by the main pass, not repaired by the backfill
+      expect(db.adjudicator.get(pending)).toBeDefined();
+      const bAfter = db.adjudicator.get(b)?.scores;
+      reconcile(db, { now: NOW });
+      expect(db.adjudicator.get(b)?.scores).toBe(bAfter);
+      expect(db.adjudicator.get(a)).toEqual(aBefore);
+    });
+
+    it("a row older than the session's other candidates keeps its own 5 s slack", () => {
+      // two repairable rows of one session; the older one's call precedes its ts by 3 s
+      const ts1 = NOW - 6 * HOUR;
+      const ts2 = NOW - 1 * HOUR;
+      db.apiCallsUpsert([
+        call({ session_id: "S", agent_id: "P", sidechain: 1, ts: ts1 - 3000, effort: "medium" }),
+        call({ session_id: "S", agent_id: "Q", sidechain: 1, ts: ts2 + 1000, effort: "low" }),
+      ]);
+      const mk = (agent: string, ts: number) =>
+        row({
+          ts,
+          sessionId: "S",
+          agentId: agent,
+          final: true,
+          scores: sc({ passedEffort: "low" }),
+        });
+      const p = mk("P", ts1);
+      const q = mk("Q", ts2);
+      reconcile(db, { now: NOW });
+      expect(scoresOf(p).actualEffort).toBe("medium");
+      expect(scoresOf(q).actualEffort).toBe("low");
+    });
+
+    it("different sessions are loaded independently", () => {
+      const ts = NOW - 10 * HOUR;
+      const s1 = finalRow("X1", "high", { ts, scores: sc({ passedEffort: "high" }) }, "S1");
+      const s2 = finalRow(
+        "X2",
+        "low",
+        { ts: NOW - 2 * HOUR, scores: sc({ passedEffort: "low" }) },
+        "S2",
+      );
+      reconcile(db, { now: NOW });
+      expect(scoresOf(s1).actualEffort).toBe("high");
+      expect(scoresOf(s2).actualEffort).toBe("low");
+    });
+  });
+
+  it("scans at most EFFORT_BACKFILL_SCAN agent rows: a repairable row past the window waits", () => {
+    const old = finalRow("OLD", "low", { ts: NOW - 5 * HOUR });
+    // EFFORT_BACKFILL_SCAN newer rows that are already repaired, so they fill the scan window
+    for (let i = 0; i < EFFORT_BACKFILL_SCAN; i++) {
+      row({
+        ts: NOW - 4 * HOUR + i,
+        agentId: `D${i}`,
+        final: true,
+        scores: sc({ actualEffort: "high" }),
+      });
+    }
+    expect(reconcile(db, { now: NOW }).updated).toBe(0);
+    expect(scoresOf(old).actualEffort).toBeUndefined();
   });
 });

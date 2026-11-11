@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import type { Verdict } from "../../src/adjudicator/types.js";
+import { EFFORTS, type Verdict } from "../../src/adjudicator/types.js";
 import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
 import { EXCHANGE_KEEP } from "../../src/storage/sqlite/adjudicator.js";
 import {
@@ -636,11 +636,135 @@ describe("SqliteAdjudicatorStore", () => {
     expect(s.summary(11).rates.follow).toBeCloseTo(3 / 5);
   });
 
+  it("summary: effort follow rate and passed-but-not-run counts come from the scores (#170)", () => {
+    const s = a.adjudicator;
+    const sc = (o: unknown) => JSON.stringify(o);
+    // followed, ran at the passed level
+    s.insert(
+      row({
+        ts: 1,
+        scores: sc({ effortFollow: "followed", passedEffort: "high", actualEffort: "high" }),
+      }),
+    );
+    // ignored, nothing passed
+    s.insert(row({ ts: 2, scores: sc({ effortFollow: "ignored", actualEffort: "medium" }) }));
+    // followed because the advised level was passed, but a lower one ran: ineffective
+    s.insert(
+      row({
+        ts: 3,
+        scores: sc({ effortFollow: "followed", passedEffort: "max", actualEffort: "high" }),
+      }),
+    );
+    // an agent row without effort data, and garbage scores: not counted
+    s.insert(row({ ts: 4, scores: sc({ passedEffort: "high" }) }));
+    s.insert(row({ ts: 5, scores: "{not json" }));
+    // a plan row with an agent sibling is no dispatch: its effort keys are not counted
+    s.insert(
+      row({
+        ts: 6,
+        surface: "plan",
+        runId: "R",
+        taskId: 1,
+        scores: sc({ actualEffort: "low", effortFollow: "ignored" }),
+      }),
+    );
+    s.insert(
+      row({
+        ts: 7,
+        runId: "R",
+        taskId: 1,
+        scores: sc({ effortFollow: "followed", actualEffort: "low" }),
+      }),
+    );
+    // a prompt row is no dispatch either
+    s.insert(row({ ts: 8, surface: "prompt", scores: sc({ effortFollow: "ignored" }) }));
+    const sum = s.summary();
+    expect(sum.effortFollowed).toBe(3);
+    expect(sum.effortIgnored).toBe(1);
+    expect(sum.rates.effortFollow).toBeCloseTo(3 / 4);
+    expect(sum.effortChecked).toBe(2);
+    expect(sum.effortIneffective).toBe(1);
+  });
+
+  it("summary: effortApplied is the set level and beats passedEffort (checked/ineffective)", () => {
+    const s = a.adjudicator;
+    const sc = (o: unknown) => JSON.stringify(o);
+    // applied == actual, passed differs: effective (passed alone would count ineffective)
+    s.insert(
+      row({
+        ts: 1,
+        scores: sc({ effortApplied: "high", passedEffort: "low", actualEffort: "high" }),
+      }),
+    );
+    // applied != actual, passed == actual: ineffective (passed alone would count effective)
+    s.insert(
+      row({
+        ts: 2,
+        scores: sc({ effortApplied: "max", passedEffort: "high", actualEffort: "high" }),
+      }),
+    );
+    // applied only
+    s.insert(row({ ts: 3, scores: sc({ effortApplied: "medium", actualEffort: "low" }) }));
+    // passed only still counts (advise mode)
+    s.insert(row({ ts: 4, scores: sc({ passedEffort: "high", actualEffort: "high" }) }));
+    // an invalid applied falls back to passed
+    s.insert(
+      row({
+        ts: 5,
+        scores: sc({ effortApplied: "bogus", passedEffort: "low", actualEffort: "high" }),
+      }),
+    );
+    // applied without actual, and actual without any set level: not checked
+    s.insert(row({ ts: 6, scores: sc({ effortApplied: "high" }) }));
+    s.insert(row({ ts: 7, scores: sc({ actualEffort: "high" }) }));
+    const sum = s.summary();
+    expect(sum.effortChecked).toBe(5);
+    expect(sum.effortIneffective).toBe(3);
+  });
+
+  it("the store counts every level in EFFORTS (its private copy must not drift)", () => {
+    // The store mirrors EFFORTS in a private list (it cannot import src/adjudicator at boot);
+    // a level added to EFFORTS but not there would silently drop out of effortChecked.
+    EFFORTS.forEach((level, i) => {
+      a.adjudicator.insert(
+        row({
+          ts: i + 1,
+          scores: JSON.stringify({ passedEffort: level, actualEffort: level }),
+        }),
+      );
+    });
+    const sum = a.adjudicator.summary();
+    expect(sum.effortChecked).toBe(EFFORTS.length);
+    expect(sum.effortIneffective).toBe(0);
+  });
+
+  it("the store counts every level in EFFORTS when read from effortApplied", () => {
+    EFFORTS.forEach((level, i) => {
+      a.adjudicator.insert(
+        row({ ts: i + 1, scores: JSON.stringify({ effortApplied: level, actualEffort: level }) }),
+      );
+    });
+    const sum = a.adjudicator.summary();
+    expect(sum.effortChecked).toBe(EFFORTS.length);
+    expect(sum.effortIneffective).toBe(0);
+  });
+
   it("an empty table summarises to zeros and null rates", () => {
     const sum = a.adjudicator.summary();
     expect(sum.total).toBe(0);
     expect(sum.keptModel).toEqual({ pin: 0, force: 0, fork: 0 });
-    expect(sum.rates).toEqual({ follow: null, apply: null, respect: null });
+    expect(sum.rates).toEqual({
+      follow: null,
+      apply: null,
+      respect: null,
+      effortFollow: null,
+    });
+    expect(sum).toMatchObject({
+      effortFollowed: 0,
+      effortIgnored: 0,
+      effortIneffective: 0,
+      effortChecked: 0,
+    });
     expect(sum.costUsd).toBe(0);
     expect(sum.applyIneffective).toBe(0);
   });

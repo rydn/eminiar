@@ -215,6 +215,13 @@ export function formatStats(
     `advice followed ${pct(s.rates.follow)} · applied ${pct(s.rates.apply)} · respected ${pct(s.rates.respect)}${
       s.applyChecked ? ` · apply ineffective ${s.applyIneffective} of ${s.applyChecked}` : ""
     }`,
+    ...(s.effortFollowed + s.effortIgnored
+      ? [
+          `effort followed ${pct(s.rates.effortFollow)} (${s.effortFollowed} followed, ${s.effortIgnored} ignored of ${s.effortFollowed + s.effortIgnored})${
+            s.effortIneffective ? ` · set but not run ${s.effortIneffective}` : ""
+          }`,
+        ]
+      : []),
     `outcomes ${counts(s.byOutcome)}`,
     `spend ${formatUsd(sv.spendUsd)} · realised ${formatUsd(sv.realisedUsd)}${
       sv.redoPenaltyUsd ? ` (redo ${formatUsd(sv.redoPenaltyUsd)})` : ""

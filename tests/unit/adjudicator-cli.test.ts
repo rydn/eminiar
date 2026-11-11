@@ -828,7 +828,7 @@ describe("doctor", () => {
 
 describe("apply mode while every swarm role pins a model (#108)", () => {
   const PINS =
-    'every role of swarm "feat" pins a model, so apply mode cannot change any worker (add model_range in swarm.yaml, then `eminiar swarm sync`)';
+    'every role of swarm "feat" pins a model, so apply mode cannot change any worker\'s model (add model_range in swarm.yaml, then `eminiar swarm sync`)';
   const yaml = (coder: string) =>
     `version: 1\nswarms:\n  feat:\n    description: a swarm\n    agents:\n      coder:\n        description: writes code\n${coder}      reviewer:\n        description: reviews code\n        model: opus\n`;
   /** swarm.yaml plus the agent files `eminiar swarm sync` writes from it. */
