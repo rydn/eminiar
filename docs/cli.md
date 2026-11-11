@@ -213,7 +213,7 @@ scheduled task. `scan` only saves suggestions, which you accept or dismiss in th
 with `em_playbook`.
 
 The config switches exit 1 with a message naming the key: `playbooks.viewing` off, every
-subcommand but `help`; `playbooks.adding` off, `add`, `edit`, `rm`, `report` and `scan` without
+subcommand but `help`; `playbooks.adding` off, `add`, `edit`, `rm`, `report`, `export --skill` and `scan` without
 `--dry-run` (`run` still prints the prompt, records nothing and says so on stderr);
 `playbooks.extraction.enabled` off, `scan`. See [Tools](tools.md#playbooks).
 

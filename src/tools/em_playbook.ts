@@ -64,7 +64,7 @@ export const emPlaybook = defineTool({
   // row on every call; nothing reaches the network.
   annotations: { ...LOCAL_WRITE, destructiveHint: true, idempotentHint: false },
   description:
-    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export (format markdown|skill|schedule: skill writes a Claude Code SKILL.md, schedule returns text to paste into a Desktop or cloud scheduled task); run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. With playbooks.adding off, every write is refused (run still returns the prompt, unrecorded). Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it.",
+    "Playbooks: stored recurring tasks (prompt, {{params}}, schedule hint). list, read, add, edit, delete, export (format markdown|skill|schedule: skill writes a Claude Code SKILL.md, schedule returns text to paste into a Desktop or cloud scheduled task); run returns the filled prompt for you to carry out and records the run; report closes it; schedule returns an instruction to start a /loop or cron job. eminiar never runs or schedules anything. With playbooks.adding off, every write is refused, export skill included (run still returns the prompt, unrecorded; export markdown and schedule still work). Opt-in (playbooks.extraction.enabled): scan mines session history for recurring tasks into suggestions; suggestions lists them; accept (id) makes one a playbook; dismiss (id) rejects it.",
   schema: {
     action: z.enum([
       "list",

@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getContext, type ProjectContext, resetContextCache } from "../../src/context.js";
-import { exportSkill } from "../../src/playbooks/export.js";
-import { write } from "../../src/playbooks/store.js";
+import { exportMarkdown, exportSkill, schedulePrompt } from "../../src/playbooks/export.js";
+import { PlaybookGateError, read, write } from "../../src/playbooks/store.js";
 import type { StorageAdapter } from "../../src/storage/adapter.js";
 import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 
@@ -74,4 +74,31 @@ while (Date.now() < end) {
     expect(existsSync(join(outside, "pub", "SKILL.md"))).toBe(false);
     expect(tries).toBeGreaterThan(100);
   }, 20_000);
+});
+
+describe("#267 playbooks.adding off refuses export skill only", () => {
+  const off = (): ProjectContext => ({
+    ...ctx,
+    config: { ...ctx.config, playbooks: { ...ctx.config.playbooks, adding: false } },
+  });
+
+  it("refuses with the gate error naming playbooks.adding and writes nothing", () => {
+    let err: unknown;
+    try {
+      exportSkill(off(), db, "pub", { targetDir: "gated" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(PlaybookGateError);
+    expect((err as PlaybookGateError).key).toBe("playbooks.adding");
+    expect((err as Error).message).toContain("playbooks.adding");
+    expect(existsSync(join(root, "gated"))).toBe(false);
+  });
+
+  it("keeps markdown and schedule exports working", () => {
+    const f = read(off(), db, "pub");
+    expect(f).toBeTruthy();
+    expect(exportMarkdown(f as NonNullable<typeof f>)).toContain("do the thing");
+    expect(schedulePrompt(off(), db, "pub")).toContain("do the thing");
+  });
 });

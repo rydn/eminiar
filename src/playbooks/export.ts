@@ -18,7 +18,7 @@ import type { ProjectContext } from "../context.js";
 import { within } from "../docs/manifest.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { oneLine, serializePlaybookFile } from "./frontmatter.js";
-import { fillPrompt, type PlaybookFile, read } from "./store.js";
+import { assertAdding, fillPrompt, type PlaybookFile, read } from "./store.js";
 
 /**
  * Export a playbook as a Claude Code skill (`<dir>/<name>/SKILL.md`) and as a printable prompt
@@ -281,6 +281,7 @@ export function exportSkill(
   name: string,
   opts: ExportSkillOptions = {},
 ): ExportSkillResult {
+  assertAdding(ctx); // writes a file, so it follows the same switch as every other write
   assertSkillName(name);
   const file = read(ctx, db, name);
   if (!file) throw new Error(`no playbook named ${JSON.stringify(name)}`);

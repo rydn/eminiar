@@ -420,7 +420,7 @@ function assertViewing(ctx: ProjectContext): void {
     );
 }
 
-function assertAdding(ctx: ProjectContext): void {
+export function assertAdding(ctx: ProjectContext): void {
   assertViewing(ctx);
   if (!ctx.config.playbooks.adding)
     throw new PlaybookGateError(

@@ -199,7 +199,8 @@ run or schedule anything. Playbooks are not Claude Code Skills; `export` can wri
 Secrets are masked in everything stored: titles, prompts, defaults, schedules and run notes.
 With `playbooks.viewing` off every action is refused and the tool is not listed (run
 `/mcp reconnect` after changing it). With `playbooks.adding` off every write is refused: `add`,
-`edit`, `delete`, `report`, `accept`, `dismiss` and `scan` without `dry_run`. The error names the
+`edit`, `delete`, `report`, `accept`, `dismiss`, `scan` without `dry_run` and `export` with
+`format` `skill` (it writes a file; `markdown` and `schedule` still work). The error names the
 key. See [Configuration](configuration.md#playbooks).
 
 ## Adjudicator
