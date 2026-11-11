@@ -629,6 +629,57 @@ CREATE TABLE IF NOT EXISTS adjudicator_exchanges (
 CREATE INDEX IF NOT EXISTS adjudicator_exchanges_ts ON adjudicator_exchanges(ts);
 `,
   },
+  {
+    // Playbooks (src/playbooks): stored recurring tasks. `playbooks` mirrors the markdown files
+    // like `memories`; runs and suggestions are activity. Nothing here executes a playbook.
+    version: 10,
+    sql: `
+CREATE TABLE IF NOT EXISTS playbooks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  params TEXT,
+  schedule TEXT,
+  tags TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  private INTEGER NOT NULL DEFAULT 0,
+  path TEXT,
+  file_hash TEXT,
+  file_mtime INTEGER,
+  file_size INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS playbooks_updated ON playbooks(updated_at);
+CREATE TABLE IF NOT EXISTS playbook_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  playbook TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  trigger TEXT NOT NULL,
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'started',
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS playbook_runs_playbook ON playbook_runs(playbook, ts);
+CREATE TABLE IF NOT EXISTS playbook_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  params TEXT,
+  schedule TEXT,
+  tags TEXT,
+  evidence TEXT,
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  fingerprint TEXT NOT NULL UNIQUE,
+  playbook TEXT
+);
+CREATE INDEX IF NOT EXISTS playbook_suggestions_status ON playbook_suggestions(status, ts);
+`,
+  },
 ];
 
 /**
