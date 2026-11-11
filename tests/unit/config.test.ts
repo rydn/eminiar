@@ -119,6 +119,15 @@ describe("config layering: one bad layer, additive lists, unknown keys", () => {
     expect(stderr()).toContain(join(planted, "config.json"));
   });
 
+  it("names a bad entry of an additive list by its place in its own file", () => {
+    project({ graph: { exclude: ["**/ok/**", 5] } });
+    loadConfig(root);
+    // not graph.exclude.14: the defaults come first in the merged list
+    expect(stderr()).toContain("graph.exclude.1: ");
+    expect(stderr()).not.toMatch(/graph\.exclude\.1\d/);
+    expect(stderr()).toContain("invalid config in eminiar.config.json, ignoring it");
+  });
+
   it("a bad project value drops only the project file, keeping the personal one", () => {
     personal({ routing: { mode: "enforce" }, recall: { maxDocs: 4 } });
     project({ routing: { mode: "annotate" }, recall: { maxMemories: 11 } });
