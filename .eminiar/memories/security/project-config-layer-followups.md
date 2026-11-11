@@ -1,18 +1,17 @@
 ---
 name: security/project-config-layer-followups
 kind: todo
-tags: [security, config, followup]
-related: [file:src/config.ts, file:bin/_resolve.sh]
+tags: []
+related: []
 created: 2026-11-04T14:07:52.957Z
-updated: 2026-11-08T17:00:00.000Z
+updated: 2026-11-11T20:09:48.483Z
 ---
 
-Pre-existing project-config trust issues found by swarm run 20261104-483f39 security review #71 (2026-11-04), present on main before the adjudicator and NOT fixed on branch feature/adjudicator (out of scope; needs its own PR):
-1. A committed eminiar.config.json with {"permissions":{"extraDeny":[]}} wipes the user's personal extraDeny list, because project-layer arrays replace personal arrays in deepMerge (src/config.ts). Confirmed.
-2. The project file can add entries to sandbox.envAllow (e.g. GITHUB_TOKEN), exposing that env var inside em_execute's sandbox.
-3. Any schema error in the project file makes loadConfig fall back to defaults for the WHOLE config, discarding the user's personal settings.
-4. (test hygiene, also on main) `npm test` writes em_history stats into whatever EMINIAR_HOME it runs under and creates projects/h and projects/test there; with no EMINIAR_HOME set that is the developer's real ~/.eminiar (seen by review #80). tests/setup-env.ts should point EMINIAR_HOME at a per-run temp dir.
+Project-config trust issues found by swarm run 20261104-483f39 security review #71 (2026-11-04). Status as of 2026-11-11 (main 0.14.5; PRs #58, #65 merged, #66 open):
+1. DONE (#58): a project `permissions.extraDeny: []` no longer wipes the personal list; extraDeny, sandbox.disabledLanguages and graph.exclude are additive across layers (ADDITIVE_LISTS in src/config.ts), and graph.exclude takes "!<entry>" to drop a built-in default.
+2. DONE once PR #66 merges (decided by Ryan 2026-11-11): a project eminiar.config.json, or a personal config the repo plants (EMINIAR_HOME pointed into the project, personalConfigTrusted false), has the whole sandbox.envAllow key ignored with a stderr note (withoutEnvAllow in src/config.ts). #65 had dropped only the withheld names (ANTHROPIC_*, CLAUDE_*, OPENAI_*, *_API_KEY, EMINIAR_PLUGIN*). Behaviour change: a team that committed envAllow for ordinary names must put them in each developer's ~/.eminiar/config.json.
+3. DONE (#58): a schema error in one layer drops only that layer.
+4. (test hygiene) `npm test` writes em_history stats into whatever EMINIAR_HOME it runs under; tests/setup-env.ts should point EMINIAR_HOME at a per-run temp dir. Not checked since 2026-11-08.
 
-Update 2026-11-08 (branch fix/team-template-keeps-personal-lists): `eminiar install --team` no longer writes list keys. It wrote `permissions.extraDeny: []` (item 1, from eminiar itself), a `graph.exclude` missing 7 current defaults, and `index.docs: ["**/*.md", "docs/**"]`, which dropped the default `**/*.mdx`. The template is now `$schema` + `routing`, and tests/unit/install.test.ts asserts it holds no arrays. docs/configuration.md says that lists replace; its example sets no list, and adding an exclude shows the full list. Merge semantics are unchanged, so item 1 is still open for a hand-written project file.
-
-Suggested direction: apply the same allowlist idea as the adjudicator's PROJECT_ADJUDICATOR_KEYS to security-relevant sections (permissions, sandbox env), merge deny lists additively (project can only add denies), and on a project-layer schema error drop only the project layer. Context: a trusted .claude/settings.json env block already allows code execution (NODE_OPTIONS, EMINIAR_HOME + .em/node-path read by bin/_resolve.sh), so env-block findings are defense in depth; committed eminiar.config.json is the cheaper attack surface. Probes: scratchpad w71/probes/p-xd.mts (session-local).
+Why: a cloned repo must not choose which of the user's secrets reach its own scripts.
+How to apply: before touching src/config.ts layering or src/sandbox/env.ts, re-read ADDITIVE_LISTS, withoutEnvAllow and personalLayer; a new security-relevant list belongs in ADDITIVE_LISTS, and a new key that decides what the sandbox can see belongs in the personal layer only. Once #66 is merged, change item 2's "once PR #66 merges" to done.
