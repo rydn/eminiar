@@ -33,6 +33,7 @@ import type { TaskRow } from "../swarm/types.js";
 import { type AgentPin, isFork, resolveAgentPin } from "./agent-pin.js";
 import { type AsyncJob, spawnAsyncJob } from "./async.js";
 import { resolveAdjudicator } from "./config.js";
+import { AGENT_EFFORT_FIELD } from "./effort.js";
 import { adjudicateOne, cacheKeyFor, type EngineOptions } from "./engine.js";
 import { subagentModelForced } from "./env.js";
 import { extractFeatures, type FeatureHints } from "./features.js";
@@ -506,6 +507,8 @@ export async function onPreAgent(
   const isForced = subagentModelForced(env);
   const fork = isFork(agentType);
   const effortSet = !!str(ti.effort) || effortForced(env);
+  // The agent file's own `effort` (a fork has no file); the hook only reads it, never sets it.
+  const agentEffort = fork ? undefined : pin.effort;
   // A ranged swarm agent (swarm.yaml model_range) runs on its fallback pin unless the adjudicator
   // picks another tier inside its range. A fork and FORCE come first, as in dispatchRule.
   const ranged: PlanRange | undefined =
@@ -658,7 +661,9 @@ export async function onPreAgent(
         ...withPin(db, a.rowId, pin, kept, {
           ...(ranged ? { [RANGED_FLAG]: true, [FALLBACK_PIN_FIELD]: ranged.fallback } : {}),
           ...(advised ? { [ADVISED_PICK_FIELD]: advised } : {}),
-          // What the call passed for effort (never injected), for the swarm decision view.
+          // What the agent file sets, and what the call passed (never injected), for the swarm
+          // decision view and the follow check.
+          ...(agentEffort ? { [AGENT_EFFORT_FIELD]: agentEffort } : {}),
           ...(effortLevel(ti.effort) ? { [PASSED_EFFORT_FIELD]: effortLevel(ti.effort) } : {}),
           // A level outside EFFORTS (e.g. "auto") still outranks the call: stored as "other".
           ...(effortForced(env)
@@ -681,11 +686,18 @@ export async function onPreAgent(
   }
   // The Agent call takes `effort` (Claude Code 2.1.292+) unless CLAUDE_CODE_EFFORT_LEVEL outranks
   // it, the call already passes one, or the brief is saturated; the hook never sets it.
+  // When the agent file sets one, the note says whether it already matches the advice.
   const effortHint =
     rule.effort === "pass"
-      ? `pass effort:'${effort}' (Claude Code ${AGENT_EFFORT_SINCE}+)`
+      ? agentEffort === effort
+        ? `effort ${effort}: the agent file already sets it`
+        : `pass effort:'${effort}' (Claude Code ${AGENT_EFFORT_SINCE}+)${
+            agentEffort ? ` over the agent file's ${agentEffort}` : ""
+          }`
       : saturated && !effortSet
-        ? `effort ${effort}: informational (brief saturated)`
+        ? `effort ${effort}: informational (brief saturated)${
+            agentEffort ? `; the agent file runs ${agentEffort}` : ""
+          }`
         : `suggested effort ${effort}`;
   const extras = [effortHint];
   // A role is named only from a confident role table.

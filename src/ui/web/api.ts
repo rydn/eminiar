@@ -931,12 +931,26 @@ export interface AdjSummary {
   byOutcome: Record<string, number>;
   latency: AdjLatency;
   providerLatency: AdjLatency;
-  rates: { follow: number | null; apply: number | null; respect: number | null };
+  rates: {
+    follow: number | null;
+    apply: number | null;
+    respect: number | null;
+    /** effortFollowed / (effortFollowed + effortIgnored); absent from older servers. */
+    effortFollow?: number | null;
+  };
   costUsd: number;
   savingsUsd: number;
   netUsd: number;
   applyIneffective: number;
   applyChecked: number;
+  /** Dispatches whose subagent ran at the advised effort (or the level passed). */
+  effortFollowed?: number;
+  /** Dispatches whose subagent ran at another effort than advised. */
+  effortIgnored?: number;
+  /** Dispatches that passed an effort while a different level ran. */
+  effortIneffective?: number;
+  /** Dispatches with both a passed and an actual effort (the m in "n of m"). */
+  effortChecked?: number;
 }
 export interface AdjDayBucket {
   day: string;

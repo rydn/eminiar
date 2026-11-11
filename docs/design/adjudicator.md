@@ -11,7 +11,7 @@ PreToolUse/UserPromptSubmit, model-config). The design depends on them.
 |---|---|
 | Subagent model precedence: the Agent call's `model` param, then the subagent frontmatter `model` (`inherit` means the main model), then `CLAUDE_CODE_SUBAGENT_MODEL`, then the main model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` overrides all of them. Claude Code substitutes a model when the requested one is outside the org's `availableModels`. | When FORCE is set, the adjudicator never tries to change the model. |
 | The Agent call's `model` accepts only `sonnet`, `opus`, `haiku` or `fable`: no `inherit` and no full ids. Frontmatter accepts aliases, full ids and `inherit`. | Tiers are limited to those four aliases. |
-| From Claude Code 2.1.292 the Agent call takes an `effort` parameter for a non-fork subagent; it overrides the agent file's `effort` and lasts across resumes, and `CLAUDE_CODE_EFFORT_LEVEL` outranks both (sub-agents "Choose an effort level"). Levels are `low`, `medium`, `high`, `xhigh`, `max`; a level the model lacks falls back to the highest one below it (model-config "Adjust effort level"). | Effort per dispatch is advice for the coordinator to pass as `effort` on the Agent call (informational while `CLAUDE_CODE_EFFORT_LEVEL` is set). The hook never injects an `effort` key, in apply mode too. |
+| From Claude Code 2.1.292 the Agent call takes an `effort` parameter for a non-fork subagent; it overrides the agent file's `effort` and lasts across resumes, and `CLAUDE_CODE_EFFORT_LEVEL` outranks both (sub-agents "Choose an effort level"). Levels are `low`, `medium`, `high`, `xhigh`, `max`; a level the model lacks falls back to the highest one below it (model-config "Adjust effort level"). | Effort per dispatch is advice for the coordinator to pass as `effort` on the Agent call (informational while `CLAUDE_CODE_EFFORT_LEVEL` is set). The hook never injects an `effort` key, in apply mode too. Reconcile checks afterwards which level ran, from the transcript's per-call `effort` (§11). |
 | PreToolUse `updatedInput` replaces the whole input, so every unchanged field must be included. Rules are re-evaluated, and in auto mode a changed call without `permissionDecision` may be denied. A model set this way takes effect: a live probe on Claude Code 2.1.309 (`claude -p`, swarm run `20261104-672098` task #99, n=1 per case) ran the subagent on the hook's model, ahead of the agent file's pin and of a `model` passed on the call. A plugin mod's `agent.spawn` hook outranks the call's `model`. | The optional `apply` mode is opt-in and deterministic for the dispatches it may change; a test checks that the merge keeps every field. Advice to the coordinator stays the default: `em_swarm plan` shows a suggested model and effort per task and the coordinator passes `model` and `effort` on the Agent call, which works only as well as the coordinator follows the line. Both respect a model pin in the agent's definition: the advice names the pin, never a different `model` to pass, and apply leaves it. A swarm role opts in to model choice with `model_range` (§16). Reconcile still checks that the applied model ran (§11). |
 | UserPromptSubmit cannot change the main session's model. It can only add context or block. | Main-session model choice is advice text only. |
 
@@ -820,6 +820,15 @@ Then:
   high" when the call already passes `effort` or `CLAUDE_CODE_EFFORT_LEVEL` is set; "effort
   high: informational (brief saturated)" for a saturated brief, §7.9). The role is named only
   from `ROLE_NOTE_MIN` (§7.5).
+- The agent file's frontmatter `effort` (agent-pin.ts `agentEffort`: read only when every
+  definition found agrees on one known level; never for a fork) changes the effort part of the
+  note: "effort low: the agent file already sets it" when it equals the advice; "pass
+  effort:'low' (Claude Code 2.1.292+) over the agent file's high" when it differs; "effort max:
+  informational (brief saturated); the agent file runs high" for a saturated brief whose call
+  passes no `effort`. "suggested effort X" is unchanged. The hook only reads the file. The row's
+  scores JSON records `agentEffort`, `passedEffort` (the call's `effort`, a known level only) and
+  `effortEnv` (`CLAUDE_CODE_EFFORT_LEVEL`, `other` for a non-level value) for the effort check
+  below.
 - In advise mode, `onPreAgent` never calls the network. It records the row and, when the
   coordinator passed no model and the advice differs from the baseline, adds one note:
   "adjudicator: model haiku would do (complexity 1, conf 0.8): pass model:'haiku'".
@@ -871,6 +880,41 @@ hook's model (Constraints), a mismatch points elsewhere: FORCE, an organisation'
 calls, such as a fork that runs on the main session's model, or calls not ingested yet). The
 transcript keeps the pre-hook input, without the `model`, so only `api_calls` show the applied
 model.
+
+Effort check (#170): effort stays advice, and reconcile verifies it after the fact. `learn.ts`
+`effortPatch` runs on every non-final row with calls and writes, into the scores JSON (no schema
+change; keys and helpers in `src/adjudicator/effort.ts`):
+
+- `actualEffort` (agent and plan rows): `dominantEffort` of the subagent's `api_calls.effort`,
+  the mode of the known levels, ties to the level seen last. `api_calls.effort` is the per-call
+  `effort` of the subagent's transcript. The subagent's `meta.json` `effort` only echoes the
+  Agent call's argument, so it cannot show a level fallback or the env override, and is not read.
+- `effortFollow` (agent rows only), from `effortFollowOf`: not counted (key absent) when the
+  advised level (`row.effort`) is not a known level, the ran level is unknown, the row is a fork
+  (`keptModel` "fork"), `effortEnv` is set, or the brief was saturated (the plan row's
+  `briefUnits` when there is one, else the row's own). Otherwise `followed` when ran = advised or
+  the effort set for the call = advised: `passedEffort`, or `agentEffort` when nothing was passed
+  (the hook says "the agent file already sets it", so the coordinator passes nothing; `passedEffort`
+  wins when both exist). A model that lacks the level runs the next one down, so setting it is
+  following. Else `ignored`.
+
+`summary()` reads the keys through `scoresEffort` (sqlite/adjudicator.ts, a copy of `rowEffort`
+for these keys, since nothing from `src/adjudicator` may load at boot while the adjudicator is
+off) over dispatch rows: `effortFollowed`, `effortIgnored`, `rates.effortFollow` = followed ÷
+(followed + ignored), `effortChecked` (rows with both `passedEffort` and `actualEffort`) and
+`effortIneffective` (of those, passed ≠ actual). `stats` adds "effort followed P (f followed, i
+ignored of f+i) · passed but not run k" when f + i > 0 (k = `effortIneffective`, shown when
+non-zero); the Adjudicator tab shows "effort P" ("—", n/a, when nothing was counted) and, when
+k > 0, "effort passed but not run k of `effortChecked`".
+The swarm view's `effortLabel` (decision-helpers.ts) shows `actualEffort`, else the effective
+level (env, the call, the agent file), with " (ignored)" when `effortFollow` is `ignored`; with
+no level it reads "env override", "session" (fork) or "default". Reconcile skips final rows, so
+rows that were final before #170 never get these keys and the rate stays n/a until a newer
+dispatch is reconciled.
+
+Apply mode still never sets `effort`, although the Agent call accepts it: effort is advice by
+decision `adjudicator/advise-respects-pins-and-agent-effort`, and only an explicit new decision
+should change that. The follow and "passed but not run" figures are the evidence for it.
 
 In apply mode, `status` and doctor also say when every role of an opted-in swarm resolves to a
 plain pin (cli.ts `pinnedSwarms`, the same rule as the plan's `ALL_PINNED_NOTE`, §16; skipped
@@ -1006,6 +1050,8 @@ It is idempotent: rows with `final=1` are skipped. It looks at non-final rows ol
 
 - `actual_model`, `actual_tokens` and `actual_cost_usd` come from `api_calls`. Usage ingestion
   must be on; otherwise these stay null and the UI says so.
+- The same calls give `scores.actualEffort` and, for agent rows, `scores.effortFollow` (§11,
+  effort check).
 - A row becomes final once its outcome is known, or after 24 h.
 - When a row turns final, its bias buckets are updated (§7.7).
 

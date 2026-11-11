@@ -26,6 +26,7 @@ import type { StorageAdapter } from "../storage/adapter.js";
 import type { AdjudicationPatch, AdjudicatorBiasRow, ApiCallRow } from "../storage/types.js";
 import type { TaskRow, WorkerRow } from "../swarm/types.js";
 import type { PricingOverrides } from "../usage/pricing.js";
+import { dominantEffort, effortFollowOf, rowEffort, withEffortScores } from "./effort.js";
 import { complexityBucket, topIntent } from "./heuristic.js";
 import {
   actualCost,
@@ -39,6 +40,7 @@ import {
   totalTokens,
 } from "./savings.js";
 import { type AdjudicationOutcome, type AdjudicationRow, type Features, TIERS } from "./types.js";
+import { briefUnitsOf } from "./units.js";
 
 // --- constants -----------------------------------------------------------------------
 
@@ -585,7 +587,8 @@ class Reconciler {
           this.learning.enabled && (outcome === "success" || outcome === "failure")
             ? this.lessonOf(row, outcome === "success", teach, d.actualCostUsd ?? row.actualCostUsd)
             : [];
-        const scores = withTaught(row.scores, lesson);
+        // d.scores first: a patch (the effort keys, #170) set in this same commit must survive.
+        const scores = withTaught(d.scores ?? row.scores, lesson);
         if (scores !== undefined) d.scores = scores;
       }
     }
@@ -642,9 +645,9 @@ class Reconciler {
     // named for the agent actually dispatched, whose range can differ from the planned role's; a
     // row written without it falls back to the plan row's pick, then the raw verdict tier.
     const deferred = keptModel(row) !== undefined;
+    const parent = row.parentId ? this.db.adjudicator.get(row.parentId) : undefined;
     let action = row.action ?? null;
     if (action === "advised" && row.modelRequested && !deferred) {
-      const parent = row.parentId ? this.db.adjudicator.get(row.parentId) : undefined;
       const advice =
         advisedPick(row) ??
         (parent ? advisedPick(parent) : undefined) ??
@@ -659,6 +662,7 @@ class Reconciler {
     }
 
     if (!calls.length) return patch;
+    this.effortPatch(row, parent, calls, patch);
     const actual = actualCost(calls, this.pricing);
     const base = repriceAt(calls, baseline, this.pricing);
     patch.actualModel = dominantModel(calls) ?? null;
@@ -672,6 +676,41 @@ class Reconciler {
     }
     patch.savingsUsd = savings;
     return patch;
+  }
+
+  /**
+   * Effort follow-through (#170): the level the subagent ran at (the dominant api_calls.effort of
+   * its calls) goes into scores.actualEffort; an agent row also gets scores.effortFollow, the
+   * verdict of comparing it with the advised effort (effort.ts effortFollowOf: not counted for a
+   * fork, the env override or a saturated brief). Writes patch.scores only when it changes.
+   */
+  private effortPatch(
+    row: AdjudicationRow,
+    parent: AdjudicationRow | undefined,
+    calls: readonly ApiCallRow[],
+    patch: AdjudicationPatch,
+  ): void {
+    const ran = dominantEffort(calls);
+    const e = rowEffort(row.scores);
+    const follow =
+      row.surface === "agent"
+        ? effortFollowOf({
+            advised: row.effort ?? null,
+            ...(ran ? { ran } : {}),
+            ...(e.passed ? { passed: e.passed } : {}),
+            ...(e.agent ? { agent: e.agent } : {}),
+            env: e.env !== undefined,
+            fork: keptModel(row) === "fork",
+            // The plan row's brief scoring is the decision when there is one (hooks onPreAgent).
+            saturated: !!briefUnitsOf((parent ?? row).scores)?.saturated,
+          })
+        : undefined;
+    if (!ran && !follow && !e.follow) return;
+    const scores = withEffortScores(row.scores, {
+      ...(ran ? { actual: ran } : {}),
+      ...(follow ? { follow } : {}),
+    });
+    if (scores !== undefined && scores !== row.scores) patch.scores = scores;
   }
 
   /** Apply the redo penalty to earlier credited attempts of a task that already went final. */

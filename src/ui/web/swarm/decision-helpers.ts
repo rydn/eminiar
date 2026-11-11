@@ -1,9 +1,17 @@
 import type { SwarmDecision } from "../../../adjudicator/swarm-decisions.js";
 
-/** Effort as shown: a level, "env override" (level unknown), "session" (fork) or "default" (agent file). */
+/**
+ * Effort as shown: the level the subagent actually ran at (read from its transcript), else the
+ * level that decided the run (env, the call, the agent file's `effort`), else "env override"
+ * (level unknown), "session" (fork) or "default" (a session or model default). A dispatch whose
+ * effort verdict is "ignored" (the subagent ran at a level other than the advised one, above or
+ * below, and the effort set for the call, the level passed or else the agent file's, was not the
+ * advised one) carries an "(ignored)" marker.
+ */
 export function effortLabel(d: SwarmDecision): string | undefined {
   if (!d.ran) return undefined;
-  if (d.ran.effortEffective) return d.ran.effortEffective;
+  const level = d.ran.effortActual ?? d.ran.effortEffective;
+  if (level) return d.effortFollow === "ignored" ? `${level} (ignored)` : level;
   if (d.ran.effortSource === "env") return "env override";
   if (d.ran.effortSource === "fork") return "session";
   return "default";

@@ -557,7 +557,21 @@ export interface AdjudicationSummary {
    * respected) and respect = respected / (applied + respected): apply-mode dispatches. null when
    * the denominator is 0.
    */
-  rates: { follow: number | null; apply: number | null; respect: number | null };
+  rates: {
+    follow: number | null;
+    apply: number | null;
+    respect: number | null;
+    /** effortFollowed / (effortFollowed + effortIgnored); null with no counted dispatch. */
+    effortFollow: number | null;
+  };
+  /** Dispatches whose scores.effortFollow is "followed" (see src/adjudicator/effort.ts). */
+  effortFollowed: number;
+  /** Dispatches whose scores.effortFollow is "ignored". */
+  effortIgnored: number;
+  /** Dispatches that passed an effort (passedEffort) while a different level ran (actualEffort). */
+  effortIneffective: number;
+  /** Dispatches with both passedEffort and actualEffort (the m of "n of m"). */
+  effortChecked: number;
   /**
    * Dispatches that ran on a model the advice did not name, counted exactly like the savings
    * report's keptModel (src/storage/dispatch.ts keptDispatch): the agent's pin was kept and it

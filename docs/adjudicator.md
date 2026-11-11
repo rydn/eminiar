@@ -378,7 +378,8 @@ These are Claude Code's rules for a subagent's model, and the adjudicator follow
    coordinator to pass (`max` only at the very top of the complexity scale, c ≥ 3.75), and says
    the level is informational while `CLAUDE_CODE_EFFORT_LEVEL` is set, when the call already
    passes `effort`, and for a [saturated](#how-it-decides) brief. The hook never injects
-   `effort`, in apply mode too.
+   `effort`, in apply mode too; reconcile checks afterwards which level ran (see
+   [Effort follow-through](#effort-follow-through)).
 
 Apply mode changes the model only when all of these hold:
 
@@ -442,6 +443,19 @@ The effort rule: pass the suggested `effort` (Claude Code 2.1.292+), unless
 pinned agents" when some agents keep a pin (a ranged role's fallback included). With
 `apply.respectFrontmatter` off, a range is ignored like any pin.
 
+When the agent file sets its own `effort`, the dispatch note says how it compares with the advice
+(a fork has no file, so its note never mentions one):
+
+| Case | Effort part of the note |
+|---|---|
+| The file already sets the advised level | `effort low: the agent file already sets it` |
+| The file sets another level | `pass effort:'low' (Claude Code 2.1.292+) over the agent file's high` |
+| A saturated brief, no `effort` on the call | `effort max: informational (brief saturated); the agent file runs high` |
+| The call passes `effort`, or `CLAUDE_CODE_EFFORT_LEVEL` is set | `suggested effort low` |
+
+The level is read from the frontmatter only when every copy of the definition agrees on it. The
+hook only reads it; it never changes the file or the call's `effort`.
+
 A ranged role's note names the range and the fallback. When the pick moves the model:
 
 ```text
@@ -476,6 +490,59 @@ denominator, and the suggested tier × model matrix counts them on their own lin
 pin", "1 under CLAUDE_CODE_SUBAGENT_MODEL_FORCE", "1 fork"). A pinned dispatch counts as having
 kept its pin when no `model` was passed and it ran on the pinned tier; otherwise it stays in the
 matrix.
+
+### Effort follow-through
+
+Effort is advice, and reconcile checks afterwards whether the subagent ran at the advised level.
+The dispatch row records what it knew at the call, and reconcile adds what ran, all in the
+decision's `scores` JSON (no new columns):
+
+| Key | Written by | Value |
+|---|---|---|
+| `passedEffort` | the dispatch hook | the `effort` the Agent call passed |
+| `effortEnv` | the dispatch hook | `CLAUDE_CODE_EFFORT_LEVEL` while it is set (`other` for a value that is not a level) |
+| `agentEffort` | the dispatch hook | the agent file's frontmatter `effort` (not for a fork) |
+| `actualEffort` | reconcile | the level the subagent ran at: the most common `effort` of its `api_calls` rows (on a tie, the one seen last) |
+| `effortFollow` | reconcile | `followed` or `ignored`; absent when the dispatch is not counted |
+
+Only known levels (`low` … `max`) are stored. The level that ran comes from the subagent's
+transcript: each API call records its `effort`, which usage ingestion copies into
+`api_calls.effort`. The `effort` in a subagent's `meta.json` only echoes what the Agent call
+passed, so it is not used: a model that lacks the level, or `CLAUDE_CODE_EFFORT_LEVEL`, can make
+the subagent run at another one.
+
+A dispatch is **not counted** when its advice named no level, the level that ran is unknown (no
+calls ingested yet, or none with an effort), it is a fork, `CLAUDE_CODE_EFFORT_LEVEL` was set, or
+the brief was [saturated](#how-it-decides) (the plan row's scoring decides when there is one).
+Otherwise it is **followed** when the level that ran equals the advice, or the effort set for the
+call is the advised level (a model without that level runs the next one down, so setting it is
+following): the level the call passed, or, when the call passed nothing, the level the agent file
+sets (the hook tells the coordinator to pass nothing then); a passed level wins over the agent
+file's. It is **ignored** when neither holds.
+
+`em_adjudicate stats` and `eminiar adjudicator stats` add a line once a dispatch has been
+counted:
+
+```text
+effort followed 75% (3 followed, 1 ignored of 4) · passed but not run 1
+```
+
+The rate is followed ÷ (followed + ignored). "Passed but not run" counts the dispatches that
+passed an `effort` on the call and then ran at a different level (`effortIneffective`, out of
+`effortChecked`: the dispatches with both a passed and a ran level). `stats --json` carries them
+under `summary` as `rates.effortFollow`, `effortFollowed`, `effortIgnored`, `effortChecked` and
+`effortIneffective`. The Adjudicator tab shows the rate next to the follow rate, and the swarm
+view shows the level that ran on each decision, marked "(ignored)" when the advice was not
+followed.
+
+Reconcile skips rows that are already final, so a dispatch that settled before eminiar recorded
+effort never gets `actualEffort` or `effortFollow`: until a newer dispatch is reconciled, the
+dashboard's effort rate is n/a (shown as "—") and `stats` prints no effort line.
+
+Apply mode still never sets `effort`, though the Agent call would take it. Keeping effort as
+advice for the coordinator is a recorded decision (`adjudicator/advise-respects-pins-and-agent-effort`);
+letting the hook set it would take a new, explicit decision, which these follow-through numbers
+are meant to inform.
 
 ## Swarm plans
 
@@ -544,7 +611,8 @@ em_adjudicate {action: "feedback", id: 42, outcome: "too_small", note: "needed o
 
 `score` returns one line per item with a decision id. `explain` shows the score tables with
 their reasons, the features, the blend weights, the provider status, the cost and the outcome.
-`stats` summarises decisions, follow rate and savings. `feedback` (`good`, `too_small` or
+`stats` summarises decisions, follow rate, [effort follow-through](#effort-follow-through) and
+savings. `feedback` (`good`, `too_small` or
 `too_big`) closes the decision and teaches the learned bias.
 
 ## Dashboard
