@@ -139,11 +139,21 @@ describe("defaults of a project with no config", () => {
 
   it("every surface refuses extraction until it is switched on", async () => {
     expect(() => suggest(ctx, db, { title: "t", prompt: "p" })).toThrow(/extraction/);
-    for (const action of ["scan", "accept", "dismiss"]) {
-      const r = await tool({ action, id: 1 });
-      expect(r.err, action).toBe(true);
+    // a real pending suggestion, filed while extraction was on: the gate, not "no suggestion"
+    const id = suggest(extracting(), db, { title: "Pending", prompt: "a pending task" }).id;
+    for (const a of [{ action: "scan" }, { action: "accept", id }, { action: "dismiss", id }]) {
+      const r = await tool(a);
+      expect([a.action, r.err, r.text]).toEqual([
+        a.action,
+        true,
+        expect.stringContaining("playbooks.extraction.enabled"),
+      ]);
     }
-    expect((await tool({ action: "scan" })).text).toMatch(/extraction/);
+    for (const path of ["/api/playbooks/suggestion/accept", "/api/playbooks/suggestion/dismiss"])
+      expect([path, (await api(ctx, "POST", path, { id })).status]).toEqual([path, 403]);
+    expect(db.playbooks.suggestionGet(id)?.status).toBe("pending");
+    expect(existsSync(file("pending"))).toBe(false);
+    db.playbooks.purgeActivity();
     for (const args of [["scan"], ["scan", "--dry-run"], ["scan", "--json"]]) {
       const r = await cli(args);
       expect([r.code, r.out], args.join(" ")).toEqual([1, ""]);

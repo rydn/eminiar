@@ -193,7 +193,7 @@ run or schedule anything. Playbooks are not Claude Code Skills; `export` can wri
 | `report` | Closes a run: `status` is `done`, `failed` or `skipped`, with a `note`. `run_id` defaults to the newest started run |
 | `schedule` | Returns an instruction to turn the playbook's schedule hint into a `/loop` or cron job. Errors when the playbook has no schedule |
 | `export` | `format`: `markdown` (default, returns the file), `skill` (writes `<target>/<name>/SKILL.md`, default `.claude/skills`; `side_effecting` defaults to true and adds `disable-model-invocation`, so only you start it) or `schedule` (text to paste into a Desktop or cloud scheduled task) |
-| `scan`, `suggestions`, `accept`, `dismiss` | Opt-in extraction: `scan` mines your session history for recurring tasks (`dry_run` stores nothing), `suggestions` lists the pending ones, `accept` (`id`, optionally `name`, `title`, `prompt`, `private`) turns one into a playbook, `dismiss` rejects it. All need `playbooks.extraction.enabled` |
+| `scan`, `suggestions`, `accept`, `dismiss` | Opt-in extraction: `scan` mines your session history for recurring tasks (`dry_run` stores nothing), `suggestions` lists the pending ones, `accept` (`id`, optionally `name`, `title`, `prompt`, `private`) turns one into a playbook, `dismiss` rejects it, so `scan` does not propose it again until `em_purge` `sessions` forgets it. All need `playbooks.extraction.enabled` |
 
 Secrets are masked in everything stored: titles, prompts, defaults, schedules and run notes.
 With `playbooks.viewing` off every action is refused and the tool is not listed (run
@@ -230,7 +230,7 @@ em_adjudicate {action: "feedback", id: 42, outcome: "too_small", note: "needed o
 | `em_usage` | Tokens, cache, cost and insights per model call from the local transcripts. `view`: `summary`, `daily`, `weekly`, `monthly`, `models`, `sessions`, `blocks`, `turns`, `tools`, `insights`, `savings`; `scope`: `project` or `session`; `since`: `30d` or an ISO date; `json`. See [Usage insights](usage.md) |
 | `em_doctor` | Installation health |
 | `em_reindex` | Rebuild part of the index: `code`, `git`, `metrics`, `docs`, `memories`, `embeddings` or `all`. Incremental unless `full: true` |
-| `em_purge` | Permanently delete project data: `index`, `sessions` (events and the session history `em_recall` searches, snapshots, stats), `graph`, `memories` (the database mirror only), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests) or `all`. Needs `confirm: true` |
+| `em_purge` | Permanently delete project data: `index`, `sessions` (events and the session history `em_recall` searches, snapshots, stats, playbook runs and suggestions; dismissed suggestions are forgotten, so a later `scan` can propose them again), `graph`, `memories` (the database mirror only, playbooks' too; the memory and playbook files stay and are re-imported), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests) or `all`. Needs `confirm: true` |
 
 ## Slash commands
 
