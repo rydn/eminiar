@@ -178,7 +178,7 @@ export function App(): JSX.Element {
         {view === "coverage" && <Coverage />}
         {view === "sessions" && <Sessions />}
         {view === "swarm" && <Swarm params={route.params} sub={route.sub} />}
-        {view === "playbooks" && <Playbooks />}
+        {view === "playbooks" && <Playbooks params={route.params} />}
         {view === "adjudicator" && <Adjudicator params={route.params} />}
         {view === "system" && <System onChanged={() => setTick((x) => x + 1)} />}
       </main>

@@ -54,6 +54,15 @@ export function legacyArchitectureTab(tab: string | undefined): GalaxyTab {
   return isGalaxyTab(tab) ? tab : "map";
 }
 
+/** The sections of the Playbooks page (`#/playbooks?tab=history`). */
+export const PLAYBOOK_TABS = ["playbooks", "history", "suggested"] as const;
+export type PlaybookTab = (typeof PLAYBOOK_TABS)[number];
+
+/** A `tab` param as a Playbooks section: an unknown or missing one is the first section. */
+export function playbookTab(t: string | undefined): PlaybookTab {
+  return (PLAYBOOK_TABS as readonly string[]).includes(t ?? "") ? (t as PlaybookTab) : "playbooks";
+}
+
 /** `#/explore?file=src/x.ts` → { view: "explore", sub: null, params: { file } }. */
 export function parseHash(hash: string): Route {
   const h = hash.replace(/^#\/?/, "");

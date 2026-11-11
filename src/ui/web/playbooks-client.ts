@@ -58,6 +58,9 @@ export const playbooksApi = {
     post<{ name: string; path: string; created: boolean }>("/api/playbooks/save", d),
   remove: (name: string) => post<{ removed: boolean }>("/api/playbooks/delete", { name }),
   recordRun: (name: string) => post<{ id: number }>("/api/playbooks/run", { name }),
+  /** Report how a run that is still `started` ended. */
+  closeRun: (id: number, status: "done" | "failed" | "skipped") =>
+    post<{ id: number }>("/api/playbooks/run/close", { id, status }),
   accept: (id: number, priv = false) =>
     post<{ name: string; path: string }>("/api/playbooks/suggestion/accept", {
       id,

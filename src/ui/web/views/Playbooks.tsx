@@ -1,5 +1,5 @@
 import type { JSX } from "preact";
-import { useState } from "preact/hooks";
+import { useCallback, useEffect, useId, useRef, useState } from "preact/hooks";
 import { ErrorBox, Spinner, toast, useAsync } from "../components.js";
 import { Badge, Card, EmptyState, Hero, Segmented, type Tone } from "../ds.js";
 import {
@@ -11,9 +11,11 @@ import {
   type PlaybookUi,
   playbooksApi,
 } from "../playbooks-client.js";
-import { ago, cls } from "../util.js";
+import { playbookTab, type PlaybookTab as Tab } from "../route.js";
+import { navigate, setLeaveGuard } from "../router.js";
+import { ago } from "../util.js";
 
-type Tab = "playbooks" | "history" | "suggested";
+const LEAVE_MSG = "Discard the unsaved playbook?";
 
 const STATUS_TONES: Record<string, Tone> = {
   started: "accent",
@@ -93,13 +95,24 @@ function PlaybookForm({
   initial,
   onDone,
   onCancel,
+  onDirty,
 }: {
   initial: Form;
   onDone: () => void;
   onCancel: () => void;
+  /** Told whenever the form differs from what it opened with (the leave guard reads it). */
+  onDirty: (dirty: boolean) => void;
 }): JSX.Element {
   const [f, setF] = useState(initial);
   const [busy, setBusy] = useState(false);
+  const uid = useId();
+  const first = useRef<HTMLInputElement>(null);
+  // Opening the form puts the cursor in its first field.
+  useEffect(() => first.current?.focus(), []);
+  useEffect(() => {
+    onDirty(JSON.stringify(f) !== JSON.stringify(initial));
+  }, [f, initial, onDirty]);
+  useEffect(() => () => onDirty(false), [onDirty]);
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((x) => ({ ...x, [k]: v }));
   const editing = initial.name !== undefined;
   const save = async () => {
@@ -129,8 +142,10 @@ function PlaybookForm({
   return (
     <Card title={editing ? `Edit ${f.name}` : "New playbook"}>
       <div class="field">
-        <label>title</label>
+        <label for={`${uid}-title`}>title</label>
         <input
+          id={`${uid}-title`}
+          ref={first}
           type="text"
           placeholder="Review open PRs"
           value={f.title}
@@ -138,8 +153,9 @@ function PlaybookForm({
         />
       </div>
       <div class="field">
-        <label>prompt — use {"{{param}}"} for parameters</label>
+        <label for={`${uid}-prompt`}>prompt — use {"{{param}}"} for parameters</label>
         <textarea
+          id={`${uid}-prompt`}
           rows={7}
           value={f.prompt}
           placeholder="Check Slack for PRs that need review and review each one."
@@ -151,23 +167,28 @@ function PlaybookForm({
         style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8 }}
       >
         <div class="field">
-          <label>parameters — one per line: name or name=default</label>
+          <label for={`${uid}-params`}>parameters — one per line: name or name=default</label>
           <textarea
+            id={`${uid}-params`}
             rows={3}
             value={f.params}
             onInput={(e) => set("params", (e.target as HTMLTextAreaElement).value)}
           />
         </div>
         <div class="field">
-          <label>schedule hint (a note for people; nothing is scheduled)</label>
+          <label for={`${uid}-schedule`}>
+            schedule hint (a note for people; nothing is scheduled)
+          </label>
           <input
+            id={`${uid}-schedule`}
             type="text"
             placeholder="every weekday 9am"
             value={f.schedule}
             onInput={(e) => set("schedule", (e.target as HTMLInputElement).value)}
           />
-          <label>tags (comma separated)</label>
+          <label for={`${uid}-tags`}>tags (comma separated)</label>
           <input
+            id={`${uid}-tags`}
             type="text"
             value={f.tags}
             onInput={(e) => set("tags", (e.target as HTMLInputElement).value)}
@@ -211,6 +232,7 @@ function PlaybookCard({
   onChanged: () => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
+  const uid = useId();
   const [vals, setVals] = useState<Record<string, string>>({});
   const text = fillPrompt(p.prompt, p.params, vals);
   const copy = async () => {
@@ -266,8 +288,9 @@ function PlaybookCard({
             >
               {p.params.map((x) => (
                 <div class="field">
-                  <label>{x.name}</label>
+                  <label for={`${uid}-${x.name}`}>{x.name}</label>
                   <input
+                    id={`${uid}-${x.name}`}
                     type="text"
                     placeholder={x.default ?? ""}
                     value={vals[x.name] ?? ""}
@@ -292,15 +315,15 @@ function PlaybookCard({
         >
           Copy run prompt
         </button>
-        <button type="button" onClick={() => setOpen(!open)}>
+        <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
           {open ? "Hide prompt" : "Show prompt"}
         </button>
         {adding && (
           <>
-            <button type="button" onClick={onEdit}>
+            <button type="button" aria-label={`Edit ${p.name}`} onClick={onEdit}>
               Edit
             </button>
-            <button type="button" class="danger" onClick={remove}>
+            <button type="button" class="danger" aria-label={`Delete ${p.name}`} onClick={remove}>
               Delete
             </button>
           </>
@@ -310,12 +333,43 @@ function PlaybookCard({
   );
 }
 
+const OUTCOMES = ["done", "failed", "skipped"] as const;
+
+/** Mark done / failed / skipped for a run that is still `started`. */
+function CloseRun({ r, onChanged }: { r: PlaybookRunUi; onChanged: () => void }): JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const close = async (status: (typeof OUTCOMES)[number]) => {
+    setBusy(true);
+    try {
+      await playbooksApi.closeRun(r.id, status);
+      toast(`marked ${status}`);
+      onChanged();
+    } catch (e) {
+      toast((e as Error).message, true);
+      setBusy(false);
+    }
+  };
+  return (
+    <span style={wrap} role="group" aria-label={`Mark run ${r.id} of ${r.playbook}`}>
+      {OUTCOMES.map((o) => (
+        <button type="button" class="sm" disabled={busy} onClick={() => close(o)}>
+          {o}
+        </button>
+      ))}
+    </span>
+  );
+}
+
 function History({
   runs,
   titles,
+  adding,
+  onChanged,
 }: {
   runs: PlaybookRunUi[];
   titles: Map<string, string>;
+  adding: boolean;
+  onChanged: () => void;
 }): JSX.Element {
   if (!runs.length)
     return (
@@ -334,6 +388,7 @@ function History({
               <th>status</th>
               <th>by</th>
               <th>note</th>
+              {adding && <th>mark</th>}
             </tr>
           </thead>
           <tbody>
@@ -348,6 +403,9 @@ function History({
                 </td>
                 <td>{r.trigger}</td>
                 <td class="muted">{r.note ?? ""}</td>
+                {adding && (
+                  <td>{r.status === "started" && <CloseRun r={r} onChanged={onChanged} />}</td>
+                )}
               </tr>
             ))}
           </tbody>
@@ -397,12 +455,14 @@ function Suggested({
               <button
                 type="button"
                 class="primary"
+                aria-label={`Accept ${s.name}`}
                 onClick={() => act(() => playbooksApi.accept(s.id), `accepted ${s.name}`)}
               >
                 Accept
               </button>
               <button
                 type="button"
+                aria-label={`Dismiss ${s.name}`}
                 onClick={() => act(() => playbooksApi.dismiss(s.id), "dismissed")}
               >
                 Dismiss
@@ -480,12 +540,40 @@ function ScanPanel({
   );
 }
 
-export function Playbooks(): JSX.Element {
+export function Playbooks({ params }: { params: Record<string, string> }): JSX.Element {
   const q = useAsync(() => playbooksApi.overview(), []);
-  const [tab, setTab] = useState<Tab>("playbooks");
+  const [tab, setTab] = useState<Tab>(playbookTab(params.tab));
+  // The section lives in the URL (#/playbooks?tab=history), so Back, Forward and reload keep it.
+  // A hash-only change does not remount the view, and no tab param is the first section.
+  useEffect(() => setTab(playbookTab(params.tab)), [params.tab]);
+  const goTab = (t: Tab) => {
+    setTab(t);
+    navigate("playbooks", { tab: t });
+  };
   const [form, setForm] = useState<Form | null>(null);
   const [found, setFound] = useState<PlaybookScanResult | null>(null);
   const [scanning, setScanning] = useState(false);
+  // Leaving the page with an edited, unsaved form asks first (the router asks before it
+  // re-renders, so the form is still mounted). Moving between sections stays on this page.
+  const dirty = useRef(false);
+  const onDirty = useCallback((v: boolean) => {
+    dirty.current = v;
+  }, []);
+  useEffect(() => {
+    const unload = (e: BeforeUnloadEvent) => {
+      if (!dirty.current) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    const unguard = setLeaveGuard(
+      (to) => !dirty.current || to.view === "playbooks" || window.confirm(LEAVE_MSG),
+    );
+    window.addEventListener("beforeunload", unload);
+    return () => {
+      unguard();
+      window.removeEventListener("beforeunload", unload);
+    };
+  }, []);
   const d = q.data;
   if (q.error && !d) return <ErrorBox error={q.error} onRetry={q.reload} />;
   if (!d)
@@ -561,7 +649,7 @@ export function Playbooks(): JSX.Element {
           onClose={() => setFound(null)}
           onSaved={() => {
             setFound(null);
-            setTab("suggested");
+            goTab("suggested");
             changed();
           }}
         />
@@ -569,6 +657,7 @@ export function Playbooks(): JSX.Element {
       {form && (
         <PlaybookForm
           initial={form}
+          onDirty={onDirty}
           onCancel={() => setForm(null)}
           onDone={() => {
             setForm(null);
@@ -576,32 +665,36 @@ export function Playbooks(): JSX.Element {
           }}
         />
       )}
-      <Segmented options={tabs} value={shown} onChange={setTab} label="Playbooks sections" />
-      {shown === "playbooks" &&
-        (d.playbooks.length ? (
-          <div class={cls("pb-list")} style={{ display: "grid", gap: 10 }}>
-            {d.playbooks.map((p) => (
-              <PlaybookCard
-                key={p.name}
-                p={p}
-                adding={d.adding}
-                onEdit={() => setForm(formOf(p))}
-                onChanged={changed}
-              />
-            ))}
-          </div>
-        ) : (
-          <EmptyState title="No playbooks yet">
-            {d.adding
-              ? "Add one with New playbook, or ask Claude to save a recurring task as a playbook."
-              : "Playbooks are read-only here (playbooks.adding is false). Add files under "}
-            {!d.adding && <code>{d.dir}</code>}
-          </EmptyState>
-        ))}
-      {shown === "history" && <History runs={d.runs} titles={titles} />}
-      {shown === "suggested" && (
-        <Suggested items={d.suggestions} adding={d.adding} onChanged={changed} />
-      )}
+      <Segmented options={tabs} value={shown} onChange={goTab} label="Playbooks sections" />
+      <div role="tabpanel" aria-label={tabs.find((t) => t.id === shown)?.label as string}>
+        {shown === "playbooks" &&
+          (d.playbooks.length ? (
+            <div style={{ display: "grid", gap: 10 }}>
+              {d.playbooks.map((p) => (
+                <PlaybookCard
+                  key={p.name}
+                  p={p}
+                  adding={d.adding}
+                  onEdit={() => setForm(formOf(p))}
+                  onChanged={changed}
+                />
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="No playbooks yet">
+              {d.adding
+                ? "Add one with New playbook, or ask Claude to save a recurring task as a playbook."
+                : "Playbooks are read-only here (playbooks.adding is false). Add files under "}
+              {!d.adding && <code>{d.dir}</code>}
+            </EmptyState>
+          ))}
+        {shown === "history" && (
+          <History runs={d.runs} titles={titles} adding={d.adding} onChanged={changed} />
+        )}
+        {shown === "suggested" && (
+          <Suggested items={d.suggestions} adding={d.adding} onChanged={changed} />
+        )}
+      </div>
     </div>
   );
 }

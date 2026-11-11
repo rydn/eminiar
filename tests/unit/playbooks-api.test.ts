@@ -111,6 +111,64 @@ describe("playbooks API", () => {
     });
   });
 
+  it("run/close ends a started run in place, once, with validation and the adding gate", async () => {
+    const name = (
+      (await call(ctx, "POST", "/api/playbooks/save", { title: "Close me", prompt: "p" })).body as {
+        name: string;
+      }
+    ).name;
+    const id = ((await call(ctx, "POST", "/api/playbooks/run", { name })).body as { id: number })
+      .id;
+    const runs = async () =>
+      (
+        (await call(ctx, "GET", "/api/playbooks")).body as {
+          runs: Array<{ id: number; status: string; note: string | null }>;
+        }
+      ).runs;
+    expect((await runs()).map((r) => r.status)).toEqual(["started"]);
+
+    // validation: id must be a positive integer, status one of the three outcomes
+    for (const bad of [undefined, "1", 0, -1, 1.5, null])
+      expect(
+        (await call(ctx, "POST", "/api/playbooks/run/close", { id: bad, status: "done" })).status,
+      ).toBe(400);
+    for (const status of [undefined, "started", "bogus", 7])
+      expect((await call(ctx, "POST", "/api/playbooks/run/close", { id, status })).status).toBe(
+        400,
+      );
+    expect(
+      (await call(ctx, "POST", "/api/playbooks/run/close", { id: 99999, status: "done" })).status,
+    ).toBe(404);
+    expect((await call(ctx, "GET", "/api/playbooks/run/close")).status).toBe(404);
+    expect((await runs())[0]?.status).toBe("started");
+
+    // the adding gate, like the other writes
+    const ro = withPlaybooks({ adding: false });
+    expect(
+      (await call(ro, "POST", "/api/playbooks/run/close", { id, status: "done" })).status,
+    ).toBe(403);
+    const hidden = withPlaybooks({ viewing: false });
+    expect(
+      (await call(hidden, "POST", "/api/playbooks/run/close", { id, status: "done" })).status,
+    ).toBe(403);
+    expect((await runs())[0]?.status).toBe("started");
+
+    const r = await call(ctx, "POST", "/api/playbooks/run/close", {
+      id,
+      status: "failed",
+      note: "no access",
+    });
+    expect(r).toEqual({ status: 200, body: { id } });
+    const after = await runs();
+    expect(after).toHaveLength(1); // closed in place: no second row
+    expect(after[0]).toMatchObject({ id, status: "failed", note: "no access" });
+    // a closed run is not changed
+    expect(
+      (await call(ctx, "POST", "/api/playbooks/run/close", { id, status: "done" })).status,
+    ).toBe(400);
+    expect((await runs())[0]?.status).toBe("failed");
+  });
+
   it("rejects a bad playbook and wrong methods", async () => {
     expect((await call(ctx, "POST", "/api/playbooks/save", { title: "", prompt: "" })).status).toBe(
       400,
