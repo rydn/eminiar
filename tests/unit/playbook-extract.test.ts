@@ -15,7 +15,7 @@ let n = 0;
 
 type Db = ReturnType<typeof getStorage>;
 
-function fresh(enabled = true): Db {
+function fresh(enabled = true, playbooks: Record<string, unknown> = {}): Db {
   process.env.EMINIAR_HOME = mkdtempSync(join(tmpdir(), "em-home-"));
   // The "MCP tool" test scans with the configured provider: without this it would construct the
   // real embedding model and start warming (downloading) it. No network, no model in unit tests.
@@ -25,7 +25,7 @@ function fresh(enabled = true): Db {
   if (enabled)
     writeFileSync(
       join(root, "eminiar.config.json"),
-      JSON.stringify({ playbooks: { extraction: { enabled: true } } }),
+      JSON.stringify({ playbooks: { ...playbooks, extraction: { enabled: true } } }),
     );
   resetContextCache();
   ctx = getContext(root);
@@ -77,8 +77,26 @@ describe("playbook extraction", () => {
   it("is off by default and mines nothing", async () => {
     const db = fresh(false);
     recurring(db);
-    await expect(scan(ctx, db, opts)).rejects.toThrow(/extraction is off/);
+    await expect(scan(ctx, db, opts)).rejects.toThrow(/extraction\.enabled/);
     expect(db.playbooks.suggestions()).toHaveLength(0);
+  });
+
+  it("refuses a direct scan, even a dry run, with playbooks.viewing off", async () => {
+    const db = fresh(true, { viewing: false });
+    recurring(db);
+    await expect(scan(ctx, db, { ...opts, dryRun: true })).rejects.toThrow(/playbooks\.viewing/);
+    await expect(scan(ctx, db, opts)).rejects.toThrow(/playbooks\.viewing/);
+    expect(db.playbooks.suggestions()).toHaveLength(0);
+  });
+
+  it("refuses a direct saving scan with playbooks.adding off, but allows a dry run", async () => {
+    const db = fresh(true, { adding: false });
+    recurring(db);
+    await expect(scan(ctx, db, opts)).rejects.toThrow(/playbooks\.adding/);
+    expect(db.playbooks.suggestions()).toHaveLength(0);
+    const dry = await scan(ctx, db, { ...opts, dryRun: true });
+    expect(dry.candidates).toHaveLength(1);
+    expect(dry.suggested).toBe(0);
   });
 
   it("proposes a recurring prompt with a shared MCP server", async () => {

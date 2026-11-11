@@ -21,11 +21,11 @@ import { closeAllStorage, getStorage } from "../../src/storage/index.js";
 import { playbooksRoute } from "../../src/ui/playbooks-api.js";
 
 /**
- * Defects in the playbook code that the tester found (swarm run 20261111-e068a8, task #148).
- * Each test states the CORRECT behaviour and is marked `it.fails`: the suite stays green while
- * the defect exists, and the test goes red the moment someone fixes it. To close one, fix the
- * code, then change `it.fails` to `it`. Nothing here weakens a check: the assertions are what
- * the feature promises (README of src/playbooks/store.ts, export.ts, extract.ts).
+ * Regression tests for defects in the playbook code that the tester found (swarm run
+ * 20261111-e068a8, task #148). Every one is fixed now; each test states the correct behaviour
+ * and the comment above it describes the defect as it was before the fix. Nothing here weakens a
+ * check: the assertions are what the feature promises (src/playbooks/store.ts, export.ts,
+ * extract.ts and src/ui/playbooks-api.ts).
  */
 
 let root: string;
@@ -87,7 +87,7 @@ beforeEach(() => {
   db.purge("sessions"); // events, runs and suggestions
 });
 
-describe("known defects (flip it.fails to it when fixed)", () => {
+describe("playbook regressions (fixed defects)", () => {
   // src/playbooks/extract.ts toCandidate: the title is built from lowercased, split tokens and
   // masked only afterwards, so a secret repeated in the prompts survives in the title, and the
   // title becomes the suggestion name (the file name once accepted).

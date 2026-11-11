@@ -22,8 +22,9 @@ import {
 } from "./store.js";
 
 /**
- * `eminiar playbook <list|show|add|edit|rm|run|report|runs>`. Playbooks are stored recurring tasks;
- * nothing here executes or schedules one. `run` prints the filled prompt and records a run.
+ * `eminiar playbook <list|show|add|edit|rm|run|report|runs|export|scan|help>` (flags in
+ * PLAYBOOK_USAGE). Playbooks are stored recurring tasks; nothing here executes or schedules one.
+ * `run` prints the filled prompt and records a run.
  * Kept out of src/cli.ts so it can be tested without process.exit. Returns the exit code.
  */
 

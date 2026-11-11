@@ -180,8 +180,9 @@ off: `eminiar adjudicator enable` ([details](docs/adjudicator.md)).
 
 A library of your recurring tasks ("check Slack for open PRs and review them", "look at
 Datadog for new errors"): a prompt with `{{parameters}}` and an optional schedule hint, stored as
-markdown in `.eminiar/playbooks/`. List, run, edit and export them from Claude (`em_playbook`),
-the CLI (`eminiar playbook`) or the dashboard. eminiar does not run or schedule them: running
+markdown in `.eminiar/playbooks/`. List, run, edit and export them from Claude (`em_playbook`)
+or the CLI (`eminiar playbook`); the dashboard lists and edits them and copies a run prompt.
+eminiar does not run or schedule them: running
 hands the prompt to Claude, and a schedule is a hint Claude can turn into a `/loop` or cron job.
 Optional extraction suggests playbooks from tasks you repeat; it is off by default and nothing
 becomes a playbook until you accept it. Secrets are masked, and private playbooks live in a

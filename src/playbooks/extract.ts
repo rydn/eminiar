@@ -5,7 +5,7 @@ import { type EmbeddingProvider, getProvider } from "../embeddings/provider.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { playbookFingerprint } from "../storage/sqlite/playbooks.js";
 import { PLAYBOOK_SUGGESTION_STATUSES, type PlaybookSuggestionRow } from "../storage/types.js";
-import { slugify, suggest } from "./store.js";
+import { assertCanScan, slugify, suggest } from "./store.js";
 
 /**
  * Opt-in playbook extraction (playbooks.extraction.enabled). A deterministic miner that runs
@@ -514,15 +514,16 @@ class Known {
  * candidate as a pending suggestion. A candidate that matches an earlier suggestion (pending,
  * accepted or dismissed) is never proposed again, however its cluster has since grown or been
  * worded. The work is bounded (the most recent prompts only, see `truncated`) and the event loop
- * gets a turn between batches, so a scan does not stall the server that runs it.
+ * gets a turn between batches, so a scan does not stall the server that runs it. It checks the
+ * config gate itself (store.assertCanScan: viewing and extraction, plus adding unless dryRun), so
+ * a direct library call is refused exactly as the CLI, tool and dashboard refuse it.
  */
 export async function scan(
   ctx: ProjectContext,
   db: StorageAdapter,
   opt: ScanOptions = {},
 ): Promise<ScanResult> {
-  if (!ctx.config.playbooks.extraction.enabled)
-    throw new Error("playbook extraction is off: set playbooks.extraction.enabled in the config");
+  assertCanScan(ctx, { dryRun: opt.dryRun });
   const pace = new Pacer();
   const { items, skipped, truncated } = await loadItems(db, opt.since, pace);
   const mode = await embedAll(items, opt, ctx);

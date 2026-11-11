@@ -225,7 +225,7 @@ export async function playbooksRoute(
     }
     if (path === "/api/playbooks/run/close") {
       // Reports how a run that is still `started` ended. The id is a run id, not a playbook name.
-      if (!c.adding) return fail(403, "playbooks are read-only: playbooks.adding is false");
+      // store.closeRun enforces playbooks.viewing/adding (a 403 through PlaybookGateError).
       const id = b.id;
       if (typeof id !== "number" || !Number.isInteger(id) || id < 1)
         return fail(400, "id must be a run id");
