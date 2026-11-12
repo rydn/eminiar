@@ -5,7 +5,7 @@ import { getContext } from "./context.js";
 import { kickEmbedding } from "./embeddings/queue.js";
 import { drainReindexQueue, reindexCode, reindexGitSignals } from "./graph/reindex.js";
 import { refreshHistorySummary } from "./history/model.js";
-import { remaskCapturedOutput } from "./index/indexer.js";
+import { backfillRecallIndex, remaskCapturedOutput } from "./index/indexer.js";
 import { reconcile } from "./memory/store.js";
 import { markServerAlive } from "./session/server-alive.js";
 import { getStorage } from "./storage/index.js";
@@ -102,6 +102,20 @@ setImmediate(() => {
     // the first tool call reports the real error
   }
 });
+
+// Fill the recall index in the background (a database upgraded to it has the chunks stored
+// before it existed to copy in). Hooks never do this: it is their open that only creates the
+// empty index. On its own timer, not the warm-up's, which can take a while on a large project.
+const recallFill = setTimeout(() => {
+  try {
+    backfillRecallIndex(getStorage(getContext())).catch((err: unknown) => {
+      process.stderr.write(`eminiar: recall index fill skipped: ${(err as Error).message}\n`);
+    });
+  } catch (err) {
+    process.stderr.write(`eminiar: recall index fill skipped: ${(err as Error).message}\n`);
+  }
+}, 500);
+recallFill.unref();
 
 // Warm the project in the background so the first em_* call is fast: parse
 // changed code into the graph, refresh git signals, embed pending chunks.

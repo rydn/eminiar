@@ -28,6 +28,7 @@ import type {
   MemoryRow,
   PlaybookStore,
   PurgeScope,
+  RecallSource,
   SearchFilters,
   SessionRow,
   SnapshotRow,
@@ -107,6 +108,18 @@ export interface StorageAdapter {
     limit: number,
     filters?: SearchFilters,
   ): FtsHit[];
+  /**
+   * Search the recall index (memories, docs pages or captured errors only). `match` is an FTS5
+   * expression; [] on a malformed one, a missing index or one still being backfilled.
+   */
+  recallSearch(src: RecallSource, match: string, limit: number): FtsHit[];
+  /**
+   * One slice of the recall index backfill (the chunks stored before the index existed), in a
+   * short IMMEDIATE transaction; throws SQLITE_BUSY when the lock stays taken. `done` once the
+   * index is complete; from then on recallSearch answers. Hooks call it only through
+   * fillRecallIndexBriefly (src/index/indexer.ts), and only those nobody waits on.
+   */
+  recallBackfillStep(maxRows?: number): { done: boolean; rows: number };
   /** True when the (porter-stemmed) term occurs anywhere in the index. */
   termExists(term: string): boolean;
   /** Vocabulary terms starting with `prefix`, most frequent first. */

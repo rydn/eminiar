@@ -153,6 +153,28 @@ describe("registerSettings", () => {
     });
   });
 
+  it("replaces a `--deadline <n>` UserPromptSubmit entry on reinstall, not duplicating it, and keeps --gate", () => {
+    const stable = stableCopy();
+    const bin = join(stable, "bin", "em-hook");
+    const old = hook(`"${bin}" --deadline 4`);
+    const oldPlain = hook(`${bin} --deadline 12`);
+    const gate = hook(`"${bin}" --gate`);
+    const gateDeadline = hook(`"${bin}" --gate --deadline 4`);
+    writeSettings({ UserPromptSubmit: [{ hooks: [old, oldPlain, gate, gateDeadline] }] });
+
+    const wrote = registerSettings(stable);
+    registerSettings(stable);
+
+    const cmds = (readHooks().UserPromptSubmit ?? []).flatMap((e) => e.hooks.map((h) => h.command));
+    expect(cmds.filter((c) => c.includes("--deadline") && !c.includes("--gate"))).toEqual([
+      `"${bin}" --deadline 4`,
+    ]);
+    expect(cmds).toContain(gate.command);
+    expect(cmds).toContain(gateDeadline.command);
+    unregisterSettings(stable, wrote);
+    expect(readHooks().UserPromptSubmit).toEqual([{ hooks: [gate, gateDeadline] }]);
+  });
+
   it("tolerates malformed entries in every event on install, upgrade and uninstall", () => {
     const stable = stableCopy();
     const ours = hook(`"${join(stable, "bin", "em-hook")}"`);

@@ -29,6 +29,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { isHarnessEnvelope, stripLeadingReminders } from "../capture/envelope.js";
 import type { AdjudicatorConfig } from "../config.js";
 import { getContext, type ProjectContext } from "../context.js";
 import { manifestPath, readManifestAt } from "../docs/manifest.js";
@@ -88,6 +89,9 @@ import {
   type Verdict,
 } from "./types.js";
 import { briefUnitsOf } from "./units.js";
+
+// The envelope matchers live in src/capture so the prompt recall can use them without this module.
+export { isHarnessEnvelope, stripLeadingReminders };
 
 /** The UserPromptSubmit advice line. */
 export const ADVICE_MAX = 220;
@@ -189,45 +193,6 @@ export function adviceLine(v: Verdict, f: Features): string {
   const role = v.role.choice && v.role.choice !== "none" ? `, role ${v.role.choice}` : "";
   parts.push(`if you delegate: ${v.tier.choice}${role}`);
   return clip(parts.join(" · "), ADVICE_MAX);
-}
-
-/**
- * The opening tags of turns Claude Code sends through UserPromptSubmit that the user did not
- * type: a subagent's hand-back (`<agent-message from="…">`), a background task's notification
- * (`<task-notification>`), a CI monitor's event (`<ci-monitor-event>`) and harness context
- * (`<system-reminder>`, `<system-reminder id="…">`).
- */
-const HARNESS_ENVELOPE =
-  /^\s*<(?:agent-message|task-notification|ci-monitor-event|system-reminder)[\s>]/;
-
-/** One closed `<system-reminder …>…</system-reminder>` block at the start (after whitespace). */
-const LEADING_REMINDER = /^\s*<system-reminder(?:\s[^>]*)?>[\s\S]*?<\/system-reminder>/;
-
-/**
- * The prompt without its leading closed system-reminder blocks, trimmed. Claude Code can put
- * harness context ahead of the typed text (a worktree note, for example); the rest is the user's.
- */
-export function stripLeadingReminders(text: string): string {
-  let rest = text;
-  for (let m = LEADING_REMINDER.exec(rest); m; m = LEADING_REMINDER.exec(rest)) {
-    rest = rest.slice(m[0].length);
-  }
-  return rest.trim();
-}
-
-/**
- * Is this prompt a harness envelope rather than the user's words? Only the start counts: after
- * leading whitespace, `<agent-message`, `<task-notification`, `<ci-monitor-event` or
- * `<system-reminder` followed by
- * `>` or whitespace. Closed system-reminder blocks are stripped first: text after them is the
- * user's, and only nothing left (or another envelope, or an unclosed reminder) is an envelope.
- * A prompt that mentions one of these tags later on is the user's, and anything that is not a
- * string is not an envelope (when unsure, the prompt is scored).
- */
-export function isHarnessEnvelope(text: unknown): boolean {
-  if (typeof text !== "string" || !HARNESS_ENVELOPE.test(text)) return false;
-  const rest = stripLeadingReminders(text);
-  return rest === "" || HARNESS_ENVELOPE.test(rest);
 }
 
 /**

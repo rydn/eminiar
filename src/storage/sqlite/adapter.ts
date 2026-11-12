@@ -30,6 +30,7 @@ import type {
   MemoryInput,
   MemoryRow,
   PurgeScope,
+  RecallSource,
   SearchFilters,
   SessionRow,
   SnapshotRow,
@@ -46,7 +47,16 @@ import type {
 } from "../types.js";
 import { SqliteAdjudicatorStore } from "./adjudicator.js";
 import { SqlitePlaybookStore } from "./playbooks.js";
-import { healPlaybookTables, migrations, tablesExist, vecTableSql } from "./schema.js";
+import {
+  ensureRecallIndex,
+  healPlaybookTables,
+  migrations,
+  RECALL_BACKFILL_KEY,
+  recallBackfillSlice,
+  recallIndexIntact,
+  tablesExist,
+  vecTableSql,
+} from "./schema.js";
 import { SqliteSwarmStore } from "./swarm.js";
 
 export interface SqliteOptions {
@@ -157,6 +167,23 @@ const RESYNC_LINES = 4096;
  */
 const REMASK_HOLD_MS = 30;
 const REMASK_LOCK_WAIT_MS = 40;
+
+/**
+ * The recall backfill's slices: at most this many rows, held at most RECALL_BACKFILL_HOLD_MS (at
+ * least one document), waiting RECALL_BACKFILL_LOCK_WAIT_MS at most for the lock. Well under a
+ * hook's 250 ms lock wait. The commit's FTS5 flush grows with the rows: on a 1.4 GB database
+ * (29k recall rows, warm cache) a slice held the lock 24 ms at most with 500 rows, 38 ms with
+ * 1000 and 87 ms with 2000, and the whole fill took 0.6 to 0.8 s either way.
+ */
+const RECALL_BACKFILL_ROWS = 500;
+const RECALL_BACKFILL_HOLD_MS = 25;
+const RECALL_BACKFILL_LOCK_WAIT_MS = 40;
+
+/** How long a heal of the recall index at open waits for the lock before it leaves it for later. */
+const RECALL_HEAL_LOCK_WAIT_MS = 250;
+
+const isBusy = (err: unknown): boolean =>
+  /^SQLITE_(BUSY|LOCKED)/.test(String((err as { code?: unknown } | null)?.code ?? ""));
 
 /** Masked text read ahead of the writes; reading stops past it (one document may exceed it). */
 const REMASK_READ_AHEAD_CHARS = 1_000_000;
@@ -285,6 +312,8 @@ export class SqliteAdapter implements StorageAdapter {
   private remaskQueue: RemaskQueue | undefined;
   /** Set when the remask wrote; its last slice then checkpoints the -wal. */
   private remaskWrote = false;
+  /** Set once the recall index was seen complete, so recall stops reading the meta row. */
+  private recallComplete = false;
 
   /**
    * Prepared-statement cache. better-sqlite3 compiles the SQL on every prepare(), so
@@ -339,15 +368,35 @@ export class SqliteAdapter implements StorageAdapter {
   private migrate(dims: number): void {
     this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     const current = Number(this.metaGet("schema_version") ?? 0);
-    const pending = migrations.filter((m) => m.version > current);
-    if (pending.length) {
-      this.transaction(() => {
-        for (const m of pending) {
-          if (m.sql) this.db.exec(m.sql);
-          m.up?.(this.db);
-          this.metaSet("schema_version", String(m.version));
+    const pending = migrations.some((m) => m.version > current);
+    // A database can claim the recall index's version or a later one without the index (another
+    // build numbered its own migration the same), so it is checked at every open: one
+    // sqlite_master lookup and one config row.
+    const heal = !pending && !this.recallIntact();
+    if (pending || heal) {
+      // IMMEDIATE, and the state is read again inside the lock: two processes opening an old
+      // database together must not both make the same change.
+      const run = () =>
+        this.db
+          .transaction(() => {
+            const now = Number(this.metaGet("schema_version") ?? 0);
+            for (const m of migrations.filter((x) => x.version > now)) {
+              if (m.sql) this.db.exec(m.sql);
+              m.up?.(this.db);
+              this.metaSet("schema_version", String(m.version));
+            }
+            ensureRecallIndex(this.db);
+          })
+          .immediate();
+      if (!heal) run();
+      else {
+        // fail open: a busy database leaves the heal to the next open, and recall finds nothing
+        try {
+          this.adjudicator.withLockWait(RECALL_HEAL_LOCK_WAIT_MS, run);
+        } catch (err) {
+          if (!isBusy(err)) throw err;
         }
-      });
+      }
     }
     // A database can be at the playbook version or past it without the tables (another branch
     // used the number first); one sqlite_master count when they are there. Fail open: a busy
@@ -642,6 +691,7 @@ export class SqliteAdapter implements StorageAdapter {
    */
   private remaskMergeStep(): boolean {
     const fts = ["chunks_fts_porter", "chunks_fts_trigram"];
+    if (this.hasRecallTable()) fts.push("recall_fts");
     const step = this.db.transaction(() => {
       const started = performance.now();
       const left = new Set(fts);
@@ -810,6 +860,79 @@ export class SqliteAdapter implements StorageAdapter {
       if (/fts5: syntax error|no such column/i.test((err as Error).message)) return [];
       throw err;
     }
+  }
+
+  /**
+   * Search the recall index (memories, docs pages or captured errors) for the MATCH expression.
+   * No join: the source filter is a column of the index itself, so the query touches only the
+   * small table. Best effort: a malformed expression or a missing or damaged index gives [].
+   */
+  recallSearch(src: RecallSource, match: string, limit: number): FtsHit[] {
+    // A backfill still running: nothing rather than a partial answer, and never the whole index.
+    if (!this.recallReady()) return [];
+    try {
+      const rows = this.prep(
+        `SELECT rowid id, -bm25(recall_fts, 5.0, 1.0, 0.0) score
+           FROM recall_fts WHERE recall_fts MATCH ?
+           ORDER BY score DESC LIMIT ?`,
+      ).all(`{title body} : (${match}) AND src : "${src}"`, limit) as Array<{
+        id: number;
+        score: number;
+      }>;
+      return rows.map((r) => ({ chunkId: r.id, score: r.score }));
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (
+        /fts5: syntax error|unterminated string|no such column|no such table: recall_fts|malformed|corrupt/i.test(
+          msg,
+        )
+      )
+        return [];
+      throw err;
+    }
+  }
+
+  /** True once the recall index holds every recall chunk (no backfill pending); stays true. */
+  private recallReady(): boolean {
+    if (this.recallComplete) return true;
+    try {
+      this.recallComplete =
+        this.prep("SELECT 1 FROM meta WHERE key = ?").get(RECALL_BACKFILL_KEY) === undefined;
+    } catch {
+      return false;
+    }
+    return this.recallComplete;
+  }
+
+  /** recallIndexIntact, and false rather than a throw on a damaged index. */
+  private recallIntact(): boolean {
+    try {
+      return recallIndexIntact(this.db);
+    } catch {
+      return false;
+    }
+  }
+
+  /** True when the recall index table exists (a database another build migrated may lack it). */
+  private hasRecallTable(): boolean {
+    return (
+      this.prep(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recall_fts'",
+      ).get() !== undefined
+    );
+  }
+
+  recallBackfillStep(maxRows = RECALL_BACKFILL_ROWS): { done: boolean; rows: number } {
+    const step = this.db.transaction(() => {
+      if (this.metaGet(RECALL_BACKFILL_KEY) === undefined && this.recallIntact())
+        return { done: true, rows: 0 };
+      // made again here when something dropped it since the open (no rows copied: cheap)
+      ensureRecallIndex(this.db);
+      return recallBackfillSlice(this.db, maxRows, RECALL_BACKFILL_HOLD_MS);
+    });
+    const r = this.adjudicator.withLockWait(RECALL_BACKFILL_LOCK_WAIT_MS, () => step.immediate());
+    if (r.done) this.recallComplete = true;
+    return r;
   }
 
   termExists(term: string): boolean {
@@ -2038,6 +2161,9 @@ export class SqliteAdapter implements StorageAdapter {
         );
         this.db.exec("INSERT INTO chunks_fts_porter(chunks_fts_porter) VALUES ('rebuild')");
         this.db.exec("INSERT INTO chunks_fts_trigram(chunks_fts_trigram) VALUES ('rebuild')");
+        // rebuilt from its own (now emptied) content, so no deleted token stays in a segment
+        if (this.hasRecallTable())
+          this.db.exec("INSERT INTO recall_fts(recall_fts) VALUES ('rebuild')");
       }
       if (scope === "sessions" || scope === "all") {
         this.db.exec(
@@ -2103,6 +2229,10 @@ export class SqliteAdapter implements StorageAdapter {
       this.db.prepare(`DELETE FROM chunk_vec WHERE chunk_id IN (${chunkIds})`).run(source);
     const fts = ["chunks_fts_porter", "chunks_fts_trigram"];
     for (const t of fts) this.db.exec(`INSERT INTO ${t}(${t}, rank) VALUES ('secure-delete', 1)`);
+    // recall_fts keeps secure-delete on for good (ensureRecallIndex), so it is set, never reset;
+    // a database another build migrated may not have the table at all
+    if (this.hasRecallTable())
+      this.db.exec("INSERT INTO recall_fts(recall_fts, rank) VALUES ('secure-delete', 1)");
     try {
       this.db
         .prepare(

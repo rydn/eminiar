@@ -125,6 +125,17 @@ describe("recallForText", () => {
     expect(r.text).not.toContain("onboarding/structure");
     expect(r.keys).toContain("memory:decision/sqlite-connection-pool");
   });
+  it("returns what it has when asked to stop before the docs search", async () => {
+    const db = getStorage(getContext(root), { vectors: false });
+    let asked = 0;
+    const r = await recallForText(
+      db,
+      "Should the SQLite connection pool allow concurrent writers?",
+      { stop: () => ++asked > 1 },
+    );
+    expect(r.text).toContain("memory decision/sqlite-connection-pool [decision]");
+    expect(r.text).not.toContain("docs:better-sqlite3");
+  });
   it("stays quiet for vague prompts and single shared words", async () => {
     const db = getStorage(getContext(root), { vectors: false });
     expect((await recallForText(db, "ok thanks")).text).toBe("");

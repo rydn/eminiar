@@ -86,4 +86,71 @@ if [ -z "$RUN" ]; then
   swarm_gate "$@" && echo '{}'
   exit 0
 fi
-exec "$NODE" "$RUN/dist/hook.js" "$@"
+# --deadline <seconds>: a hard stop for hooks that block the user (UserPromptSubmit). Node's own
+# soft budget cannot interrupt a synchronous SQLite call, and Claude Code throws a killed hook's
+# output away, so a watchdog kills node a little before Claude Code would. The kill prints
+# nothing: an empty stdout with exit 0 is a valid "no answer" for the hook, whereas a `{}` could
+# follow an answer node had already half written. A non-integer value is ignored (plain exec).
+EM_DEADLINE=
+em_next=
+for em_arg in "$@"; do
+  if [ -n "$em_next" ]; then
+    case "$em_arg" in
+      '' | *[!0-9]*) ;;
+      *) EM_DEADLINE=$em_arg ;;
+    esac
+    em_next=
+  elif [ "$em_arg" = "--deadline" ]; then
+    em_next=1
+  fi
+done
+if [ -z "$EM_DEADLINE" ] || [ "$EM_DEADLINE" -le 0 ] || [ -n "$EM_GATE" ]; then
+  exec "$NODE" "$RUN/dist/hook.js" "$@"
+fi
+# A background command gets /dev/null as stdin, and node reads the payload there. dash, ksh and
+# busybox ash apply that default BEFORE the command's own redirections, so `<&0` would dup
+# /dev/null; copy stdin to fd 3 first and hand node fd 3 as stdin. (Not a `{ ...; } 3<&0` group:
+# under ksh the shim's wait then returns at once and node is orphaned.)
+exec 3<&0
+# The watchdog creates this file just before its kill -9, so a deadline kill is told apart from any
+# other SIGKILL (the OOM killer) and from shells that report a signal death as 256+n (ksh93: 265).
+em_mark="${TMPDIR:-/tmp}/em-hook.$$"
+if [ -e "$em_mark" ] || [ -L "$em_mark" ]; then rm -f "$em_mark" 2>/dev/null; fi
+"$NODE" "$RUN/dist/hook.js" "$@" <&3 3<&- &
+em_pid=$!
+exec 3<&-
+# The watchdog holds none of Claude Code's pipes, or the hook would not end when node does.
+(
+  trap 'kill "$em_sp" 2>/dev/null; exit 0' TERM
+  sleep "$EM_DEADLINE" &
+  em_sp=$!
+  if wait "$em_sp"; then
+    # noclobber: an existing file or symlink at this path is never written through. The marker is
+    # created only here, with shell builtins, so a normal run costs no extra process.
+    set -C
+    : > "$em_mark"
+    kill -9 "$em_pid" 2>/dev/null
+  fi
+) </dev/null >/dev/null 2>&1 &
+em_wd=$!
+wait "$em_pid" 2>/dev/null
+em_rc=$?
+kill "$em_wd" 2>/dev/null
+em_fired=
+if [ -e "$em_mark" ]; then
+  em_fired=1
+  rm -f "$em_mark"
+fi
+# The watchdog's kill: answer with nothing and exit 0. Any other status, a foreign SIGKILL
+# included, is node's own (a script that throws at load, say ERR_DLOPEN_FAILED, exits 1) and is passed on, as plain exec
+# would, so Claude Code shows the hook error; it is also logged, since stderr is easy to miss.
+if [ -n "$em_fired" ]; then
+  printf '%s error UserPromptSubmit: em-hook stopped node at the %s s deadline; the prompt went on without eminiar context\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$EM_DEADLINE" >> "$EM_HOME/hook.log" 2>/dev/null
+  exit 0
+fi
+if [ "$em_rc" -ne 0 ]; then
+  printf '%s error UserPromptSubmit: node exited with status %s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$em_rc" >> "$EM_HOME/hook.log" 2>/dev/null
+fi
+exit "$em_rc"

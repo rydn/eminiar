@@ -10,7 +10,11 @@
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/em-hook\"", "timeout": 5 }
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/em-hook\" --deadline 4",
+            "timeout": 5
+          }
         ]
       }
     ],

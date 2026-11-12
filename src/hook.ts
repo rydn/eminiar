@@ -37,7 +37,9 @@ async function main(): Promise<void> {
   // instead of the CLI's 2 s per statement, which a handler's statements add up (budget.ts).
   // Hooks whose job is a write wait longer than the read-only ones, Cursor's included (budget.ts).
   setStorageBusyTimeout(lockWaitFor(raw, process.argv.slice(2)));
-  const out = await dispatch(raw, process.argv.slice(2));
+  // startedAt 0 is this process's start on the performance clock: the soft budget counts
+  // Node's boot and the stdin read, not only the handler.
+  const out = await dispatch(raw, process.argv.slice(2), { startedAt: 0 });
   if (!ranLate()) {
     process.stdout.write(out);
     return;
