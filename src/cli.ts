@@ -341,6 +341,12 @@ const commands: Record<string, Command> = {
       console.error(`usage: eminiar reindex [--scope ${scopes.join("|")}] [--full]`);
       return 2;
     }
+    // Finish the recall index first if it is still being filled (a database upgraded to it), the
+    // same backfill the server runs in the background; a no-op once it is complete.
+    const { getStorage } = await import("./storage/index.js");
+    const { backfillRecallIndex } = await import("./index/indexer.js");
+    const filled = await backfillRecallIndex(getStorage(getContext()));
+    if (filled) console.log(`recall index: ${filled} chunks filled in`);
     const { emReindex } = await import("./tools/em_graph.js");
     const r = await emReindex.handler(
       { scope: (values.scope as "all") ?? "all", full: !!values.full },

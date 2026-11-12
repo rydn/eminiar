@@ -1,5 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -150,5 +158,109 @@ describe("bin shims", () => {
       expect(r.status).toBe(1);
       expect(r.stderr).toContain("npx eminiar install");
     }
+  });
+});
+
+/**
+ * bin/em-hook --deadline <s>: the hard stop for UserPromptSubmit. Node's soft budget cannot
+ * interrupt a synchronous SQLite call, so the shim kills node at the deadline and answers with
+ * nothing (exit 0, empty stdout), and says so in hook.log.
+ */
+// dash, ksh and busybox ash give a background command /dev/null as stdin before its own
+// redirections, which broke the payload hand-off; run the supervised path under dash too.
+const deadlineShells = [
+  "sh",
+  ...["/bin/dash", "/bin/ksh", "/bin/bash", "/bin/zsh"].filter((x) => existsSync(x)),
+];
+describe.each(deadlineShells)("em-hook --deadline under %s", (shell) => {
+  const fake = (hookJs: string) => {
+    const dir = pkg("DL", { deps: true, dist: true });
+    writeFileSync(join(dir, "dist", "hook.js"), hookJs);
+    return dir;
+  };
+  const echoLen =
+    'let n=0;process.stdin.on("data",c=>n+=c.length).on("end",()=>process.stdout.write("len:"+n+" "+process.argv.slice(2).join(",")));';
+  const run = (dir: string, h: string, args: string[], input = "") => {
+    const t = Date.now();
+    const r = spawnSync(shell, [join(dir, "bin", "em-hook"), ...args], {
+      encoding: "utf8",
+      input,
+      env: { PATH: process.env.PATH ?? "", HOME: h, EMINIAR_HOME: h },
+      timeout: 15_000,
+    });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, ms: Date.now() - t };
+  };
+  const logOf = (h: string) =>
+    existsSync(join(h, "hook.log")) ? readFileSync(join(h, "hook.log"), "utf8") : "";
+
+  it("kills a node that is stuck in synchronous work: exit 0, empty stdout, one log line", () => {
+    // A busy loop is what a long SQLite call looks like to the process: no timer can fire.
+    const dir = fake("const t=Date.now();while(Date.now()-t<5000){}process.stdout.write('late');");
+    const h = home({});
+    const r = run(dir, h, ["--deadline", "1"], "{}");
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(r.ms).toBeLessThan(2500);
+    const lines = logOf(h).trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/error UserPromptSubmit: em-hook stopped node at the 1 s deadline/);
+  });
+
+  it("does not call a foreign SIGKILL the deadline: logged as a plain failure, no marker left", () => {
+    const dir = fake("process.kill(process.pid,'SIGKILL');");
+    const h = home({});
+    const r = run(dir, h, ["--deadline", "4"], "{}");
+    expect(r.status).not.toBe(0);
+    expect(logOf(h)).toMatch(/node exited with status/);
+    expect(logOf(h)).not.toMatch(/deadline/);
+  });
+
+  it("passes a fast answer through byte-identical, with stdin intact and no lingering watchdog", () => {
+    const dir = fake(echoLen);
+    const h = home({});
+    const payload = JSON.stringify({ prompt: "x".repeat(5000) });
+    const r = run(dir, h, ["--deadline", "4"], payload);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(`len:${payload.length} --deadline,4`);
+    // The watchdog's `sleep 4` must not hold the hook's pipes open.
+    expect(r.ms).toBeLessThan(3000);
+    // (4) a normal exit leaves no log line
+    expect(logOf(h)).toBe("");
+  });
+
+  it("passes node's own failure on: a script that throws at load exits non-zero and is logged", () => {
+    const dir = fake('throw new Error("ERR_DLOPEN_FAILED");');
+    const h = home({});
+    const plain = run(dir, home({}), [], "{}");
+    const r = run(dir, h, ["--deadline", "4"], "{}");
+    expect(plain.status).toBe(1);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toMatch(/ERR_DLOPEN_FAILED/);
+    expect(logOf(h).trim()).toMatch(/error UserPromptSubmit: node exited with status 1$/);
+  });
+
+  it("passes node's own exit code on", () => {
+    const dir = fake("process.exit(7);");
+    const r = run(dir, home({}), ["--deadline", "4"], "{}");
+    expect(r.status).toBe(7);
+  });
+
+  it("ignores a non-integer or missing value and plain-execs node", () => {
+    const dir = fake(echoLen);
+    for (const args of [["--deadline", "abc"], ["--deadline", "1.5"], ["--deadline"], []]) {
+      const h = home({});
+      const r = run(dir, h, args, "{}");
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe(`len:2 ${args.join(",")}`);
+      expect(logOf(h)).toBe("");
+    }
+  });
+
+  it("does not supervise --gate: its exit code and pipes stay node's own", () => {
+    const dir = fake('process.stdout.write("gate");process.exit(1);');
+    const r = run(dir, home({}), ["--gate", "--deadline", "4"], "{}");
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("gate");
   });
 });

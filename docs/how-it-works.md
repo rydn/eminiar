@@ -57,7 +57,18 @@ equivalents are [below](#cursor)):
 | `SessionEnd` | Marks the session as ended and records its last token usage from the transcript. Lifetime statistics need no flush: each `em_*` call writes them |
 
 Hooks are fast by design. They never run `git log` and never load the embedding model. Recall
-is a few FTS queries against the project database.
+is a few FTS queries against the project database's recall index (`recall_fts`), which holds
+only memories, documentation pages and past errors. Triggers on the chunk table keep it in step.
+On a database from before it, opening the database (a hook included) only creates the empty
+index and its triggers. The MCP server copies the existing rows in once, in the background
+after it starts, in short slices that leave the write lock free between them and resume where
+they stopped, and `eminiar reindex` does it too. The hooks nobody waits on (`Stop`,
+`SessionEnd`, `PreCompact`, `SubagentStop`) add a few slices each run, at most 300 ms of them,
+so a setup without the server still gets there; the prompt and tool hooks never copy rows. Until that one-time warm-up
+finishes, recall shows nothing rather than querying the full index. The
+full chunk index also holds every captured command output and code file, so on a large
+database with a cold page cache a query against it could take seconds. Proactive recall of
+memories, docs and past errors does not touch it.
 
 Every hook uses the project the session started in: `CLAUDE_PROJECT_DIR`, walked up to the
 nearest project marker. Claude Code sets it for every hook and for the MCP server, and keeps it
@@ -74,8 +85,9 @@ session's ([Agent swarms](#agent-swarms)). An edit inside a git worktree of the 
 
 Claude Code discards the output of a hook that outlasts its `timeout` in `hooks/hooks.json`, so
 every run also has a time budget below that timeout (3.5 s for the 5 s hooks, 8 s for
-`SessionStart`, `PostToolUse` and `SubagentStart`, 12 s for `PreCompact`). Three rules keep a
-run inside it:
+`SessionStart`, `PostToolUse` and `SubagentStart`, 12 s for `PreCompact`). The budget counts
+from the process start (`performance.now()` 0), so Node's boot and the stdin read count against
+it, as they do against Claude Code's timeout. Four rules keep a run inside it:
 
 - **Lock wait.** Many processes share one project database (the main session, every
   swarm worker, the indexer). A hook waits for another process's write lock for a limited time,
@@ -101,9 +113,20 @@ run inside it:
   starts unregistered but knows its role and how to claim its task.
 - **Deadline.** A run that has not answered by its budget answers `{}` (a denied swarm dispatch
   stays denied when `enforce` is on) and the process exits. The prompt hook skips recall and the
-  adjudicator when too little budget is left for them. A `PreToolUse` Agent/Task call denied at
+  adjudicator when too little budget is left for them, and checks the budget again between its
+  memory and docs searches. A `PreToolUse` Agent/Task call denied at
   the deadline (or by a handler error) releases the spawn reservation it made, so the retry the
   deny text invites is not refused for lack of a slot.
+- **Hard stop.** The soft deadline is a timer, and a timer cannot fire while a synchronous
+  SQLite call holds the thread. Node also waits for worker threads before it exits. So
+  `UserPromptSubmit`, which blocks the user's prompt, runs as `bin/em-hook --deadline 4`: the
+  shim starts node in the background with a watchdog that kills it with `SIGKILL` at 4 s, a
+  second before Claude Code's 5 s timeout. A killed run prints nothing and exits 0, so the
+  prompt goes on without eminiar context instead of waiting for the timeout. A node that exits
+  by itself keeps its own exit status. A `{}` printed
+  after a half-written answer would be invalid JSON. Each kill adds a line to `~/.eminiar/hook.log`.
+  Other events run node with a plain `exec`. `PreToolUse` is the hot path and its swarm gate
+  fails closed, so it gets no watchdog.
 
 ### Agent swarms
 

@@ -120,6 +120,11 @@ export interface RecallOptions {
   /** Collect a trace of every candidate (for recording and --explain). */
   trace?: boolean | undefined;
   path?: RecallPath | undefined;
+  /**
+   * Checked before each index search: true returns what is in hand (a hook out of time).
+   * The searches themselves cannot be interrupted, so the budget is spent between them.
+   */
+  stop?: (() => boolean) | undefined;
 }
 
 export interface RecallResult {
@@ -327,12 +332,12 @@ export async function recallForText(
   const keys: string[] = [];
   const note = (c: TraceCandidate) => trace?.candidates.push(c);
 
-  if (maxMemories > 0) {
+  if (maxMemories > 0 && !opts.stop?.()) {
     const r = await search(db, query, {
       mode: "lexical",
       // room for the onboarding / superseded hits that are skipped below
       limit: maxMemories * 3 + 5,
-      filters: { source: "memory" },
+      recall: "memory",
     });
     let n = 0;
     // a memory has several chunks; decide (and trace) each memory once
@@ -374,11 +379,11 @@ export async function recallForText(
     }
   }
 
-  if (maxDocs > 0) {
+  if (maxDocs > 0 && !opts.stop?.()) {
     const r = await search(db, query, {
       mode: "lexical",
       limit: maxDocs * 3,
-      filters: { sourcePrefix: "docs:" },
+      recall: "docs",
     });
     let n = 0;
     const docsSeen = new Set<number>();
@@ -694,7 +699,7 @@ export async function recallForError(
   const r = await search(db, terms.join(" "), {
     mode: "lexical",
     limit: 10,
-    filters: { source: "session" },
+    recall: "error",
   });
   for (const h of r.hits) {
     if (past.length >= 2) break;

@@ -82,8 +82,12 @@ export function budgetFor(event: string | undefined): number {
 let startedAt: number | undefined;
 let budgetMs = HOOK_BUDGET_MS;
 
-/** Start the clock for one run (`dispatch` calls this once per payload). */
-export function startBudget(ms: number = HOOK_BUDGET_MS, now: number = Date.now()): void {
+/**
+ * Start the clock for one run (`dispatch` calls this once per payload). The clock is
+ * `performance.now()`, whose 0 is the process start: `dispatch` passes 0 from a hook process, so
+ * the budget counts Node's boot and the stdin read too, as Claude Code's timeout does.
+ */
+export function startBudget(ms: number = HOOK_BUDGET_MS, now: number = performance.now()): void {
   startedAt = now;
   budgetMs = ms;
 }
@@ -94,12 +98,12 @@ export function clearBudget(): void {
 }
 
 /** Milliseconds left in this run's budget (never negative); unlimited without a run. */
-export function budgetLeft(now: number = Date.now()): number {
+export function budgetLeft(now: number = performance.now()): number {
   if (startedAt === undefined) return Number.POSITIVE_INFINITY;
   return Math.max(0, budgetMs - (now - startedAt));
 }
 
 /** Is there at least `needMs` left for an optional stage? */
-export function hasBudget(needMs: number, now: number = Date.now()): boolean {
+export function hasBudget(needMs: number, now: number = performance.now()): boolean {
   return budgetLeft(now) >= needMs;
 }
