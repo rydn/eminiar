@@ -143,7 +143,12 @@ export function isOurs(cmd: unknown, stable: string): cmd is string {
  */
 function isOurHook(cmd: unknown, stable: string): boolean {
   if (typeof cmd !== "string") return false;
-  const bin = cmd.trim().replace(/^"(.*)"$/, "$1");
+  // `<bin> --deadline <digits>` is the UserPromptSubmit entry's watchdog flag (bin/em-hook); any
+  // other argument, `--gate` included, marks a command that is not ours.
+  const bin = cmd
+    .trim()
+    .replace(/ --deadline [0-9]+$/, "")
+    .replace(/^"(.*)"$/, "$1");
   // The stable copy, the legacy plugin path, and the npm-installed layout of any install root.
   return (
     bin === join(stable, "bin", "em-hook") ||

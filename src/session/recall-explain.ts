@@ -1,4 +1,5 @@
 import type { ProjectContext } from "../context.js";
+import { recallIndexFilling } from "../index/indexer.js";
 import { reconcile } from "../memory/store.js";
 import { getStorage } from "../storage/index.js";
 import type { EventRow } from "../storage/types.js";
@@ -35,7 +36,19 @@ function candidateLines(cands: TraceCandidate[], prefix: string): string[] {
   );
 }
 
-function renderTrace(t: RecallTrace | undefined, fired: string[]): string[] {
+/**
+ * Why recall finds nothing while the recall index is still filling, and what fills it. Shared
+ * with the doctor.
+ */
+export function recallFillingText(after: number): string {
+  return `recall index still filling (after document ${after}): prompt, brief and error recall find nothing until it is complete. The eminiar MCP server fills it after it starts, and the Stop, SessionEnd, PreCompact and SubagentStop hooks a few slices at a time; \`eminiar reindex\` fills it now. After an in-place \`eminiar upgrade\`, /mcp reconnect (or a new session) starts the new server.`;
+}
+
+function renderTrace(
+  t: RecallTrace | undefined,
+  fired: string[],
+  filling?: { after: number },
+): string[] {
   if (!t) return ["(no trace)"];
   const lines = [
     `terms (${t.terms.length}): ${t.terms.join(" ") || "—"}`,
@@ -43,12 +56,16 @@ function renderTrace(t: RecallTrace | undefined, fired: string[]): string[] {
       ? "bar: too vague (fewer than two distinctive terms) — nothing is attached"
       : `bar: ${t.need} shared terms, or one term that names a memory (slug word or tag) when the prompt is short enough for it to be the topic`,
   ];
+  if (filling) lines.push(recallFillingText(filling.after));
   const memories = t.candidates.filter((c) => c.key.startsWith("memory:"));
   const docs = t.candidates.filter((c) => c.key.startsWith("doc:"));
+  const none = (text: string) => [
+    `  ${filling ? "none: the recall index is still filling" : text}`,
+  ];
   lines.push(`memories (${memories.length} candidate${memories.length === 1 ? "" : "s"}):`);
-  lines.push(...(memories.length ? candidateLines(memories, "  ") : ["  none share a term"]));
+  lines.push(...(memories.length ? candidateLines(memories, "  ") : none("none share a term")));
   lines.push(`docs (${docs.length} candidate${docs.length === 1 ? "" : "s"}):`);
-  lines.push(...(docs.length ? candidateLines(docs, "  ") : ["  none share enough terms"]));
+  lines.push(...(docs.length ? candidateLines(docs, "  ") : none("none share enough terms")));
   lines.push(
     fired.length
       ? `result: would attach ${fired.length} item(s): ${fired.join(", ")}`
@@ -79,7 +96,7 @@ export async function explainPrompt(
       ? `session ${opts.sessionId}: items shown in its current context window count as seen (repeat after ${recall.repeatAfter} prompts)`
       : "no --session: nothing counts as already seen",
   ];
-  return [...head, ...renderTrace(r.trace, r.keys)].join("\n");
+  return [...head, ...renderTrace(r.trace, r.keys, recallIndexFilling(db))].join("\n");
 }
 
 /** What a Read or Edit of a file would attach: memories about it, fix history, fan-in. */
@@ -200,7 +217,9 @@ export async function replayPrompts(
   const total = prompts.length;
   const scored = total - vague;
   const pct = (n: number, of: number) => (of ? `${Math.round((100 * n) / of)}%` : "–");
+  const filling = recallIndexFilling(db);
   const lines = [
+    ...(filling ? [recallFillingText(filling.after)] : []),
     `replayed ${total} prompt(s)${since ? ` since ${new Date(since).toISOString().slice(0, 10)}` : ""} with the current rules and ${db.memoryCount()} memories:`,
     `  vague (fewer than 2 terms): ${vague}  ·  with a candidate: ${withCandidates}/${scored} (${pct(withCandidates, scored)})  ·  fired: ${fired}/${scored} (${pct(fired, scored)}) — ${memories} memories, ${docs} doc pages`,
   ];

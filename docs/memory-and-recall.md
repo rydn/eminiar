@@ -107,7 +107,8 @@ Hooks bring the relevant knowledge to Claude at the right moment.
   so knowledge skimmed past early in a long session is not lost. After a `/compact` or a resume,
   the window restarts.
 - **Fast.** Hooks never run `git log` and never load the embedding model. Recall is a few FTS
-  queries. File history comes from a per-file risk table that is rebuilt when `HEAD` moves.
+  queries against a small recall index that holds only memories, documentation pages and past
+  errors, not the captured command output and code in the full index. File history comes from a per-file risk table that is rebuilt when `HEAD` moves.
   Until the first build (the server warm-up or `em_history {action:"overview"}`) the session
   start says so.
 - **Every routing mode.** Recall on prompts, files, commits, errors and web calls works even with

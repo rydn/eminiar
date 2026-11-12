@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { adjudicatorDoctorChecks } from "./adjudicator/cli.js";
 import type { Config } from "./config.js";
 import { getContext } from "./context.js";
+import { recallIndexFilling } from "./index/indexer.js";
 import { ensureDirs, paths } from "./paths.js";
+import { recallFillingText } from "./session/recall-explain.js";
 import type { StorageAdapter } from "./storage/adapter.js";
 import { pluginRoot, version } from "./version.js";
 
@@ -120,6 +122,17 @@ export function runDoctor(opts: DoctorOptions = {}): Check[] {
       return existsSync(dir) ? `${dir} (downloaded lazily on first hybrid search)` : "not present";
     }),
   );
+
+  // The recall index (memories, docs, past errors): a fill still pending is why recall is quiet.
+  // Not a failure: it completes on its own (server, quiet hooks) or with `eminiar reindex`.
+  if (opts.db) {
+    const filling = recallIndexFilling(opts.db);
+    checks.push({
+      name: "recall index",
+      ok: true,
+      detail: filling ? recallFillingText(filling.after) : "complete",
+    });
+  }
 
   // The adjudicator (opt-in): config, effective provider, key file, consent, health. No network.
   try {

@@ -110,6 +110,9 @@ export interface VocabTerm {
   df: number;
 }
 
+/** The sources the recall index holds: memories, documentation pages and captured tool errors. */
+export type RecallSource = "memory" | "docs" | "error";
+
 export type PurgeScope =
   | "index"
   | "sessions"

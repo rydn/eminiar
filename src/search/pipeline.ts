@@ -1,5 +1,5 @@
 import type { StorageAdapter } from "../storage/adapter.js";
-import type { ChunkWithDoc, ContentType, SearchFilters } from "../storage/types.js";
+import type { ChunkWithDoc, ContentType, RecallSource, SearchFilters } from "../storage/types.js";
 import { rrf } from "./fusion.js";
 import { buildMatch, parseQuery } from "./query.js";
 import { rerank, type Scored } from "./rerank.js";
@@ -18,6 +18,12 @@ export interface SearchOptions {
     | ((query: string, k: number, filters?: SearchFilters) => Promise<number[]>)
     | undefined;
   candidates?: number;
+  /**
+   * Search the small recall index (memories, docs pages or captured errors) instead of the whole
+   * chunk index: porter terms only, AND then OR, no typo correction, no vectors, `filters`
+   * ignored. For hooks, whose cost must not grow with everything ever captured.
+   */
+  recall?: RecallSource | undefined;
 }
 
 export interface SearchHit {
@@ -44,25 +50,47 @@ function lexical(
   phrases: string[],
   filters: SearchFilters | undefined,
   n: number,
+  recall?: RecallSource,
 ) {
+  if (recall) {
+    // The recall index: porter only, and the source is a column of the index itself. Terms are
+    // prefix queries, the word-start semantics of the recall gate (sharedTerms), so an
+    // abbreviation (`auth`, `config`, `repo`) still reaches a stemmed word (`authent`); there is
+    // no trigram list on this path to catch it.
+    const prefixed = {
+      terms: terms.map((t) => (t.endsWith("*") ? t : `${t}*`)),
+      phrases,
+    };
+    const ids = runLexical(prefixed, 1, n, (match) => db.recallSearch(recall, match, n));
+    return { porter: ids, trigram: [] as number[] };
+  }
   const parsed = { terms, phrases };
-  const run = (kind: "porter" | "trigram", minLen: number) => {
-    const ids: number[] = [];
-    const seen = new Set<number>();
-    for (const mode of ["and", "or"] as const) {
-      const match = buildMatch(parsed, mode, minLen);
-      if (!match) break;
-      for (const h of db.ftsSearch(kind, match, n, filters)) {
-        if (!seen.has(h.chunkId)) {
-          seen.add(h.chunkId);
-          ids.push(h.chunkId);
-        }
-      }
-      if (ids.length >= n) break;
-    }
-    return ids;
-  };
+  const run = (kind: "porter" | "trigram", minLen: number) =>
+    runLexical(parsed, minLen, n, (match) => db.ftsSearch(kind, match, n, filters));
   return { porter: run("porter", 1), trigram: run("trigram", 3) };
+}
+
+/** AND first, then OR to fill, through one query function. */
+function runLexical(
+  parsed: { terms: string[]; phrases: string[] },
+  minLen: number,
+  n: number,
+  query: (match: string) => Array<{ chunkId: number }>,
+): number[] {
+  const ids: number[] = [];
+  const seen = new Set<number>();
+  for (const mode of ["and", "or"] as const) {
+    const match = buildMatch(parsed, mode, minLen);
+    if (!match) break;
+    for (const h of query(match)) {
+      if (!seen.has(h.chunkId)) {
+        seen.add(h.chunkId);
+        ids.push(h.chunkId);
+      }
+    }
+    if (ids.length >= n) break;
+  }
+  return ids;
 }
 
 export async function search(
@@ -94,10 +122,13 @@ export async function search(
 
   const lists: Array<{ ids: number[]; weight: number }> = [];
   if (mode !== "semantic") {
-    const corrected = correctTerms(db, terms);
-    terms = corrected.terms;
-    corrections = corrected.corrections;
-    const lex = lexical(db, terms, parsed.phrases, opts.filters, n);
+    // Typo correction reads the vocabulary of the whole index: not on the recall path.
+    if (!opts.recall) {
+      const corrected = correctTerms(db, terms);
+      terms = corrected.terms;
+      corrections = corrected.corrections;
+    }
+    const lex = lexical(db, terms, parsed.phrases, opts.filters, n, opts.recall);
     if (lex.porter.length) {
       lists.push({ ids: lex.porter, weight: WEIGHTS.porter });
       used.push("porter");
@@ -107,7 +138,7 @@ export async function search(
       used.push("trigram");
     }
   }
-  if (mode !== "lexical" && opts.vectorSearch) {
+  if (mode !== "lexical" && opts.vectorSearch && !opts.recall) {
     try {
       const ids = await opts.vectorSearch(query, n, opts.filters);
       if (ids.length) {
