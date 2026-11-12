@@ -418,6 +418,24 @@ describe("#272 a private playbook that hides a committed one of the same name", 
     expect(JSON.parse(j.out)).toEqual({ name: "deploy", removed: true, nowActive: COMMITTED() });
   });
 
+  it("the dashboard overview marks a shadowing private playbook and lists tracked files", async () => {
+    shadowed();
+    const r = await playbooksRoute(ctx, {
+      path: "/api/playbooks",
+      method: "GET",
+      query: new URLSearchParams(),
+      body: async () => ({}),
+    });
+    const b = r?.body as {
+      tracked: string[];
+      playbooks: Array<{ name: string; private: boolean; hides: string | null }>;
+    };
+    expect(b.tracked).toEqual([]);
+    expect(b.playbooks).toEqual([
+      expect.objectContaining({ name: "deploy", private: true, hides: COMMITTED() }),
+    ]);
+  });
+
   it("the dashboard delete response says so", async () => {
     shadowed();
     const r = await playbooksRoute(ctx, {
