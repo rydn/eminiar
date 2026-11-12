@@ -186,10 +186,16 @@ const SECRET_HINT =
   /key|token|secret|pass|pw|cred|auth|pat|cookie|otp|bearer|session|sessid|log[io]n/i;
 /** A login name is not a secret, but `login: alice:pw` holds a password after the user. */
 const LOGIN_NAME = /log[io]n$/i;
-/** A user:password pair: the user starts with a letter (`10:30` is a time), no `@` (a host). */
-const USER_PASS = /^([A-Za-z][^\s:@]{0,128}):(?!\*\*\*$)[^\s]+$/;
+/**
+ * A user:password pair: the user starts with a letter (`10:30` is a time), no `@` (a host), and
+ * what follows the colon is neither `//` (a URL: `https://…`, `ssh://deploy@host`) nor a port
+ * (`localhost:3000`, `localhost:8080/admin`).
+ */
+const USER_PASS = /^([A-Za-z][^\s:@]{0,128}):(?!\*\*\*$)(?!\/\/)(?!\d{1,5}(?:[/?#]|$))[^\s]+$/;
 /** Checked before reading a login's value, so a long run of non-pairs is never read twice. */
 const USER_PASS_AT = /\\{0,8}["'`]?[A-Za-z][^\s:@"'`\\]{0,128}:/y;
+/** The furthest the colon of USER_PASS_AT can be from where it starts: 8 + 1 + 1 + 128. */
+const USER_PASS_AT_REACH = 138;
 const COOKIE_NAME = /cookies?$/i;
 /** `token: Basic <credentials>`: the scheme stays, the credentials go (as for Authorization:). */
 const SCHEME_VALUE =
@@ -199,13 +205,23 @@ function maskAssignments(text: string, keep?: KeepValue): string {
   ASSIGN_NAME.lastIndex = 0;
   let out = "";
   let last = 0;
+  // the next `:` at or after a login's value (kept across names, so finding it stays linear): a
+  // login with no colon within reach is skipped without reading up to 128 chars at every name
+  let colon = -1;
   for (let m = ASSIGN_NAME.exec(text); m; m = ASSIGN_NAME.exec(text)) {
     const name = m[1] as string;
     if (!SECRET_HINT.test(name)) continue;
-    const secret = isSecretName(name);
-    if (!secret && !LOGIN_NAME.test(name)) continue;
+    // (no name that ends in login/logon is a secret name, so isSecretName is not asked)
+    const login = LOGIN_NAME.test(name);
+    const secret = !login && isSecretName(name);
+    if (!secret && !login) continue;
     const start = m.index + m[0].length;
     if (!secret) {
+      if (colon < start) {
+        colon = text.indexOf(":", start);
+        if (colon < 0) colon = Number.POSITIVE_INFINITY;
+      }
+      if (colon - start > USER_PASS_AT_REACH) continue;
       USER_PASS_AT.lastIndex = start;
       if (!USER_PASS_AT.test(text)) continue;
     }
@@ -329,10 +345,76 @@ const PRIVATE_KEY_TO_END = new RegExp(
   "g",
 );
 
-const MYSQL_P_BEFORE: Rule = [
-  /(?<!\S)-p(?![\s*-])(["']?)[^\s"']{1,256}\1(?=[^\n;&|]{0,300}?(?<!\S)(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)(?!\S))/g,
-  "-p$1***$1",
-];
+/**
+ * mysql / mariadb -p<password> written before the client word (`-pS3cret mysql`, "use -pS3cret
+ * with mariadb"). The client word must be a word of its own on the same command (the segment
+ * stops at ; & | and the line end), at most 300 chars after the -p, and the -p must not belong to
+ * another command of that segment (`docker run -p3306:3306 mysql`, `ssh -p2222 host mysql`). The
+ * value must look like a password, not a port, a pid, an address, a variable or a flag cluster
+ * (`cp -pr`, `tar -pxzf`, `rsync -pa`).
+ *
+ * Linear: the segment regex starts only at a segment's start, and each segment that holds a client
+ * word is tokenised once (the -p words and the client words, in order).
+ */
+const MYSQL_CLIENT = "(?:mysql|mysqldump|mysqladmin|mysqlsh|mariadb|mariadb-dump)";
+const MYSQL_SEGMENT = new RegExp(
+  `(?<![^\\n;&|])[^\\n;&|]*?(?<!\\S)${MYSQL_CLIENT}(?!\\S)[^\\n;&|]*`,
+  "g",
+);
+const MYSQL_SEGMENT_TOKENS = new RegExp(
+  `(?<!\\S)-p(?![\\s*-])(?=(\\S*))\\1|(?<!\\S)${MYSQL_CLIENT}(?!\\S)`,
+  "g",
+);
+/** Commands whose own attached -p is not a password (a port, a pid, a flag, a prompt). */
+const OTHER_P_COMMAND =
+  /(?<![^\s/])(?:docker|podman|nerdctl|kubectl|ssh|autossh|scp|sftp|cp|mv|install|mkdir|tar|rsync|lsof|kill|pkill|pgrep|ps|nc|ncat|netcat|socat|telnet|nmap|ping|perl|ruby|python3?|java|xargs|sudo)(?!\S)/;
+/** A -p value that is a port, pid or address (`3306:3306`, `127.0.0.1:3306:3306/tcp`, `1234`). */
+const PORT_LIKE = /^[\d.:]+(?:\/(?:tcp|udp|sctp))?$/i;
+
+function passwordLike(value: string): boolean {
+  if (value.length < 4 || PORT_LIKE.test(value) || value.startsWith("$")) return false;
+  // a digit, a symbol, mixed case, or a long word (a flag cluster is short and lower case)
+  return /[\d\W_]/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value)) || value.length >= 8;
+}
+
+function maskMysqlPBefore(segment: string): string {
+  if (!segment.includes("-p")) return segment;
+  // where another command that takes its own -p starts (computed once, only when needed)
+  let other: number | undefined;
+  const pending: Array<{ at: number; end: number; quote: string }> = [];
+  const hits: Array<{ at: number; end: number; quote: string }> = [];
+  MYSQL_SEGMENT_TOKENS.lastIndex = 0;
+  for (let m = MYSQL_SEGMENT_TOKENS.exec(segment); m; m = MYSQL_SEGMENT_TOKENS.exec(segment)) {
+    const word = m[1];
+    if (word === undefined) {
+      // a client word: the -p words within 300 chars before it are its
+      for (const p of pending) if (m.index - p.end <= 300) hits.push(p);
+      pending.length = 0;
+      continue;
+    }
+    let quote = "";
+    let value = word;
+    if (/^["']/.test(word)) {
+      quote = word[0] as string;
+      if (word.length < 3 || !word.endsWith(quote)) continue;
+      value = word.slice(1, -1);
+    }
+    if (/["']/.test(value) || !passwordLike(value)) continue;
+    other ??= segment.search(OTHER_P_COMMAND);
+    if (other >= 0 && other < m.index) continue;
+    pending.push({ at: m.index, end: m.index + m[0].length, quote });
+  }
+  if (hits.length === 0) return segment;
+  let out = "";
+  let last = 0;
+  for (const h of hits) {
+    out += `${segment.slice(last, h.at)}-p${h.quote}***${h.quote}`;
+    last = h.end;
+  }
+  return out + segment.slice(last);
+}
+
+const MYSQL_P_BEFORE: Rule = [MYSQL_SEGMENT, maskMysqlPBefore];
 
 /** Ordered: the specific shapes first, the generic runs last. */
 const RULES: Rule[] = [
@@ -600,17 +682,20 @@ export function redactSecrets(text: string): string {
  * redactSecrets for text a person typed and eminiar keeps or shares (a playbook's prompt, title
  * and header): the rules also run on the cleaned text (as forRemote does), so a fullwidth
  * `ＧＨＰ＿…` or a `ghp\u200b_…` is caught. Only when that finds a secret the plain pass missed is
- * the cleaned, masked text returned; otherwise every character stays as written. Idempotent and
- * linear (at most three passes, and none extra for ASCII text).
+ * the cleaned, masked text returned; otherwise every character stays as written. The cleaned
+ * pass runs over the plain pass's output, so it never masks less: NFKC turns a fullwidth quote
+ * (＂ ＇ ｀) or separator inside a value into one that would end the value early, and a pass over
+ * the raw text would leave the rest of the value. Idempotent and linear (at most three passes,
+ * and none extra for ASCII text).
  */
 export function redactSecretsClean(text: string): string {
   const out = redactSecrets(text);
   // biome-ignore lint/suspicious/noControlCharactersInRegex: the ASCII range is the point
   if (!/[^\x00-\x7f]/.test(text)) return out;
-  const cleaned = clean(text);
-  if (cleaned === text) return out;
-  const masked = applyRules(maskYamlBlocks(cleaned), STORED_RULES, keepInOutput);
-  return masked === clean(out) ? out : masked;
+  const cleanedOut = clean(out);
+  if (cleanedOut === out) return out;
+  const masked = applyRules(maskYamlBlocks(cleanedOut), STORED_RULES, keepInOutput);
+  return masked === cleanedOut ? out : masked;
 }
 
 /** The redacted head kept in the DB: at most n chars (code points), with "…" when cut. */

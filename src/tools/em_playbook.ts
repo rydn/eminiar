@@ -1,7 +1,7 @@
 import { z } from "zod";
+import { fenced } from "../playbooks/display.js";
 import { exportMarkdown, exportSkill, schedulePrompt } from "../playbooks/export.js";
 import { scan } from "../playbooks/extract.js";
-import { oneLine } from "../playbooks/frontmatter.js";
 import {
   acceptSuggestion,
   assertCanScan,
@@ -28,10 +28,11 @@ import { PLAYBOOK_RUN_STATUSES, type PlaybookRow } from "../storage/types.js";
 import { defineTool, errorResult, LOCAL_WRITE, text } from "./types.js";
 
 /**
- * Stored text (title, schedule hint) inside eminiar's own sentence: one line, JSON-quoted, so a
- * committed file cannot close the quote and carry on in eminiar's voice.
+ * Stored text (title, schedule hint, tags, parameter defaults) inside eminiar's own sentence:
+ * fenced() makes it one JSON-quoted line, so a committed file cannot close the quote, carry on in
+ * eminiar's voice or show eminiar's own markers ((private), [hides committed …]).
  */
-const quoted = (s: string): string => JSON.stringify(oneLine(s).slice(0, 200));
+const quoted = fenced;
 
 const escapedNote = (n: number): string =>
   n > 0
@@ -42,19 +43,19 @@ function line(r: PlaybookRow): string {
   const tags = rowTags(r);
   const params = rowParams(r).map((p) => p.name);
   const when = new Date(r.updated_at ?? r.created_at).toISOString().slice(0, 10);
-  return `${r.name} — ${oneLine(r.title)}${r.private ? " (private)" : ""}${r.schedule ? ` [${quoted(r.schedule)}]` : ""}${params.length ? ` {${params.join(",")}}` : ""}${tags.length ? ` #${tags.join(",")}` : ""} ${when}`;
+  return `${r.name} — ${quoted(r.title)}${r.private ? " (private)" : ""}${r.schedule ? ` [${quoted(r.schedule)}]` : ""}${params.length ? ` {${params.join(",")}}` : ""}${tags.length ? ` #${tags.map(quoted).join(",")}` : ""} ${when}`;
 }
 
 function paramItems(f: PlaybookFile): string[] {
-  return f.params.map((p) => (p.default === undefined ? p.name : `${p.name}=${p.default}`));
+  return f.params.map((p) => (p.default === undefined ? p.name : `${p.name}=${quoted(p.default)}`));
 }
 
 function describe(f: PlaybookFile): string {
   const head = [
-    `${f.name} — ${oneLine(f.title)}${f.private ? " (private)" : ""} · ${f.path}`,
-    f.schedule ? `schedule: ${oneLine(f.schedule)}` : "",
+    `${f.name} — ${quoted(f.title)}${f.private ? " (private)" : ""} · ${f.path}`,
+    f.schedule ? `schedule: ${quoted(f.schedule)}` : "",
     f.params.length ? `params: ${paramItems(f).join(", ")}` : "",
-    f.tags.length ? `tags: ${f.tags.join(", ")}` : "",
+    f.tags.length ? `tags: ${f.tags.map(quoted).join(", ")}` : "",
   ].filter(Boolean);
   return `${head.join("\n")}\n\n${f.prompt}`;
 }

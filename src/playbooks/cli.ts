@@ -3,12 +3,14 @@ import { parseArgs } from "node:util";
 import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { PlaybookParam } from "../storage/types.js";
+import { fenced, visibleControls } from "./display.js";
 import { exportMarkdown, exportSkill, schedulePrompt } from "./export.js";
 import { scan } from "./extract.js";
 import {
   assertCanScan,
   closeRun,
   fillPrompt,
+  isValidName,
   list,
   nowActiveNote,
   PlaybookGateError,
@@ -33,12 +35,31 @@ import {
 export interface CliIO {
   out: (s: string) => void;
   err: (s: string) => void;
+  /** stdout is a terminal: a prompt's control characters are shown, not acted on. */
+  isTTY?: boolean | undefined;
 }
 
 const defaultIO: CliIO = {
   out: (s) => console.log(s),
   err: (s) => console.error(s),
+  get isTTY() {
+    return !!process.stdout.isTTY;
+  },
 };
+
+/** A prompt for stdout: shown with visible escapes on a terminal, byte-exact when piped. */
+function promptForTerminal(prompt: string, io: CliIO): string {
+  if (!io.isTTY) return prompt;
+  const v = visibleControls(prompt);
+  if (v.count > 0)
+    io.err(
+      `note: the prompt holds ${v.count} control or bidi character${v.count === 1 ? "" : "s"} a terminal would act on (escape codes, a lone carriage return); stdout shows them as \\u escapes. The stored prompt, piped output and em_playbook run keep them as they are.`,
+    );
+  return v.text;
+}
+
+/** A playbook name is a slug (checked when stored); anything else is fenced. */
+const shownName = (name: string): string => (isValidName(name) ? name : fenced(name));
 
 export const PLAYBOOK_USAGE =
   "usage: eminiar playbook <list [--tag t] [--limit N] | show <name> | add <name> --title T (--prompt P | --file F | stdin) [--param n[=default]] [--schedule S] [--tag t] [--private] [--replace] | edit <name> [--title T] [--prompt P | --file F] [--param n[=default]] [--schedule S] [--tag t] | rm <name> | run <name> [--set k=v] [--note N] | report <name> --status done|failed|skipped [--run ID] [--note N] | runs [name] [--limit N] | export <name> [--skill [--target DIR | --user] [--model-invocable] [--allow-private]] [--schedule] [--set k=v] | scan [--dry-run]> [--json]";
@@ -203,12 +224,13 @@ export async function playbookCommand(
           return 0;
         }
         for (const r of rows) {
-          const bits = [r.schedule, rowTags(r).join(","), r.private ? "private" : ""].filter(
-            Boolean,
-          );
+          const bits = [
+            r.schedule ? fenced(r.schedule) : "",
+            rowTags(r).map(fenced).join(","),
+          ].filter(Boolean);
           const hides = hidesOf(r).hides;
           io.out(
-            `${r.name}  ${r.title}${bits.length ? `  [${bits.join(" | ")}]` : ""}${hides ? `  [hides committed ${hides}]` : ""}`,
+            `${shownName(r.name)}  ${fenced(r.title)}${r.private ? "  (private)" : ""}${bits.length ? `  [${bits.join(" | ")}]` : ""}${hides ? `  [hides committed ${hides}]` : ""}`,
           );
         }
         return 0;
@@ -231,21 +253,21 @@ export async function playbookCommand(
         io.out(
           [
             [
-              `${f.name}: ${f.title}`,
+              `${shownName(f.name)}: ${fenced(f.title)}`,
               `path: ${f.path}${f.private ? " (private)" : ""}  source: ${f.source}`,
               hides
                 ? `hides committed ${hides} (that file has the same name and is ignored while this private one exists)`
                 : "",
-              f.schedule ? `schedule: ${f.schedule} (a note; eminiar does not run it)` : "",
-              f.tags.length ? `tags: ${f.tags.join(", ")}` : "",
+              f.schedule ? `schedule: ${fenced(f.schedule)} (a note; eminiar does not run it)` : "",
+              f.tags.length ? `tags: ${f.tags.map(fenced).join(", ")}` : "",
               f.params.length
-                ? `params: ${f.params.map((p) => (p.default !== undefined ? `${p.name}=${p.default}` : p.name)).join(", ")}`
+                ? `params: ${f.params.map((p) => (p.default !== undefined ? `${p.name}=${fenced(p.default)}` : p.name)).join(", ")}`
                 : "",
             ]
               .filter(Boolean)
               .join("\n"),
             "",
-            f.prompt,
+            promptForTerminal(f.prompt, io),
           ].join("\n"),
         );
         return 0;
@@ -330,7 +352,8 @@ export async function playbookCommand(
         const hides = hidesOf(f).hides;
         if (json) emit({ name: f.name, run, prompt: filled, unfilled: missing, ...hidesOf(f) });
         else {
-          io.out(filled);
+          // escaped only on a terminal: piped, the prompt is byte-exact
+          io.out(promptForTerminal(filled, io));
           // on stderr, so the prompt on stdout can still be piped as it is
           if (hides)
             io.err(

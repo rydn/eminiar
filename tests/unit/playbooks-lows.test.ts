@@ -267,7 +267,7 @@ describe("L7 playbook show has no stray blank lines", () => {
     write(ctx, db, { name: "plain", title: "Plain", prompt: "do the thing" });
     const r = await cli(["show", "plain"]);
     expect(r.out.split("\n")).toEqual([
-      "plain: Plain",
+      'plain: "Plain"',
       expect.stringMatching(/^path: .*plain\.md {2}source: manual$/),
       "",
       "do the thing",

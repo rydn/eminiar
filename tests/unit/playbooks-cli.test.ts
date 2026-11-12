@@ -108,12 +108,12 @@ describe("eminiar playbook", () => {
     expect(add.code).toBe(0);
     expect(add.out).toContain("added pr-review");
     expect((await run(["list"])).out).toContain(
-      "pr-review  Review PRs  [every weekday 9am | daily]",
+      'pr-review  "Review PRs"  ["every weekday 9am" | "daily"]',
     );
     const listed = JSON.parse((await run(["list", "--json"])).out);
     expect(listed[0]).toMatchObject({ name: "pr-review", tags: ["daily"] });
     const show = await run(["show", "pr-review"]);
-    expect(show.out).toContain("params: repo, channel=#eng");
+    expect(show.out).toContain('params: repo, channel="#eng"');
     expect(show.out).toContain("Review PRs in {{repo}}");
     expect((await run(["rm", "pr-review"])).code).toBe(0);
     expect((await run(["show", "pr-review"])).code).toBe(1);
