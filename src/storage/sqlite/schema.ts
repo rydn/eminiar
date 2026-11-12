@@ -8,6 +8,13 @@ import type Database from "better-sqlite3";
  *
  * Never edit a shipped migration in place: databases that already ran it will not see
  * the change. Add a new version instead.
+ *
+ * Versions are unique and strictly increasing (tests/unit/schema-migrations.test.ts). Only
+ * versions above schema_version run, so when two branches pick the same number, whichever
+ * lands later takes the next free version and keeps its DDL IF NOT EXISTS; a heal at open
+ * (healPlaybookTables) covers databases that already ran the other branch's number.
+ * tests/unit/schema-migrations.test.ts also refuses a version in RESERVED_SCHEMA_VERSIONS or
+ * below the highest released one.
  */
 export interface Migration {
   version: number;
@@ -20,6 +27,67 @@ export function hasColumn(db: Database.Database, table: string, column: string):
   const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
   return cols.some((c) => c.name === column);
 }
+
+/**
+ * The playbook tables and indexes (src/playbooks). Shared by migration 11 and
+ * healPlaybookTables, so every statement must stay IF NOT EXISTS.
+ */
+const PLAYBOOKS_SQL = `
+CREATE TABLE IF NOT EXISTS playbooks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  params TEXT,
+  schedule TEXT,
+  tags TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  private INTEGER NOT NULL DEFAULT 0,
+  path TEXT,
+  file_hash TEXT,
+  file_mtime INTEGER,
+  file_size INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS playbooks_updated ON playbooks(updated_at);
+CREATE TABLE IF NOT EXISTS playbook_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  playbook TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  trigger TEXT NOT NULL,
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'started',
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS playbook_runs_playbook ON playbook_runs(playbook, ts);
+CREATE TABLE IF NOT EXISTS playbook_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  params TEXT,
+  schedule TEXT,
+  tags TEXT,
+  evidence TEXT,
+  session_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  fingerprint TEXT NOT NULL UNIQUE,
+  playbook TEXT
+);
+CREATE INDEX IF NOT EXISTS playbook_suggestions_status ON playbook_suggestions(status, ts);
+`;
+
+/** Every table and index PLAYBOOKS_SQL creates. */
+export const PLAYBOOK_OBJECTS = [
+  "playbooks",
+  "playbooks_updated",
+  "playbook_runs",
+  "playbook_runs_playbook",
+  "playbook_suggestions",
+  "playbook_suggestions_status",
+] as const;
 
 export const migrations: Migration[] = [
   {
@@ -630,6 +698,15 @@ CREATE INDEX IF NOT EXISTS adjudicator_exchanges_ts ON adjudicator_exchanges(ts)
 `,
   },
   {
+    // Playbooks (src/playbooks): stored recurring tasks. `playbooks` mirrors the markdown files
+    // like `memories`; runs and suggestions are activity. Nothing here executes a playbook.
+    // Version 11, not 10: feature/jev-integrations already shipped v10 (decision_calls) to
+    // development databases, and the runner only applies versions above schema_version.
+    // healPlaybookTables covers any database that reached 11 or later without these tables.
+    version: 11,
+    sql: PLAYBOOKS_SQL,
+  },
+  {
     // v12: the recall index (see RECALL_INDEX_SQL). Not v10: a development build of the
     // adjudicator line already took 10 (decision_calls, decision_cache) on real databases, and the
     // playbooks migration takes 11. The table and its triggers only: a hook may be the first to
@@ -644,6 +721,19 @@ CREATE INDEX IF NOT EXISTS adjudicator_exchanges_ts ON adjudicator_exchanges(ts)
     },
   },
 ];
+
+/**
+ * Migration numbers that no entry in `migrations` may use, ever.
+ *
+ * 10: feature/jev-integrations' v10 (decision_calls, decision_cache) ran on development
+ * databases, and the playbooks migration took v11 instead. Every database that took v11 first
+ * is at schema_version 11, and the runner only applies versions above it, so a v10 entry
+ * added later would be skipped there without an error. Jev lands as the next free version
+ * (its DDL is IF NOT EXISTS, so its own databases at 10 rerun it harmlessly).
+ *
+ * tests/unit/schema-migrations.test.ts fails on a migration numbered here.
+ */
+export const RESERVED_SCHEMA_VERSIONS: readonly number[] = [10];
 
 /**
  * The documents whose chunks the recall index holds, as a condition on `d` (documents), and the
@@ -880,6 +970,56 @@ export function healAdjudicatorColumns(db: Database.Database): string[] {
     added.push(index);
   }
   return added;
+}
+
+/** Longest wait for the write lock in healPlaybookTables, in ms. */
+export const HEAL_LOCK_WAIT_MS = 25;
+
+const PLAYBOOK_OBJECTS_SQL = `SELECT count(*) AS n FROM sqlite_master WHERE type IN ('table','index') AND name IN (${PLAYBOOK_OBJECTS.map((n) => `'${n}'`).join(",")})`;
+
+/**
+ * Creates the playbook tables and indexes when any is missing, whatever schema_version says.
+ * Two branches claimed migration v10 (playbooks and feature/jev-integrations' decision_calls),
+ * and the runner only applies versions above the stored one, so a database can sit at v10 or
+ * later without these tables. Costs one sqlite_master count when they exist; returns true when
+ * it created something.
+ *
+ * The DDL runs in one BEGIN IMMEDIATE that waits at most `lockWaitMs` (HEAL_LOCK_WAIT_MS) for
+ * the write lock, not the connection's busy timeout: when another process holds the lock, the
+ * heal returns false at once and the next open retries, so an open never stalls on it.
+ */
+export function healPlaybookTables(
+  db: Database.Database,
+  lockWaitMs: number = HEAL_LOCK_WAIT_MS,
+): boolean {
+  const row = db.prepare(PLAYBOOK_OBJECTS_SQL).get() as { n: number };
+  if (row.n === PLAYBOOK_OBJECTS.length) return false;
+  if (db.inTransaction) {
+    db.exec(PLAYBOOKS_SQL);
+    return true;
+  }
+  const prev = Number(db.pragma("busy_timeout", { simple: true }));
+  const next = Math.max(0, Math.min(Number.isFinite(prev) ? prev : 0, Math.floor(lockWaitMs)));
+  if (next !== prev) db.pragma(`busy_timeout = ${next}`);
+  try {
+    db.transaction(() => db.exec(PLAYBOOKS_SQL)).immediate();
+    return true;
+  } catch (e) {
+    if (String((e as { code?: unknown }).code ?? "").startsWith("SQLITE_BUSY")) return false;
+    throw e;
+  } finally {
+    if (next !== prev) db.pragma(`busy_timeout = ${prev}`);
+  }
+}
+
+/** True when every named table exists. */
+export function tablesExist(db: Database.Database, names: readonly string[]): boolean {
+  const row = db
+    .prepare(
+      `SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN (${names.map(() => "?").join(",")})`,
+    )
+    .get(...names) as { n: number };
+  return row.n === names.length;
 }
 
 /** vec0 lives outside the migration list: it needs the extension loaded first and takes the dimension. */

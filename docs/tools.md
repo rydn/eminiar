@@ -2,7 +2,7 @@
 
 [← Docs index](README.md)
 
-eminiar adds 24 MCP tools, plus `em_adjudicate` while the opt-in adjudicator is on. In Claude
+eminiar adds 25 MCP tools, plus `em_adjudicate` while the opt-in adjudicator is on. In Claude
 Code their full names are `mcp__plugin_eminiar_eminiar__em_*`. This page uses the short names.
 
 You do not normally call these tools yourself. Claude calls them, and the hooks remind Claude to
@@ -10,7 +10,7 @@ use them. This page helps you understand what Claude does and what to ask for.
 
 **Contents:** [Run code](#run-code) · [Search and fetch](#search-and-fetch) ·
 [Memory](#memory) · [Documentation](#documentation) · [Code graph](#code-graph) ·
-[History](#history) · [Agent swarms](#agent-swarms) · [Adjudicator](#adjudicator) ·
+[History](#history) · [Agent swarms](#agent-swarms) · [Playbooks](#playbooks) · [Adjudicator](#adjudicator) ·
 [Housekeeping](#housekeeping) · [Slash commands](#slash-commands)
 
 Every tool carries MCP behaviour annotations (`readOnlyHint`, `destructiveHint`,
@@ -18,7 +18,8 @@ Every tool carries MCP behaviour annotations (`readOnlyHint`, `destructiveHint`,
 architecture and the other graph and history readers are read-only. A tool with both read and
 write actions counts as not read-only. A tool is marked destructive when any of its actions
 deletes, removes, replaces, purges, syncs or forces: `em_purge`, the code runners (`em_execute`,
-`em_batch_execute`, `em_execute_file`), `em_memory`, `em_swarm`, `em_docs` and `em_remember`.
+`em_batch_execute`, `em_execute_file`), `em_memory`, `em_swarm`, `em_docs`, `em_remember`,
+`em_graph_add` and `em_playbook`.
 
 ## Run code
 
@@ -174,6 +175,34 @@ that are not swarm workers can only `list`, `status`, `read` and `post`. See
 With the adjudicator on and `adjudicator.surfaces.plan` set, `plan` also appends a suggested
 agent, model and effort for each new task. See [Adjudicator](adjudicator.md#swarm-plans).
 
+## Playbooks
+
+A playbook is a stored recurring task: a prompt with optional `{{params}}` and a schedule hint,
+kept as a markdown file. eminiar stores and lists them and hands the prompt to Claude. It does not
+run or schedule anything. Playbooks are not Claude Code Skills; `export` can write one as a skill.
+
+| Tool | Parameters | Use for |
+|---|---|---|
+| `em_playbook` | `action`, `name`, `title`, `prompt`, `params`, `schedule`, `tags`, `private`, `values`, `status`, `note`, `run_id`, `tag`, `id`, `dry_run`, `confirm`, `format`, `target`, `side_effecting` | Keep, run and export recurring tasks |
+
+| `action` | What it does |
+|---|---|
+| `list`, `read` | Playbooks (`list` takes `tag`), or one in full |
+| `add`, `edit` | Store a playbook (`add` needs `title` and `prompt` and derives `name` from the title; `private: true` keeps it in the git-ignored folder). `edit` changes only the fields you pass |
+| `delete` | Remove a playbook. Needs `confirm: true` |
+| `run` | Returns the prompt with `values` filled in, and records a run as started (with `playbooks.adding` off it records nothing). Claude carries the task out |
+| `report` | Closes a run: `status` is `done`, `failed` or `skipped`, with a `note`. `run_id` defaults to the newest run that `em_playbook` `run` started and nobody closed; a CLI or dashboard run needs its `run_id` |
+| `schedule` | Returns an instruction to turn the playbook's schedule hint into a `/loop` or cron job. Errors when the playbook has no schedule |
+| `export` | `format`: `markdown` (default, returns the file), `skill` (writes `<target>/<name>/SKILL.md`, default `.claude/skills`; `side_effecting` defaults to true and adds `disable-model-invocation`, so only you start it) or `schedule` (text to paste into a Desktop or cloud scheduled task) |
+| `scan`, `suggestions`, `accept`, `dismiss` | Opt-in extraction: `scan` mines your session history for recurring tasks (`dry_run` stores nothing), `suggestions` lists the pending ones, `accept` (`id`, optionally `name`, `title`, `prompt`, `private`) turns one into a playbook, `dismiss` rejects it, so `scan` does not propose it again until `em_purge` `sessions` forgets it. All need `playbooks.extraction.enabled` |
+
+Secrets are masked in everything stored: titles, prompts, defaults, schedules and run notes.
+With `playbooks.viewing` off every action is refused and the tool is not listed (run
+`/mcp reconnect` after changing it). With `playbooks.adding` off every write is refused: `add`,
+`edit`, `delete`, `report`, `accept`, `dismiss`, `scan` without `dry_run` and `export` with
+`format` `skill` (it writes a file; `markdown` and `schedule` still work). The error names the
+key. See [Configuration](configuration.md#playbooks).
+
 ## Adjudicator
 
 | Tool | Parameters | Use for |
@@ -203,7 +232,7 @@ em_adjudicate {action: "feedback", id: 42, outcome: "too_small", note: "needed o
 | `em_usage` | Tokens, cache, cost and insights per model call from the local transcripts. `view`: `summary`, `daily`, `weekly`, `monthly`, `models`, `sessions`, `blocks`, `turns`, `tools`, `insights`, `savings`; `scope`: `project` or `session`; `since`: `30d` or an ISO date; `json`. See [Usage insights](usage.md) |
 | `em_doctor` | Installation health |
 | `em_reindex` | Rebuild part of the index: `code`, `git`, `metrics`, `docs`, `memories`, `embeddings` or `all`. Incremental unless `full: true` |
-| `em_purge` | Permanently delete project data: `index`, `sessions` (events and the session history `em_recall` searches, snapshots, stats), `graph`, `memories` (the database mirror only), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests) or `all`. Needs `confirm: true` |
+| `em_purge` | Permanently delete project data: `index`, `sessions` (events and the session history `em_recall` searches, snapshots, stats, playbook runs and suggestions; dismissed suggestions are forgotten, so a later `scan` can propose them again), `graph`, `memories` (the database mirror only, playbooks' too; the memory and playbook files stay and are re-imported), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests) or `all`. Needs `confirm: true` |
 
 ## Slash commands
 

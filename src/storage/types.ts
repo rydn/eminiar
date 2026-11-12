@@ -770,3 +770,172 @@ export interface AdjudicatorStore {
   /** Clears all five adjudicator tables (the exchange log included). */
   purge(): void;
 }
+
+// --- playbooks (src/playbooks) ---------------------------------------------------------
+// A playbook is a stored recurring task: a name, a prompt, optional parameters and a schedule
+// hint. eminiar only stores them; nothing here runs or schedules anything. The markdown file
+// under `playbooks.dir` (or `playbooks.privateDir`) is the source of truth and `playbooks`
+// rows mirror it, like memories.
+
+export const PLAYBOOK_SOURCES = ["manual", "suggested"] as const;
+export type PlaybookSource = (typeof PLAYBOOK_SOURCES)[number];
+
+/** Who recorded a run: the MCP tool, the dashboard or the CLI. */
+export const PLAYBOOK_TRIGGERS = ["mcp", "ui", "cli"] as const;
+export type PlaybookTrigger = (typeof PLAYBOOK_TRIGGERS)[number];
+
+export const PLAYBOOK_RUN_STATUSES = ["started", "done", "failed", "skipped"] as const;
+export type PlaybookRunStatus = (typeof PLAYBOOK_RUN_STATUSES)[number];
+
+export const PLAYBOOK_SUGGESTION_STATUSES = ["pending", "accepted", "dismissed"] as const;
+export type PlaybookSuggestionStatus = (typeof PLAYBOOK_SUGGESTION_STATUSES)[number];
+
+/** A parameter a playbook's prompt takes: `{{name}}` in the prompt, optionally with a default. */
+export interface PlaybookParam {
+  name: string;
+  default?: string | undefined;
+}
+
+export interface PlaybookRow {
+  id: number;
+  name: string;
+  title: string;
+  prompt: string;
+  /** JSON array of PlaybookParam. */
+  params: string | null;
+  /** Free-text hint ("every weekday 9am"); metadata only, never executed. */
+  schedule: string | null;
+  /** JSON array of strings. */
+  tags: string | null;
+  source: string;
+  private: number;
+  /** Project-relative path of the markdown file. */
+  path: string | null;
+  file_hash: string | null;
+  file_mtime: number | null;
+  file_size: number | null;
+  created_at: number;
+  updated_at: number | null;
+}
+
+export interface PlaybookInput {
+  name: string;
+  title: string;
+  prompt: string;
+  params?: PlaybookParam[] | undefined;
+  schedule?: string | undefined;
+  tags?: string[] | undefined;
+  source?: PlaybookSource | undefined;
+  private?: boolean | undefined;
+  path?: string | undefined;
+  fileHash?: string | undefined;
+  fileMtime?: number | undefined;
+  fileSize?: number | undefined;
+  createdAt?: number | undefined;
+  updatedAt?: number | undefined;
+}
+
+export interface PlaybookRunInput {
+  playbook: string;
+  trigger: PlaybookTrigger;
+  status?: PlaybookRunStatus | undefined;
+  sessionId?: string | undefined;
+  note?: string | undefined;
+  ts?: number | undefined;
+}
+
+export interface PlaybookRunRow {
+  id: number;
+  playbook: string;
+  ts: number;
+  trigger: string;
+  session_id: string | null;
+  status: string;
+  note: string | null;
+}
+
+export interface PlaybookSuggestionInput {
+  name: string;
+  title: string;
+  prompt: string;
+  params?: PlaybookParam[] | undefined;
+  schedule?: string | undefined;
+  tags?: string[] | undefined;
+  /** Why it was suggested: the recurring pattern seen (already masked by the caller). */
+  evidence?: string | undefined;
+  sessionId?: string | undefined;
+  ts?: number | undefined;
+}
+
+export interface PlaybookSuggestionRow {
+  id: number;
+  ts: number;
+  name: string;
+  title: string;
+  prompt: string;
+  params: string | null;
+  schedule: string | null;
+  tags: string | null;
+  evidence: string | null;
+  session_id: string | null;
+  status: string;
+  /** Hash of the normalised prompt: one suggestion per task however often it is seen. */
+  fingerprint: string;
+  /** The playbook an accepted suggestion became. */
+  playbook: string | null;
+}
+
+/** Persistence of playbooks, their runs and suggestions; synchronous like the other stores. */
+export interface PlaybookStore {
+  /** Insert or update the row mirroring a playbook file; returns its id. */
+  upsert(p: PlaybookInput): number;
+  get(name: string): PlaybookRow | undefined;
+  /** Most recently updated first. */
+  list(opts?: {
+    tag?: string | undefined;
+    source?: string | undefined;
+    /** false hides private playbooks (default true). */
+    includePrivate?: boolean | undefined;
+    limit?: number | undefined;
+  }): PlaybookRow[];
+  delete(name: string): void;
+  count(): number;
+
+  runAdd(r: PlaybookRunInput): number;
+  /**
+   * Close a started run: set its status and note (a null note keeps the existing one). Returns
+   * false when there is no such run or it is not `started` any more; a closed run never changes.
+   */
+  runSetStatus(id: number, status: PlaybookRunStatus, note?: string | null | undefined): boolean;
+  /** One run by id, however old; undefined when there is none. */
+  getRun(id: number): PlaybookRunRow | undefined;
+  /** Newest first. */
+  runs(opts?: { playbook?: string | undefined; limit?: number | undefined }): PlaybookRunRow[];
+  /** Number of runs and the newest run's timestamp per playbook name. */
+  runStats(): Map<string, { runs: number; lastTs: number }>;
+
+  /** `created` is false when a suggestion with the same fingerprint already exists (any status). */
+  suggestionAdd(s: PlaybookSuggestionInput): { id: number; created: boolean };
+  suggestionGet(id: number): PlaybookSuggestionRow | undefined;
+  /** Newest first. */
+  suggestions(opts?: {
+    status?: PlaybookSuggestionStatus | undefined;
+    limit?: number | undefined;
+  }): PlaybookSuggestionRow[];
+  /** Returns false when no row has that id. */
+  suggestionSetStatus(
+    id: number,
+    status: PlaybookSuggestionStatus,
+    playbook?: string | undefined,
+  ): boolean;
+  /**
+   * Undo an accept claim: an `accepted` suggestion whose playbook is `playbook` goes back to
+   * pending. Returns false when the row is not in that state (another caller owns it now).
+   */
+  suggestionRelease(id: number, playbook: string): boolean;
+
+  /** Drops the rows mirroring files (the files stay). */
+  purgeMirror(): void;
+  /** Drops runs and suggestions. */
+  purgeActivity(): void;
+}

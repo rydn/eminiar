@@ -370,6 +370,8 @@ adapter can be added later for a shared team knowledge base. The global database
 | `~/.eminiar/plugin/` | The stable plugin copy |
 | `<project>/.eminiar/memories/` | Memory files (commit them) |
 | `<project>/.eminiar/docs.json` | Documentation sources manifest (commit it) |
+| `<project>/.eminiar/playbooks/` | Playbook files (commit them) |
+| `<project>/.eminiar/playbooks-private/` | Private playbooks (git-ignored) |
 
 On macOS and Linux, `~/.eminiar` is readable by you alone (mode 0700), and each database with its
 `-wal` and `-shm` files is 0600. An existing `~/.eminiar` is tightened the next time eminiar opens
@@ -399,7 +401,7 @@ can stay in free database pages until SQLite reuses them; `eminiar purge <scope>
 VACUUM.
 
 `em_purge {scope: "sessions"}` deletes the captured events with the session history `em_recall`
-searches; command output belongs to the `index` scope.
+searches, and the playbook runs and suggestions; command output belongs to the `index` scope.
 
 eminiar uses the network only to download the embedding model, to fetch pages and documentation
 that you ask it to index, to read package metadata from the npm, PyPI and Go registries, to

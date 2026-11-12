@@ -50,10 +50,29 @@ const SECRET_WORDS = new Set([
   "auth",
   "authorization",
   "pat",
+  "privkey",
+  "pkey",
+  "cookie",
+  "cookies",
+  "otp",
+  "totp",
+  "hotp",
+  "bearer",
+  "sessionid",
+  "sessid",
+  "authheader",
+  "authorizationheader",
 ]);
-/** A single lowercase word that ends in one of these is secret too (PGPASSWORD, APIKEY). */
+/** Two words that name a secret together (session_id, sessionId, auth_header). */
+const SECRET_PAIRS = new Set(["sessionid", "sessid", "authheader", "authorizationheader"]);
+/**
+ * A single lowercase word that ends in one of these is secret too (PGPASSWORD, APIKEY, DBPASS,
+ * mysqlpwd, rootpw, sshkey). `pass` and `pwd` skip the English words and filter names that end in
+ * them (bypass, compass, lowpass, OLDPWD); `key` needs a known prefix, as most words that end in
+ * `key` are not keys (monkey, whiskey, hockey).
+ */
 const SECRET_WORD_SUFFIX =
-  /(?:password|passwd|passphrase|secret|token|apikey|accesskey|secretkey|privatekey|authkey|signingkey|masterkey)$/;
+  /(?:password|passwd|passphrase|secret|token|(?:api|access|secret|private|priv|auth|signing|sign|master|ssh|gpg|pgp|rsa|dsa|ecdsa|ed25519|hmac|jwt|aes|enc|encryption|crypt|crypto|tls|ssl|client|server|deploy|session|license|pass)key|(?<!by|com|over|under|sur|tres|low|high|band|all|multi|first|second|one|single|double|day|week|season|boarding|bus|store|key)pass|(?<!old)pwd|pw|sessionid|authheader)$/;
 const SECRET_QUALIFIERS = new Set([
   "base",
   "hash",
@@ -71,6 +90,7 @@ const SECRET_QUALIFIERS = new Set([
   "prod",
   "test",
   "data",
+  "seed",
 ]);
 
 /** Exported for tests: is this identifier the name of a secret? */
@@ -82,6 +102,7 @@ export function isSecretName(name: string): boolean {
   for (let i = words.length - 1; i >= 0; i--) {
     const w = words[i] as string;
     if (SECRET_WORDS.has(w) || SECRET_WORD_SUFFIX.test(w)) return true;
+    if (i > 0 && SECRET_PAIRS.has(`${words[i - 1]}${w}`)) return true;
     if (!SECRET_QUALIFIERS.has(w) && !/^v?\d+$/.test(w)) return false;
   }
   return false;
@@ -144,7 +165,7 @@ const ASSIGN_VALUES: Array<{ re: RegExp; closed: boolean }> = [
 function readValue(
   text: string,
   start: number,
-): { length: number; raw: string; masked: string } | undefined {
+): { length: number; raw: string; masked: string; open: string; close: string } | undefined {
   for (const { re, closed } of ASSIGN_VALUES) {
     re.lastIndex = start;
     const v = re.exec(text);
@@ -153,7 +174,7 @@ function readValue(
     const raw = v.groups.value ?? "";
     // an escaped opening quote closes with the same backslashes: `\"` … `\"`
     const close = closed ? open : "";
-    return { length: v[0].length, raw, masked: `${open}***${close}` };
+    return { length: v[0].length, raw, masked: `${open}***${close}`, open, close };
   }
   return undefined;
 }
@@ -161,21 +182,74 @@ function readValue(
 /** A secret name's value that a caller wants left as it is (see keepInOutput). */
 type KeepValue = (name: string, value: string) => boolean;
 
-const SECRET_HINT = /key|token|secret|pass|pw|cred|auth|pat/i;
+const SECRET_HINT =
+  /key|token|secret|pass|pw|cred|auth|pat|cookie|otp|bearer|session|sessid|log[io]n/i;
+/** A login name is not a secret, but `login: alice:pw` holds a password after the user. */
+const LOGIN_NAME = /log[io]n$/i;
+/**
+ * A user:password pair: the user starts with a letter (`10:30` is a time), no `@` (a host), and
+ * what follows the colon is neither `//` (a URL: `https://…`, `ssh://deploy@host`) nor a port
+ * (`localhost:3000`, `localhost:8080/admin`).
+ */
+const USER_PASS = /^([A-Za-z][^\s:@]{0,128}):(?!\*\*\*$)(?!\/\/)(?!\d{1,5}(?:[/?#]|$))[^\s]+$/;
+/** Checked before reading a login's value, so a long run of non-pairs is never read twice. */
+const USER_PASS_AT = /\\{0,8}["'`]?[A-Za-z][^\s:@"'`\\]{0,128}:/y;
+/** The furthest the colon of USER_PASS_AT can be from where it starts: 8 + 1 + 1 + 128. */
+const USER_PASS_AT_REACH = 138;
+const COOKIE_NAME = /cookies?$/i;
+/** `token: Basic <credentials>`: the scheme stays, the credentials go (as for Authorization:). */
+const SCHEME_VALUE =
+  /(Basic|Bearer|Token|Digest|Negotiate|NTLM|ApiKey)[ \t]+(?!\*\*\*)[^\s"'`]{1,4096}/iy;
 
 function maskAssignments(text: string, keep?: KeepValue): string {
   ASSIGN_NAME.lastIndex = 0;
   let out = "";
   let last = 0;
+  // the next `:` at or after a login's value (kept across names, so finding it stays linear): a
+  // login with no colon within reach is skipped without reading up to 128 chars at every name
+  let colon = -1;
   for (let m = ASSIGN_NAME.exec(text); m; m = ASSIGN_NAME.exec(text)) {
-    if (!SECRET_HINT.test(m[1] as string) || !isSecretName(m[1] as string)) continue;
+    const name = m[1] as string;
+    if (!SECRET_HINT.test(name)) continue;
+    // (no name that ends in login/logon is a secret name, so isSecretName is not asked)
+    const login = LOGIN_NAME.test(name);
+    const secret = !login && isSecretName(name);
+    if (!secret && !login) continue;
     const start = m.index + m[0].length;
+    if (!secret) {
+      if (colon < start) {
+        colon = text.indexOf(":", start);
+        if (colon < 0) colon = Number.POSITIVE_INFINITY;
+      }
+      if (colon - start > USER_PASS_AT_REACH) continue;
+      USER_PASS_AT.lastIndex = start;
+      if (!USER_PASS_AT.test(text)) continue;
+    }
     const v = readValue(text, start);
     if (!v) continue;
     const { raw } = v;
-    if (!raw || NOT_A_SECRET_VALUE.test(raw) || keep?.(m[1] as string, raw)) continue;
-    out += text.slice(last, start) + v.masked;
-    last = start + v.length;
+    if (!raw || NOT_A_SECRET_VALUE.test(raw) || keep?.(name, raw)) continue;
+    let masked = v.masked;
+    let length = v.length;
+    if (!secret) {
+      const pair = USER_PASS.exec(raw);
+      if (!pair) continue;
+      masked = `${v.open}${pair[1]}:***${v.close}`;
+    } else if (COOKIE_NAME.test(name) && raw.includes("=")) {
+      // cookie pairs: the values go, the names stay (as the Cookie header rule does)
+      masked = `${v.open}${maskCookiePairs(raw)}${v.close}`;
+    } else if (COOKIE_NAME.test(name) && (raw.length < 8 || /\s/.test(raw))) {
+      continue; // a short word or a phrase under a cookie name is not a cookie value
+    } else if (!v.open) {
+      SCHEME_VALUE.lastIndex = start;
+      const s = SCHEME_VALUE.exec(text);
+      if (s) {
+        masked = `${s[1]} ***`;
+        length = s[0].length;
+      }
+    }
+    out += text.slice(last, start) + masked;
+    last = start + length;
     ASSIGN_NAME.lastIndex = last;
   }
   return out + text.slice(last);
@@ -270,6 +344,77 @@ const PRIVATE_KEY_TO_END = new RegExp(
   `${PRIVATE_KEY_BEGIN}[\\s\\S]*?(?:${PRIVATE_KEY_END}|$)`,
   "g",
 );
+
+/**
+ * mysql / mariadb -p<password> written before the client word (`-pS3cret mysql`, "use -pS3cret
+ * with mariadb"). The client word must be a word of its own on the same command (the segment
+ * stops at ; & | and the line end), at most 300 chars after the -p, and the -p must not belong to
+ * another command of that segment (`docker run -p3306:3306 mysql`, `ssh -p2222 host mysql`). The
+ * value must look like a password, not a port, a pid, an address, a variable or a flag cluster
+ * (`cp -pr`, `tar -pxzf`, `rsync -pa`).
+ *
+ * Linear: the segment regex starts only at a segment's start, and each segment that holds a client
+ * word is tokenised once (the -p words and the client words, in order).
+ */
+const MYSQL_CLIENT = "(?:mysql|mysqldump|mysqladmin|mysqlsh|mariadb|mariadb-dump)";
+const MYSQL_SEGMENT = new RegExp(
+  `(?<![^\\n;&|])[^\\n;&|]*?(?<!\\S)${MYSQL_CLIENT}(?!\\S)[^\\n;&|]*`,
+  "g",
+);
+const MYSQL_SEGMENT_TOKENS = new RegExp(
+  `(?<!\\S)-p(?![\\s*-])(?=(\\S*))\\1|(?<!\\S)${MYSQL_CLIENT}(?!\\S)`,
+  "g",
+);
+/** Commands whose own attached -p is not a password (a port, a pid, a flag, a prompt). */
+const OTHER_P_COMMAND =
+  /(?<![^\s/])(?:docker|podman|nerdctl|kubectl|ssh|autossh|scp|sftp|cp|mv|install|mkdir|tar|rsync|lsof|kill|pkill|pgrep|ps|nc|ncat|netcat|socat|telnet|nmap|ping|perl|ruby|python3?|java|xargs|sudo)(?!\S)/;
+/** A -p value that is a port, pid or address (`3306:3306`, `127.0.0.1:3306:3306/tcp`, `1234`). */
+const PORT_LIKE = /^[\d.:]+(?:\/(?:tcp|udp|sctp))?$/i;
+
+function passwordLike(value: string): boolean {
+  if (value.length < 4 || PORT_LIKE.test(value) || value.startsWith("$")) return false;
+  // a digit, a symbol, mixed case, or a long word (a flag cluster is short and lower case)
+  return /[\d\W_]/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value)) || value.length >= 8;
+}
+
+function maskMysqlPBefore(segment: string): string {
+  if (!segment.includes("-p")) return segment;
+  // where another command that takes its own -p starts (computed once, only when needed)
+  let other: number | undefined;
+  const pending: Array<{ at: number; end: number; quote: string }> = [];
+  const hits: Array<{ at: number; end: number; quote: string }> = [];
+  MYSQL_SEGMENT_TOKENS.lastIndex = 0;
+  for (let m = MYSQL_SEGMENT_TOKENS.exec(segment); m; m = MYSQL_SEGMENT_TOKENS.exec(segment)) {
+    const word = m[1];
+    if (word === undefined) {
+      // a client word: the -p words within 300 chars before it are its
+      for (const p of pending) if (m.index - p.end <= 300) hits.push(p);
+      pending.length = 0;
+      continue;
+    }
+    let quote = "";
+    let value = word;
+    if (/^["']/.test(word)) {
+      quote = word[0] as string;
+      if (word.length < 3 || !word.endsWith(quote)) continue;
+      value = word.slice(1, -1);
+    }
+    if (/["']/.test(value) || !passwordLike(value)) continue;
+    other ??= segment.search(OTHER_P_COMMAND);
+    if (other >= 0 && other < m.index) continue;
+    pending.push({ at: m.index, end: m.index + m[0].length, quote });
+  }
+  if (hits.length === 0) return segment;
+  let out = "";
+  let last = 0;
+  for (const h of hits) {
+    out += `${segment.slice(last, h.at)}-p${h.quote}***${h.quote}`;
+    last = h.end;
+  }
+  return out + segment.slice(last);
+}
+
+const MYSQL_P_BEFORE: Rule = [MYSQL_SEGMENT, maskMysqlPBefore];
 
 /** Ordered: the specific shapes first, the generic runs last. */
 const RULES: Rule[] = [
@@ -370,6 +515,12 @@ const RULES: Rule[] = [
   [/\bwhsec_[A-Za-z0-9]{16,}/g, "whsec_***"],
   [/\bsk-[A-Za-z0-9_-]{16,}/g, "sk-***"],
   [/\b(gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/g, "$1_***"],
+  // the upper-case form (NFKC of a fullwidth ＧＨＰ＿), only with a lower-case letter and a digit
+  // in the token, so an upper-case constant name (GHP_SOME_LONG_SETTING_NAME) stays
+  [/\b(GH[POUSR])_(?=[A-Z0-9_]{0,256}[a-z])(?=[A-Za-z_]{0,256}\d)[A-Za-z0-9_]{20,}/g, "$1_***"],
+  // mysql / mariadb -p<password> written before the command word (`-pS3cret mysql`), on the
+  // same command: the context stops at ; & | and the line end
+  MYSQL_P_BEFORE,
   [/\bglpat-[A-Za-z0-9_-]{20,}/g, "glpat-***"],
   [/\bnpm_[A-Za-z0-9]{36,}/g, "npm_***"],
   [/\bhf_[A-Za-z0-9]{30,}/g, "hf_***"],
@@ -409,6 +560,7 @@ needles(RULES[1] as Rule, "://");
 needles(RULES[7] as Rule, "login", "mongo", "redis-cli", "ldap", "zip", "mosquitto_");
 needles(RULES[16] as Rule, "password");
 needles(RULES[18] as Rule, "pass", "secret", "token", "api", "access");
+needles(MYSQL_P_BEFORE, "mysql", "mariadb");
 
 // Private key blocks in stored output, where "to the end of the text" would wipe the rest of a
 // 9 MB `git log -p` after one cut-off key in a test fixture. The END line must come within 64 KB
@@ -524,6 +676,26 @@ export function redact(text: string): string {
  */
 export function redactSecrets(text: string): string {
   return applyRules(maskYamlBlocks(text), STORED_RULES, keepInOutput);
+}
+
+/**
+ * redactSecrets for text a person typed and eminiar keeps or shares (a playbook's prompt, title
+ * and header): the rules also run on the cleaned text (as forRemote does), so a fullwidth
+ * `ＧＨＰ＿…` or a `ghp\u200b_…` is caught. Only when that finds a secret the plain pass missed is
+ * the cleaned, masked text returned; otherwise every character stays as written. The cleaned
+ * pass runs over the plain pass's output, so it never masks less: NFKC turns a fullwidth quote
+ * (＂ ＇ ｀) or separator inside a value into one that would end the value early, and a pass over
+ * the raw text would leave the rest of the value. Idempotent and linear (at most three passes,
+ * and none extra for ASCII text).
+ */
+export function redactSecretsClean(text: string): string {
+  const out = redactSecrets(text);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the ASCII range is the point
+  if (!/[^\x00-\x7f]/.test(text)) return out;
+  const cleanedOut = clean(out);
+  if (cleanedOut === out) return out;
+  const masked = applyRules(maskYamlBlocks(cleanedOut), STORED_RULES, keepInOutput);
+  return masked === cleanedOut ? out : masked;
 }
 
 /** The redacted head kept in the DB: at most n chars (code points), with "…" when cut. */

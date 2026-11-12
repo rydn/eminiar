@@ -13,6 +13,7 @@ import { Galaxy } from "./views/Galaxy.js";
 import { History } from "./views/History.js";
 import { Memory } from "./views/Memory.js";
 import { Overview } from "./views/Overview.js";
+import { Playbooks } from "./views/Playbooks.js";
 import { Sessions } from "./views/Sessions.js";
 import { Swarm } from "./views/Swarm.js";
 import { System } from "./views/System.js";
@@ -29,6 +30,7 @@ const TABS: Array<[View, string]> = [
   ["coverage", "Coverage"],
   ["sessions", "Sessions"],
   ["swarm", "Swarms"],
+  ["playbooks", "Playbooks"],
   ["adjudicator", "Adjudicator"],
   ["system", "System"],
 ];
@@ -176,6 +178,7 @@ export function App(): JSX.Element {
         {view === "coverage" && <Coverage />}
         {view === "sessions" && <Sessions />}
         {view === "swarm" && <Swarm params={route.params} sub={route.sub} />}
+        {view === "playbooks" && <Playbooks params={route.params} />}
         {view === "adjudicator" && <Adjudicator params={route.params} />}
         {view === "system" && <System onChanged={() => setTick((x) => x + 1)} />}
       </main>
