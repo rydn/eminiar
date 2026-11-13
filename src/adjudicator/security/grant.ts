@@ -6,7 +6,8 @@
  * Privacy (decision D4): an MCP tool becomes `mcp:<class>:<verb>`; the raw server name stays in
  * ToolGrant.local and never reaches a provider or the database. Tool names that are not a known
  * Claude Code tool, an eminiar tool or an MCP tool are dropped, so an arbitrary string in an
- * agent file cannot ride along in an id.
+ * agent file cannot ride along in an id. An MCP tool under eminiar's server name that eminiar
+ * does not register is not dropped but classed `mcp:unknown:<verb>`.
  */
 import { EM_MCP_PREFIXES, roleToolGrant } from "../../swarm/agents.js";
 import type { RoleSpec } from "../../swarm/types.js";
@@ -311,7 +312,8 @@ export function normalizeTool(
   for (const prefix of EM_MCP_PREFIXES) {
     if (name.startsWith(prefix)) {
       const bare = name.slice(prefix.length);
-      return EM_TOOL_NAMES.has(bare) ? { tool: { id: bare, kind: "em" } } : undefined;
+      if (EM_TOOL_NAMES.has(bare)) return { tool: { id: bare, kind: "em" } };
+      break; // not one of eminiar's tools: classed below as an unknown server's (re-review F3)
     }
   }
   if (name.startsWith("mcp__")) {
@@ -323,7 +325,12 @@ export function normalizeTool(
       const cls = mcpClassOf(server, trusted);
       return { tool: { id: `mcp:${cls}:write`, kind: "mcp", mcp: { cls, verb: "write" } }, server };
     }
-    const cls = mcpClassOf(m.server, trusted);
+    let cls = mcpClassOf(m.server, trusted);
+    // eminiar registers only EM_TOOL_NAMES. Any other tool under an eminiar-looking server name
+    // (any case) is another server's that borrowed the name: dropping it would hide what it can
+    // do, so it counts as an unknown server's tool, its verb read from its name as for any other.
+    // The id stays mcp:<class>:<verb>, so the raw tool name never rides along.
+    if (cls === "first-party" && !EM_TOOL_NAMES.has(m.tool)) cls = "unknown";
     const verb = mcpVerbOf(m.tool);
     return {
       tool: { id: `mcp:${cls}:${verb}`, kind: "mcp", mcp: { cls, verb } },

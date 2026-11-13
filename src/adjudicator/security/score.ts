@@ -192,7 +192,11 @@ function evaluate(ctx: Ctx): Eval {
           ctx,
           caps,
           shellOnlyUrl(ctx, caps)
-            ? findRules({ ...eff, U: uWithoutUrl(exposures, caps) }, wstar, secret)
+            ? gateRules(
+                rules,
+                findRules({ ...eff, U: uWithoutUrl(exposures, caps) }, wstar, secret),
+                realLegs(exposures, profiles),
+              )
             : rules,
           profiles.map(([, p]) => p),
           secret,
@@ -201,13 +205,64 @@ function evaluate(ctx: Ctx): Eval {
   return { exposures, caps, eff, effBase, wstar, flat, rules, floors };
 }
 
+/** The legs a granted tool other than a code-execution one holds by itself (no latent, no shell). */
+interface RealLegs {
+  caps: Record<Cap, number>;
+  wstar: number;
+}
+
+/**
+ * Per capability, the largest grant exposure of a tool that does not execute code. A shell's own
+ * grant (X) and every latent leg are left out: they are what the T19 gate is about.
+ */
+function realLegs(
+  exposures: readonly Exposure[],
+  profiles: ReadonlyArray<readonly [GrantedTool, ToolProfile]>,
+): RealLegs {
+  const shells = new Set<string>();
+  let wstar = 0;
+  for (const [tool, p] of profiles) {
+    if (p.latent) shells.add(`tool:${tool.id}`);
+    else if (p.wstar && p.wstar > wstar) wstar = p.wstar;
+  }
+  const caps = {} as Record<Cap, number>;
+  for (const c of CAPS) caps[c] = 0;
+  for (const x of exposures)
+    if (x.kind === "grant" && !shells.has(x.from) && x.e > caps[x.cap]) caps[x.cap] = x.e;
+  return { caps, wstar };
+}
+
+/**
+ * Apply the T19 gate per rule (re-review F2): a rule sees U without the URL cue only when every
+ * other leg of it is the shell's own grant or a latent exposure. A leg a non-shell tool holds at
+ * LEG_MIN or more (a send, create or delete MCP tool, a file editor, a cloud read) keeps the rule
+ * as it is, so the floors it completes still fire.
+ */
+function gateRules(full: RuleHit[], gated: RuleHit[], real: RealLegs): RuleHit[] {
+  const out: RuleHit[] = [];
+  for (const spec of RULE_SPECS) {
+    let keep = false;
+    for (const alts of spec.legs) {
+      if (alts.includes("U")) continue;
+      for (const key of alts) {
+        const e = key === "W*" ? real.wstar : key === "S*" ? 0 : real.caps[key];
+        if (e >= LEG_MIN) keep = true;
+      }
+    }
+    const hit = (keep ? full : gated).find((r) => r.id === spec.id);
+    if (hit) out.push(hit);
+  }
+  return out;
+}
+
 /**
  * User decision (T19): a shell plus a URL in the task is not by itself a floor. When no granted
  * tool can fetch outside content (U grant below CAN_FETCH_MIN) and the session has read none, the
  * URL reaches the agent only through the shell's latent untrusted-input leg, and that leg counts
  * toward a floor only when the task also cues another leg: a secret, an egress, a destructive or
  * privileged step, a persistence path, a package or tool to install, or an intent. Otherwise the
- * floors see U without the URL cue; the score still counts it.
+ * floor rules whose other legs are all the shell's own (gateRules) see U without the URL cue; the
+ * score still counts it.
  */
 function shellOnlyUrl(ctx: Ctx, caps: Record<Cap, CapExposure>): boolean {
   if (!ctx.cues.has("url") || caps.U.latent <= 0) return false;

@@ -702,6 +702,33 @@ describe("an invalid project file costs only that file (security review T17a-2)"
     );
   });
 
+  for (const bad of [{ sandbox: { envAllow: "PATH" } }, { memories: { dir: 5 } }]) {
+    it(`a project file with only ${Object.keys(bad)[0]} dropped is applied, not "ignored whole"`, () => {
+      const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      personal(PERSONAL);
+      writeProject({ routing: { mode: "annotate" }, ...bad });
+      expect(projectAdjudicatorWarning(root) ?? "").not.toMatch(/ignored whole/);
+      const cfg = loadConfig(root);
+      expect(cfg.routing.mode).toBe("annotate");
+      expect(cfg.adjudicator.security.enabled).toBe(true);
+      expect(err.mock.calls.join("")).toMatch(/ignoring /);
+    });
+  }
+
+  it("the warning check stays silent on stderr", () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    writeProject({ routing: { mode: "annotate" }, sandbox: { envAllow: "PATH" } });
+    projectAdjudicatorWarning(root);
+    expect(err).not.toHaveBeenCalled();
+  });
+
+  it("a schema error that survives the cleanup is still ignored whole", () => {
+    personal(PERSONAL);
+    writeProject({ routing: { mode: "bogus" }, sandbox: { envAllow: "PATH" } });
+    expect(projectAdjudicatorWarning(root)).toMatch(/ignored whole/);
+    expect(loadConfig(root).adjudicator.security.enabled).toBe(true);
+  });
+
   it("a valid or absent project file adds no invalid-file warning", () => {
     expect(projectAdjudicatorWarning(root)).toBeUndefined();
     writeProject({ routing: { mode: "annotate" } });

@@ -25,9 +25,9 @@ const sec = ConfigSchema.parse({}).adjudicator.security;
 // --- the shape of the labelled set (T6 left this test out) ---------------------------------------
 
 describe("security eval set shape", () => {
-  it("has 70 items: 17 low, 16 medium, 15 high, 22 critical", () => {
-    expect(SECURITY_EVAL_SET).toHaveLength(70);
-    const want = { low: 17, medium: 16, high: 15, critical: 22 } as const;
+  it("has 76 items: 18 low, 17 medium, 15 high, 26 critical", () => {
+    expect(SECURITY_EVAL_SET).toHaveLength(76);
+    const want = { low: 18, medium: 17, high: 15, critical: 26 } as const;
     for (const l of LEVELS)
       expect(
         SECURITY_EVAL_SET.filter((i) => i.level === l),
@@ -88,12 +88,12 @@ describe("security eval set shape", () => {
   });
 
   it("has look-alikes (benign items that borrow attack words) and a debatable minority", () => {
-    expect(SECURITY_EVAL_LOOKALIKES.length).toBeGreaterThanOrEqual(7);
+    expect(SECURITY_EVAL_LOOKALIKES.length).toBeGreaterThanOrEqual(9);
     for (const i of SECURITY_EVAL_LOOKALIKES) expect(["low", "medium"], i.id).toContain(i.level);
     const debatable = SECURITY_EVAL_SET.filter((i) => i.debatable);
     expect(debatable.length).toBeGreaterThan(0);
     expect(debatable.length).toBeLessThanOrEqual(12);
-    expect(SECURITY_EVAL_CORE).toHaveLength(70 - debatable.length);
+    expect(SECURITY_EVAL_CORE).toHaveLength(76 - debatable.length);
     for (const i of SECURITY_EVAL_CORE) expect(i.debatable, i.id).toBeFalsy();
   });
 
@@ -167,10 +167,10 @@ describe("runSecurityEval", () => {
     const debatable = SECURITY_EVAL_SET.filter((i) => i.debatable).length;
     expect(r.v).toBe(1);
     expect(r.ts).toBe(1_700_000_000_000);
-    expect(r.set).toMatchObject({ items: 70, core: 70 - debatable, debatable });
+    expect(r.set).toMatchObject({ items: 76, core: 76 - debatable, debatable });
     expect(r.set.hash).toBe(securityEvalSetHash(SECURITY_EVAL_SET));
-    expect(r.heuristic.all.n).toBe(70);
-    expect(r.heuristic.core.n).toBe(70 - debatable);
+    expect(r.heuristic.all.n).toBe(76);
+    expect(r.heuristic.core.n).toBe(76 - debatable);
     expect(r.heuristic.debatable.n).toBe(debatable);
     expect(r.heuristic.core.n + r.heuristic.debatable.n).toBe(r.heuristic.all.n);
     expect(r.jev).toBeUndefined();
@@ -296,7 +296,7 @@ describe("saving and fixtures", () => {
     const r = await runSecurityEval({ security: sec });
     saveSecurityEval({ metaSet: (k, v) => void store.set(k, v) }, r);
     expect([...store.keys()]).toEqual([REPORT_KEY]);
-    expect(JSON.parse(store.get(REPORT_KEY) as string).set.items).toBe(70);
+    expect(JSON.parse(store.get(REPORT_KEY) as string).set.items).toBe(76);
   });
 
   it("validates fixtures without echoing their text, and merges or replaces by id", () => {
@@ -341,7 +341,7 @@ describe("saving and fixtures", () => {
       ...good,
     ]);
     const merged = mergeSecurityItems(SECURITY_EVAL_SET, extra, "merge");
-    expect(merged).toHaveLength(71);
+    expect(merged).toHaveLength(SECURITY_EVAL_SET.length + 1);
     expect(merged.find((i) => i.id === "low-01")?.level).toBe("medium");
     expect(mergeSecurityItems(SECURITY_EVAL_SET, extra, "replace")).toHaveLength(2);
   });

@@ -137,7 +137,17 @@ const NOUN_BEFORE =
  * interpreter. Every optional part starts with its own literal, so the pattern stays linear.
  */
 const BIN_DIR = "/(?:usr/)?(?:local/)?bin/";
-const PIPE_TO = `\\|\\s*(?:sudo\\s+(?:-[a-z]{1,4}\\s+){0,3})?(?:(?:${BIN_DIR})?env\\s+)?(?:${BIN_DIR})?`;
+/** A pipe, `|&` (stderr too) included. */
+const PIPE = "\\|&?\\s*";
+const PIPE_TO = `${PIPE}(?:sudo\\s+(?:-[a-z]{1,4}\\s+){0,3})?(?:(?:${BIN_DIR})?env\\s+)?(?:${BIN_DIR})?`;
+/**
+ * Up to three simple filters between the fetch and the shell ("| tr -d '\r' | bash", "| base64
+ * -d | sh", "| tee /tmp/i.sh | sh"): each starts with a pipe and its arguments never hold one, so
+ * a stage can be read one way only.
+ */
+const FILTERS = `(?:${PIPE}(?:sudo\\s+)?(?:cat|tr|base64|gunzip|zcat|gzip|xz|bzip2|dos2unix|sed|tee)${NA}[^\\n|]{0,60}){0,3}`;
+/** The fetchers a shell or PowerShell runs the output of. */
+const FETCHER = "(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod)";
 
 const LOCAL_URL =
   /^https?:\/\/(?:localhost|127\.|0\.0\.0\.0|\[::1\]|[a-z0-9-]+\.local[:/]|10\.|192\.168\.)/;
@@ -261,7 +271,16 @@ const P = {
     `${NB}(?:claude mcp add|mcp add|add (?:an? |the )?(?:remote )?mcp(?: server)?|install (?:an? |the )?mcp|new mcp server|connect (?:to )?(?:an? )?(?:remote )?mcp|claude plugin install|plugin install|plugin marketplace add|marketplace add|add (?:an? |the )?plugin|install (?:an? |the )?plugin)${NA}`,
   ),
   pipeShell: re(
-    `(?:curl|wget|fetch|iwr|invoke-webrequest)[^\\n|]{0,160}${PIPE_TO}(?:ba|z|da|k)?sh${NA}|(?:curl|wget)[^\\n|]{0,160}${PIPE_TO}(?:python3?|node|perl|ruby|php)${NA}|${NB}(?:bash|sh|zsh|source) <\\(\\s*(?:curl|wget)|${NB}iex\\s*\\(?\\s*(?:iwr|irm|invoke-)`,
+    `(?:curl|wget|fetch|iwr|invoke-webrequest)[^\\n|]{0,160}${FILTERS}${PIPE_TO}(?:ba|z|da|k)?sh${NA}|(?:curl|wget)[^\\n|]{0,160}${FILTERS}${PIPE_TO}(?:python3?|node|perl|ruby|php)${NA}|${NB}(?:bash|sh|zsh|source) <\\(\\s*(?:curl|wget)|${NB}iex\\s*\\(?\\s*(?:iwr|irm|invoke-)`,
+  ),
+  // A shell that runs a fetch's output as its script: `bash -c "$(curl ...)"`, `eval "$(curl ...)"`,
+  // `sh < <(wget ...)`. A bare `$(curl ...)` (an assignment, an echo) is not one.
+  subShell: re(
+    `${NB}(?:(?:ba|z|da|k)?sh\\s+-[a-z]{0,3}c|eval)\\s+["']?(?:\\$\\(|\`)\\s*${FETCHER}${NA}|${NB}(?:(?:ba|z|da|k)?sh|source)\\s+(?:<\\s*)?<\\(\\s*${FETCHER}${NA}`,
+  ),
+  // PowerShell: a download piped into Invoke-Expression, or Invoke-Expression around one.
+  psExec: re(
+    `${NB}${FETCHER}${NA}[^\\n|]{0,160}${FILTERS}${PIPE}(?:iex|invoke-expression)${NA}|${NB}(?:iex|invoke-expression)\\s*(?:[($]\\s*){0,4}(?:${FETCHER}${NA}|(?:new-object\\s+|\\[)(?:system\\.)?net\\.webclient)`,
   ),
   remoteExec: re(
     `${NB}(?:npx|bunx|uvx|pnpm dlx)\\s+(?:(?:-y|--yes|--from)\\s+|@[a-z0-9._-]+/|github:|git\\+|https?://|${URL_MARK})`,
@@ -512,7 +531,11 @@ export function extractSignals(input: string, opts: SignalOptions = {}): TextSig
     const remote =
       install || c.has("url") || c.has("scrape") || c.has("third-party") || c.has("clone");
     const exec =
-      P.pipeShell.test(text) || P.remoteExec.test(text) || (remote && P.nlPipe.test(text));
+      P.pipeShell.test(text) ||
+      P.subShell.test(text) ||
+      P.psExec.test(text) ||
+      P.remoteExec.test(text) ||
+      (remote && P.nlPipe.test(text));
     if (exec || near(text, P.installScriptAnchor, P.followFrom, 120)) c.add("fetch-exec");
     if (P.addMcp.test(text)) c.add("add-mcp");
 

@@ -910,7 +910,14 @@ function projectFileProblem(
       ? "eminiar.config.json is not a JSON object: ignored whole, the personal config and environment still apply"
       : undefined;
   }
-  const parsed = parseLayers([projectLayer(raw)]);
+  // The same cleanup loadConfig applies first (silently here): a bad envAllow or path key costs
+  // only that key, so it must not make the file look ignored whole.
+  const cleaned = withoutEnvAllow(
+    withoutUnsafePaths(projectLayer(raw), "eminiar.config.json", true),
+    "eminiar.config.json",
+    true,
+  );
+  const parsed = parseLayers([cleaned]);
   if (parsed.success) return undefined;
   return `eminiar.config.json is invalid (${issueText(parsed.error, [raw], raw)}): ignored whole, the personal config and environment still apply`;
 }
@@ -1144,16 +1151,21 @@ const PROJECT_PATH_KEYS = [
  * default value applies and everything else stays. `source` names the file in the stderr note.
  * The real guard for the manifest stays at write time (src/docs/manifest.ts).
  */
-function withoutUnsafePaths(raw: Record<string, unknown>, source: string): Record<string, unknown> {
+function withoutUnsafePaths(
+  raw: Record<string, unknown>,
+  source: string,
+  quiet = false,
+): Record<string, unknown> {
   let out = raw;
   for (const [section, key] of PROJECT_PATH_KEYS) {
     const sec = out[section];
     if (!isPlainObject(sec) || !Object.hasOwn(sec, key)) continue;
     const v = sec[key];
     if (typeof v === "string" && PROJECT_RELATIVE_PATH_RE.test(v)) continue;
-    process.stderr.write(
-      `eminiar: ignoring ${section}.${key} ${JSON.stringify(v)} in ${source}: it must be a path inside the project\n`,
-    );
+    if (!quiet)
+      process.stderr.write(
+        `eminiar: ignoring ${section}.${key} ${JSON.stringify(v)} in ${source}: it must be a path inside the project\n`,
+      );
     const { [key]: _dropped, ...rest } = ownJson(sec) as Record<string, unknown>;
     out = { ...(ownJson(out) as Record<string, unknown>), [section]: rest };
   }
@@ -1172,11 +1184,16 @@ const setsEnvAllow = (raw: Record<string, unknown>): boolean =>
  * list would otherwise replace it). The personal file and EMINIAR_* env are not cut. `source`
  * names the file in the stderr note.
  */
-function withoutEnvAllow(raw: Record<string, unknown>, source: string): Record<string, unknown> {
+function withoutEnvAllow(
+  raw: Record<string, unknown>,
+  source: string,
+  quiet = false,
+): Record<string, unknown> {
   if (!setsEnvAllow(raw)) return raw;
-  process.stderr.write(
-    `eminiar: ignoring sandbox.envAllow in ${source}: only ~/.eminiar/config.json decides which environment variables the sandbox passes\n`,
-  );
+  if (!quiet)
+    process.stderr.write(
+      `eminiar: ignoring sandbox.envAllow in ${source}: only ~/.eminiar/config.json decides which environment variables the sandbox passes\n`,
+    );
   const { envAllow: _dropped, ...sandbox } = ownJson(raw.sandbox) as Record<string, unknown>;
   return { ...(ownJson(raw) as Record<string, unknown>), sandbox };
 }

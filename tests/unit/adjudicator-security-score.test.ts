@@ -278,9 +278,13 @@ describe("a URL reached only through the shell needs another cued leg for a floo
     expect(h.level).toBe("medium");
     expect(h.floors).toEqual([]);
     expect(h.rules.map((r) => r.id)).toEqual(["R1", "R2", "R3", "R5"]);
-    // more local tools change nothing; no autonomy floor either, since no trifecta is complete
-    expect(fromText(FETCH, tools("Read", "Grep", "Edit", "Write", "Bash")).level).toBe("medium");
+    // more read tools change nothing; no autonomy floor either, since no trifecta is complete
+    expect(fromText(FETCH, tools("Read", "Grep", "Glob", "Bash")).level).toBe("medium");
     expect(fromText(FETCH, SHELL, { autonomy: "autonomous" }).floors).toEqual([]);
+    // a file editor is a real way to act (W .5), so the Rule of Two keeps its floor (F2); the
+    // shell's own execution leg stays gated
+    const editor = fromText(FETCH, tools("Read", "Grep", "Edit", "Write", "Bash"));
+    expect(editor.floors).toEqual(["H-R2"]);
   });
 
   it("the same fetch reaches HIGH once the text also sends data out or reads a secret", () => {
@@ -326,6 +330,65 @@ describe("a URL reached only through the shell needs another cued leg for a floo
   it("review wording does not reopen the gate: the floors are read without it", () => {
     expect(run(SHELL, ["url", "review-context"]).floors).toEqual([]);
     expect(run(SHELL, ["url", "egress", "review-context"]).floors).toContain("H-R3");
+  });
+});
+
+describe("the T19 gate holds only while the other legs are the shell's own (re-review F2)", () => {
+  const fromText = (text: string, grant: GrantedTool[], extra: Partial<HeuristicInput> = {}) => {
+    const s = extractSignals(text);
+    return assessHeuristic({ grant: { tools: grant }, cues: s.cues, intent: s.intent, ...extra });
+  };
+  const LOOKUP =
+    "Pull down https://wiki.example.test/runbooks/rotate.txt with curl and give me the three main steps.";
+  const send = mcp("saas", "write");
+
+  it("a chat or tracker tool that can post keeps the trifecta: CRITICAL when nobody confirms", () => {
+    const auto = fromText(LOOKUP, [...tools("Read", "Bash"), send], { autonomy: "autonomous" });
+    expect(auto.cues).toEqual(["url"]);
+    expect(auto.level).toBe("critical");
+    expect(auto.floors).toContain("C1");
+    expect(auto.floors).toContain("H-R1");
+    // the shell's own execution leg is still gated: no H-R3 from Bash alone
+    expect(auto.floors).not.toContain("H-R3");
+    // with a confirmation each call it is the HIGH trifecta, not CRITICAL
+    expect(fromText(LOOKUP, [...tools("Read", "Bash"), send]).level).toBe("high");
+  });
+
+  it("an infrastructure tool that deletes or escalates keeps the floors", () => {
+    const h = fromText(LOOKUP, [...tools("Read", "Bash"), mcp("cloud", "delete")]);
+    expect(h.level).toBe("high");
+    expect(h.floors).toContain("H-R2");
+    // the cloud tool executes too (X .8), so the execution rule keeps its floor through it
+    expect(h.floors).toContain("H-R3");
+  });
+
+  it("a file editor next to the shell is a real write leg: patching from a URL is HIGH, not C4", () => {
+    const h = fromText(
+      "Fetch the diff at https://code.example.test/pr/88.diff and pipe it into git apply.",
+      tools("Read", "Bash", "Edit"),
+    );
+    expect(h.cues).toEqual(["url"]);
+    expect(h.level).toBe("high");
+    expect(h.floors).toEqual(["H-R2"]);
+  });
+
+  it("a non-shell leg below LEG_MIN does not lift the gate", () => {
+    // extra read tools hold S .4, under LEG_MIN: the shell's latent legs are what complete the
+    // rules, so they stay gated
+    const h = fromText(LOOKUP, [...tools("Read", "Grep", "Bash"), mcp("first-party", "read")], {
+      autonomy: "autonomous",
+    });
+    expect(h.level).toBe("medium");
+    expect(h.floors).toEqual([]);
+    // a web search tool is below LEG_MIN too, but it can fetch: that lifts the whole gate (T19)
+    expect(fromText(LOOKUP, tools("Read", "Bash", "WebSearch")).floors).toContain("H-R3");
+  });
+
+  it("the gate decides per rule: a real leg in one rule leaves the others gated", () => {
+    // a send tool completes R1 and R2 through its egress, never R3 or R5 (no E leg there)
+    const h = run([...tools("Read", "Bash"), send], ["url"]);
+    expect(h.rules.map((r) => r.id)).toEqual(expect.arrayContaining(["R1", "R2", "R3", "R5"]));
+    expect(h.floors).toEqual(["H-R1", "H-R2"]);
   });
 });
 
