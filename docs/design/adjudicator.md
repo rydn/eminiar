@@ -2,6 +2,9 @@
 
 Status: proposed · swarm run `20261104-483f39` · branch `feature/adjudicator` · target v0.13.0 · 2026-11-04
 
+See also [adjudicator-security.md](adjudicator-security.md): the opt-in security-aware advice built
+on this adjudicator (v0.15.0).
+
 ## Constraints from Claude Code
 
 The coordinator checked these against the Claude Code docs (sub-agents "Choose a model", hooks
@@ -837,6 +840,10 @@ Then:
     support (claude-haiku-4-5) is accepted and sends no effort, so its `actualEffort` is unknown
     and the row is not counted
   - a denied or asked call is never rewritten (`blocked`), so it gets no effort either
+  - a dispatch that security advice rates HIGH or CRITICAL is held (`held`, part of `mayApply`,
+    `willApplyEffort` and `effortApply`): no model, no effort, no `updatedInput` and no
+    permission decision; the note says `apply held: security HIGH` (see
+    [adjudicator-security.md](adjudicator-security.md))
   - no version gate: the hook input carries no Claude Code version (only the transcript records
     do, and the hot path does not read them). 2.1.311 strips an unknown `updatedInput` key
     rather than rejecting it, so a CLI older than 2.1.292 probably drops `effort`; untested

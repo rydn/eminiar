@@ -54,6 +54,7 @@ import {
   recallIndexIntact,
   vecTableSql,
 } from "./schema.js";
+import { SqliteSecurityStore } from "./security.js";
 import { SqliteSwarmStore } from "./swarm.js";
 
 export interface SqliteOptions {
@@ -303,6 +304,7 @@ export class SqliteAdapter implements StorageAdapter {
   readonly vectors: boolean;
   readonly swarm: SqliteSwarmStore;
   readonly adjudicator: SqliteAdjudicatorStore;
+  readonly security: SqliteSecurityStore;
   private readonly stmts = new Map<string, Database.Statement<unknown[], unknown>>();
   /** remaskDocuments' read-ahead, kept between its slices. */
   private remaskQueue: RemaskQueue | undefined;
@@ -336,6 +338,7 @@ export class SqliteAdapter implements StorageAdapter {
     // Statements are prepared lazily, so the tables only need to exist by the first call.
     this.swarm = new SqliteSwarmStore(this.db);
     this.adjudicator = new SqliteAdjudicatorStore(this.db);
+    this.security = new SqliteSecurityStore(this.db);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("foreign_keys = ON");
@@ -1137,6 +1140,19 @@ export class SqliteAdapter implements StorageAdapter {
     return this.db
       .prepare(`SELECT * FROM events WHERE ${where} ORDER BY ts DESC, id DESC LIMIT ?`)
       .all(...params) as EventRow[];
+  }
+
+  eventToolsSince(sessionId: string, sinceTs: number, limit = 64): string[] {
+    const n = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 256)) : 64;
+    // events_session (session_id, ts) serves the range: this session's last hours, not every
+    // session's tool calls (events_cat looks as good to the planner, and is not). The grouping
+    // keeps one row per tool.
+    const rows = this.prep(
+      `SELECT tool FROM events INDEXED BY events_session
+       WHERE session_id = ? AND ts >= ? AND category = 'tool_call' AND tool IS NOT NULL
+       GROUP BY tool ORDER BY MIN(ts), tool LIMIT ?`,
+    ).all(sessionId, sinceTs, n) as Array<{ tool: string }>;
+    return rows.map((r) => r.tool);
   }
 
   snapshotInsert(s: { sessionId: string; trigger: string; body: string }): number {
@@ -2172,7 +2188,11 @@ export class SqliteAdapter implements StorageAdapter {
           "DELETE FROM api_calls; DELETE FROM tool_uses; DELETE FROM context_events; DELETE FROM transcript_files; DELETE FROM statusline_snapshots;",
         );
       }
-      if (scope === "adjudicator" || scope === "all") this.adjudicator.purge();
+      if (scope === "adjudicator" || scope === "all") {
+        this.adjudicator.purge();
+        // Security assessments live in their own table; the adjudicator scope clears them too.
+        this.security.purge();
+      }
       if (scope === "memories" || scope === "all") {
         this.db.exec("DELETE FROM memories;");
         // The index and graph scopes clear their own tables; a memories-only purge must

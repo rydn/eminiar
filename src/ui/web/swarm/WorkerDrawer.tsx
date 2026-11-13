@@ -2,6 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import type { SwarmDecision, SwarmEvent, SwarmRoleUi, SwarmTask, SwarmWorkerUi } from "../api.js";
 import { Badge, Drawer, EmptyState, Stat, StatRow } from "../ds.js";
+import { RiskBadge, RiskSummary } from "../security.js";
 import { cls, fmt } from "../util.js";
 import { RoleChip, State, useNow } from "./bits.js";
 import { DecisionSection, workerDecisions } from "./decision.js";
@@ -143,6 +144,17 @@ export function WorkerDrawer({
           <>
             {role.description ? <p class="small sw-wd-p">{role.description}</p> : null}
             <ModelRange role={role} />
+            {role.risk ? (
+              <>
+                <div class="sw-wd-kv small">
+                  <span class="k">risk</span>
+                  <span class="muted">
+                    of the role's grant at default autonomy (grant {role.risk.grantStatus})
+                  </span>
+                </div>
+                <RiskSummary badge={role.risk} detail />
+              </>
+            ) : null}
             <div class="sw-wd-kv small">
               <span class="k">tools</span>
               <span>
@@ -204,6 +216,7 @@ export function WorkerDrawer({
                 <span class="t" title={t.title}>
                   {t.title}
                 </span>
+                {t.risk ? <RiskBadge level={t.risk.level} score={t.risk.score} compact /> : null}
               </li>
             ))}
           </ul>

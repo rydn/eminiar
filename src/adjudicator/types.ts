@@ -3,6 +3,7 @@
  * declarations: no imports with side effects, so the hook bundle pays nothing while the
  * adjudicator is off.
  */
+import type { SecurityHint, SecurityModelAnswer } from "./security/types.js";
 
 /** Bump when scoring changes so cached verdicts and stored rows from older scorers are told apart. */
 export const SCORER_VERSION = "1";
@@ -33,6 +34,20 @@ export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 export const MODES = ["advise", "apply"] as const;
 export type Mode = (typeof MODES)[number];
+
+// The enums of adjudicator.security that src/config.ts reads (the rest of the security
+// vocabulary is in security/types.ts, which re-exports these). They live here because the hooks
+// load this file anyway and must not load a security module while security is off.
+
+/** security.model: "provider" also asks the adjudicator's provider the security questions. */
+export const SECURITY_MODEL_SETTINGS = ["off", "provider"] as const;
+export type SecurityModelSetting = (typeof SECURITY_MODEL_SETTINGS)[number];
+/** security.minLevel: the lowest risk level that gets a line; lower levels are only recorded. */
+export const MIN_LEVELS = ["medium", "high", "critical"] as const;
+export type MinLevel = (typeof MIN_LEVELS)[number];
+/** security.notifyUser: which levels also reach the user as a systemMessage. */
+export const NOTIFY_LEVELS = ["off", "critical", "high"] as const;
+export type NotifyLevel = (typeof NOTIFY_LEVELS)[number];
 
 export type Source = "heuristic" | "blend" | "cache" | "fallback";
 
@@ -170,6 +185,12 @@ export interface AdjudicationRequest {
      * pass them): a kebab-case name counts as a package only when listed (features.ts PKG rule).
      */
     libraries?: readonly string[];
+    /**
+     * Asks the provider the security questions too (security/prompt.ts). Set only by the plan,
+     * em_adjudicate security and the CLI test/eval, and only while security.model is "provider";
+     * a request without it is byte-identical to one from before security existed.
+     */
+    security?: SecurityHint;
   };
 }
 
@@ -187,6 +208,8 @@ export interface ProviderAnswer {
   tool?: Dist;
   risky?: number;
   needsPlan?: number;
+  /** The security questions' answer; only for a request that carried hints.security. */
+  security?: SecurityModelAnswer;
 }
 
 export interface ProviderResult {
@@ -326,6 +349,8 @@ export interface Verdict extends ScoreSet {
    * scores JSON), so feedback lands in the bucket the same request reads.
    */
   heuristicComplexity?: number;
+  /** The provider's security answer (engine copies it from ProviderAnswer.security). */
+  security?: SecurityModelAnswer;
 }
 
 export type AdjudicationAction =

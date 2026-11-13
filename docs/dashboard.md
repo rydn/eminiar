@@ -215,6 +215,17 @@ invalid, disabled, agent files out of date, or enabled and in sync. The state is
 While a run is active and the tab is visible, new events are polled every 2 seconds and the
 snapshot every 5. Otherwise the run list refreshes every 15 seconds.
 
+**Risk badges** appear only while the opt-in [security advice](adjudicator.md#security-advice) is
+on; with it off the server leaves the `risk` fields out and nothing renders. A role chip in the
+Swarms card shows the role's risk from MEDIUM up (its tools and description at default autonomy);
+each run in the list and its header show the worst level of its tasks with counts per level; each
+task card shows its latest assessment, and the task's decision section lists the legs, rules,
+reasons and the leg to drop; the worker drawer shows the role's badge and reasons. Risk is a glyph
+and a word, never colour alone (○ low, ◐ medium, ▲ high, ⬢ critical). Task rows are polled
+incrementally, and a task's risk is re-sent when its security row is newer than its task row, so
+it does not wait for a task change. A run nobody assessed shows nothing in the run list. The
+assessment drawer traps keyboard focus.
+
 With no runs yet, the page says so and shows the command to start one
 (`/eminiar:em-swarm <swarm> <goal>`) with a preview of each swarm. Without a swarm file, the
 tab explains the feature, shows the starter file read-only, and offers a **Create
@@ -452,6 +463,40 @@ a personal setting that a project's `eminiar.config.json` cannot set). With capt
 nothing stored yet it says "Capture is on. No request has gone to Jev since. Prompt scoring runs
 in the background, so a request appears when that job finishes." Like the impact panel, it is
 not rendered, and nothing is fetched, unless the adjudicator is on with the `typesafe` provider.
+
+#### Security panel
+
+Inside the Adjudicator tab, above the routing tiles, when `adjudicator.security.enabled` is on. It
+works with the routing adjudicator off. With security off the panel is not rendered and the tab
+makes no `/api/adjudicator/security` request. The range switch applies.
+
+- **Tiles:** assessments, high, critical, the share of model answers that raised a level, and the
+  model status (off, ready, needs the adjudicator, unsupported).
+- **Risk by level** and **per day** (UTC days, low at the bottom), **rules fired** with what each
+  one means on hover, and **heuristic vs Jev**: a matrix of the heuristic level against the final
+  level, with the raised, lower and agreed counts. The model can only raise a level, so "lower"
+  means it was ignored.
+- **Recent high and critical** and **Worst** (by level, then score). Each item shows its legs, its
+  rules, the reasons and the leg to drop. Click one for the drawer: the exposures by kind (task,
+  grant, latent, session), each rule's contribution, the floors, the autonomy, the grant, the
+  model's severity and threat answers, and the remedy.
+- **Try it:** paste a task and the tools the agent holds to get the heuristic's answer. Nothing is
+  stored or sent, and the text is not echoed back.
+- **Last eval:** the report saved by `eminiar adjudicator security eval --save`. Its items were
+  written by the same design as the scorer, so it shows consistency, not independent accuracy.
+
+API (JSON, loopback only). With security off every route answers
+`200 {active: false, reason: "disabled"}` before it reads the database or the request body. A wrong
+method is a 405 first; a database failure is a fixed 503. No stored payload contains task text beyond the
+80-character redacted head, and none contains a key.
+
+| Route | Returns |
+|---|---|
+| `GET /api/adjudicator/security?since=` | the model setting and status, totals by level and surface, the per-day series, rules fired, the heuristic-vs-model contribution, the newest 20 HIGH+ assessments, the worst ten, the last eval (default `since=30d`, or `all`) |
+| `GET /api/adjudicator/security/assessment?id=` | one assessment in full: exposures by kind, rule contributions, floors, autonomy, grant, session taint, the model's answer, the remedy and the reasons |
+| `POST /api/adjudicator/security/test` | `{text, tools?, taint?, agentType?, role?, autonomy?}`: a heuristic assessment that is never stored |
+
+`GET /api/adjudicator` also carries `security: {enabled, model}`, which is what shows the panel.
 
 ## Deep links
 

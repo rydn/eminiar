@@ -10,6 +10,7 @@
  *   GET  /api/adjudicator/jev/exchanges  the stored Jev requests, newest first, without bodies
  *   GET  /api/adjudicator/jev/exchange   one stored Jev request with its request/response bodies
  *   POST /api/adjudicator/test       try-it: score a text; never persisted
+ *   GET  /api/adjudicator/security[/assessment], POST /security/test   the security panel (security-api.ts)
  *
  * Every GET but /jev/exchange(s) runs learn.reconcile (limit 500) first so outcomes and savings are
  * current. /jev does it after its Jev gate (nothing is read or written when Jev is off): the panel
@@ -36,6 +37,7 @@ import {
 import { biasFromRows, DEFAULT_LEARNING, reconcile } from "../adjudicator/learn.js";
 import { hasProvider, registerProvider } from "../adjudicator/providers/index.js";
 import { allRows, savingsReport } from "../adjudicator/savings.js";
+import { overviewFlag } from "../adjudicator/security/report.js";
 import {
   type AdjudicationOutcome,
   type AdjudicationRow,
@@ -64,6 +66,7 @@ import type {
 } from "../storage/types.js";
 import { parseSince } from "../tools/em_usage.js";
 import type { PricingOverrides } from "../usage/pricing.js";
+import { securityRoute } from "./security-api.js";
 import type { Reply } from "./swarm-api.js";
 
 export const OUTCOMES: readonly AdjudicationOutcome[] = [
@@ -365,6 +368,8 @@ export function overviewPayload(
   return {
     enabled: a.enabled,
     mode: a.mode,
+    /** The security panel's gate: when `enabled` is false the web client mounts nothing. */
+    security: overviewFlag(a),
     config: sanitizedConfig(a),
     provider: providerView(r),
     /** Where the key would come from; never the key or any part of it. */
@@ -948,6 +953,8 @@ export async function adjudicatorRoute(
     if (id.error) return id.error;
     return jevExchangePayload(ctx, deps, id.value as number);
   }
+  if (path === "/api/adjudicator/security" || path.startsWith("/api/adjudicator/security/"))
+    return securityRoute(ctx, req, deps);
   if (path === "/api/adjudicator/test") {
     if (method !== "POST") return fail(405, "POST only");
     let body: unknown;

@@ -31,6 +31,11 @@ const RECALL_NEEDS_MS = 600;
 /** What one recall index search needs left: the second of its two is skipped when below this. */
 const RECALL_STEP_NEEDS_MS = 300;
 const ADJUDICATOR_NEEDS_MS = 1500;
+/**
+ * The security line of a prompt: a heuristic over the prompt and a handful of reads, a few
+ * milliseconds. Defined here, not in security/hook.ts: importing the constant would load the module.
+ */
+const SECURITY_NEEDS_MS = 200;
 /** What one best-effort write of PostToolUseFailure needs left: its short wait and a margin. */
 const BEST_EFFORT_NEEDS_MS = 1000;
 
@@ -178,6 +183,26 @@ export const userPromptSubmit: HookHandler = async (input) => {
       const a = await onPrompt(ctx, db, input, sessionId);
       if (a?.context) parts.push(a.context);
       systemMessage = a?.systemMessage;
+    } catch {
+      // advice is optional
+    }
+  }
+  // Security advice (off by default; loaded only when on, with or without the adjudicator): its
+  // line goes after the routing line as a part of its own, and a CRITICAL prompt tells the user.
+  // Which prompts speak (CRITICAL, once per session) is decided in securityOnPrompt.
+  const adj = ctx.config.adjudicator;
+  if (
+    adj.security.enabled &&
+    adj.security.surfaces.prompt &&
+    input.client !== "cursor" &&
+    hasBudget(SECURITY_NEEDS_MS)
+  ) {
+    try {
+      const { securityOnPrompt } = await import("../adjudicator/security/hook.js");
+      const s = securityOnPrompt(ctx, db, input, sessionId);
+      if (s?.context) parts.push(s.context);
+      if (s?.systemMessage)
+        systemMessage = systemMessage ? `${systemMessage}\n${s.systemMessage}` : s.systemMessage;
     } catch {
       // advice is optional
     }

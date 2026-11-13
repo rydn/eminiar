@@ -61,6 +61,7 @@ import { extractFeatures } from "./features.js";
 import { type Catalogue, DEFAULT_TIERS, scoreHeuristic } from "./heuristic.js";
 import { createProvider, type ProviderDeps, ProviderError } from "./providers/index.js";
 import { head, inputHash, normalize } from "./redact.js";
+import { security } from "./security/load.js";
 import {
   type AdjudicationRequest,
   type AdjudicatorProvider,
@@ -254,6 +255,8 @@ export function cacheKeyFor(
     weights: ctx.config?.weights,
     // A brief scored per statement blends onto another heuristic than the same text scored whole.
     units: byUnits(req.surface, ctx.units) ? UNITS_VERSION : undefined,
+    // The security questions change the answer: only a request with a hint is keyed on it.
+    security: h?.security ? security().prompt.securityKeyPart(h.security) : undefined,
   });
   return createHash("sha256")
     .update([SCORER_VERSION, r.configured, r.model ?? "", req.surface, inputs, text].join("|"))
@@ -287,6 +290,7 @@ export function verdictColumns(
     bias: v.bias,
     heuristicComplexity: v.heuristicComplexity,
     units: o.units,
+    securityModel: v.security,
   };
   return {
     complexity: v.complexity,
@@ -575,6 +579,9 @@ export async function adjudicate(
         providerLatencyMs,
         usage,
       });
+      // The model's security answer rides on the verdict (and so in the cache); the combination
+      // with the heuristic (it can only raise) is security/combine.ts's.
+      if (answer.security) it.verdict.security = answer.security;
       it.providerModel = res.model || r.model;
       if (store) {
         const v = it.verdict;

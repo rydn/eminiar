@@ -25,6 +25,14 @@
  * version gate: eminiar holds no version in memory or its DB, and the hook input carries none
  * (only the transcript does, which the hot path does not read); a CLI below 2.1.292 is expected
  * to drop the unknown key.
+ *
+ * Security advice (adjudicator.security, src/adjudicator/security/) rides on the same call-outs
+ * and is loaded only when it is on: afterRouting resolves the agent's definition once, asks
+ * security/hook.ts for the dispatch's assessment, and hands onPreAgent what it needs (`sec`): a
+ * HIGH or CRITICAL dispatch holds apply mode (no model, no effort, no provider call, no
+ * updatedInput, no permissionDecision) and its model advice keeps the security floor. The
+ * prompt's security line is added by the prompt hook itself (src/hooks/capture.ts), which serves
+ * both modes.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -61,6 +69,7 @@ import {
   tierRank,
   withKeptModel,
 } from "./savings.js";
+import type { Level } from "./security/types.js";
 import {
   appliedTier,
   dispatchRule,
@@ -77,6 +86,7 @@ import {
   rangedPasses,
   rangedTier,
 } from "./swarm.js";
+import { findTask } from "./task-lookup.js";
 import {
   type AdjudicationAction,
   type AdjudicationRequest,
@@ -352,19 +362,75 @@ export async function afterRouting(
 ): Promise<HookOutput | undefined> {
   try {
     if (!active(ctx.config.adjudicator, input) || !input.tool_input) return out;
-    if (AGENT_TOOLS.has(input.tool_name ?? "")) {
-      // A denied or asked call is never rewritten: onPreAgent then applies no effort either.
-      const pd = out?.hookSpecificOutput?.permissionDecision;
-      const a = await onPreAgent(ctx, input, spawn, deps, pd === "deny" || pd === "ask");
-      if (!a) return out;
-      const next = a.model || a.effort ? withModel(out, input.tool_input, a.model, a.effort) : out;
-      return withNote(next, a.note);
-    }
+    if (AGENT_TOOLS.has(input.tool_name ?? ""))
+      return await afterRoutingAgent(ctx, input, spawn, out, deps);
     return withNote(out, onPreTool(ctx, input, out, deps));
   } catch (err) {
     log(`adjudicator: afterRouting ${(err as Error)?.message ?? String(err)}`);
     return out;
   }
+}
+
+/**
+ * The Agent/Task branch of afterRouting. With security on (and the call not denied: nothing runs,
+ * so there is nothing to warn about) the agent's definition is resolved once, the dispatch is
+ * assessed, onPreAgent gets the hold and the floor, and the assessment is stored beside the routing
+ * row and added to the output (security/hook.ts: a line and a user message, never a decision).
+ */
+async function afterRoutingAgent(
+  ctx: ProjectContext,
+  input: HookInput,
+  spawn: SwarmSpawnCheck | undefined,
+  out: HookOutput | undefined,
+  deps: HookDeps,
+): Promise<HookOutput | undefined> {
+  const secCfg = ctx.config.adjudicator.security;
+  const pd = out?.hookSpecificOutput?.permissionDecision;
+  const denied = pd === "deny";
+  let hook: typeof import("./security/hook.js") | undefined;
+  let adv: ReturnType<typeof import("./security/hook.js").securityPreAgent>;
+  let pin: AgentPin | undefined;
+  if (secCfg.enabled && secCfg.surfaces.agent && !denied) {
+    try {
+      hook = await import("./security/hook.js");
+      if (hook.securityActive(ctx, input, "agent")) {
+        pin = resolveAgentPin(str(input.tool_input?.subagent_type) ?? "general-purpose", {
+          root: ctx.root,
+          cwd: input.cwd,
+          env: deps.env ?? process.env,
+        });
+        adv = hook.securityPreAgent(ctx, input, spawn, { pin });
+      }
+    } catch (err) {
+      log(`adjudicator: security ${(err as Error)?.message ?? String(err)}`);
+      adv = undefined;
+    }
+  }
+  const sec: AgentSecurity | undefined = adv
+    ? { level: adv.level, hold: adv.hold, pin }
+    : undefined;
+  // A denied or asked call is never rewritten: onPreAgent then applies no effort either.
+  const a = await onPreAgent(ctx, input, spawn, deps, denied || pd === "ask", sec);
+  let next = out;
+  if (a) {
+    if ((a.model || a.effort) && input.tool_input)
+      next = withModel(next, input.tool_input, a.model, a.effort);
+    next = withNote(next, a.note);
+  }
+  if (adv && hook) {
+    hook.recordAdvice(adv, { adjudicationId: a?.rowId });
+    next = hook.withSecurity(next, adv);
+  }
+  return next;
+}
+
+/** What onPreAgent needs of the security assessment (afterRoutingAgent passes it). */
+export interface AgentSecurity {
+  level: Level;
+  /** HIGH or CRITICAL: apply mode stands down for this dispatch. */
+  hold: boolean;
+  /** The agent's definition, resolved once. */
+  pin?: AgentPin | undefined;
 }
 
 export interface AgentAdvice {
@@ -421,22 +487,6 @@ function storedRoleConfidence(scores: string | null | undefined): number | undef
   return briefUnitsOf(scores)?.roleConfidence;
 }
 
-/** The swarm task of a worker dispatch: this project's ledger, else the coordination root's. */
-function findTask(
-  ctx: ProjectContext,
-  db: StorageAdapter,
-  runId: string,
-  taskId: number,
-): { db: StorageAdapter; task: TaskRow } | undefined {
-  const t = db.swarm.taskGet(taskId);
-  if (t && t.run_id === runId) return { db, task: t };
-  const main = coordinationRoot(ctx.root);
-  if (main === ctx.root) return undefined;
-  const mdb = getStorage(getContext(main), { vectors: false });
-  const m = mdb.swarm.taskGet(taskId);
-  return m && m.run_id === runId ? { db: mdb, task: m } : undefined;
-}
-
 /**
  * An Agent/Task dispatch: plan row (run, task) → cache → heuristic; on a miss in apply mode the
  * provider within agentMs. Inserts one `agent` row (parent = plan row, model requested, baseline
@@ -449,6 +499,8 @@ export async function onPreAgent(
   deps: HookDeps = {},
   /** Routing denied or asked: the call is not rewritten, so no effort is applied. */
   blocked = false,
+  /** The dispatch's security assessment (afterRoutingAgent), when security advice is on. */
+  sec?: AgentSecurity,
 ): Promise<AgentAdvice | undefined> {
   const cfg = ctx.config.adjudicator;
   if (!active(cfg, input) || !cfg.surfaces.agent) return undefined;
@@ -489,7 +541,7 @@ export async function onPreAgent(
   const explicit = str(ti.model);
   // The agent's definition in Claude Code's lookup order. A pin that cannot be read (a plugin
   // agent without a readable file, a --agents session agent) is never overridden: advice only.
-  const pin = resolveAgentPin(agentType, { root: ctx.root, cwd: input.cwd, env });
+  const pin = sec?.pin ?? resolveAgentPin(agentType, { root: ctx.root, cwd: input.cwd, env });
   const pinned = pin.status === "pinned" ? pin.model : undefined;
   const pinnedRespected = cfg.apply.respectFrontmatter && isPinned(pinned);
   const pinUnknown = cfg.apply.respectFrontmatter && pin.status === "unknown";
@@ -516,8 +568,15 @@ export async function onPreAgent(
   const before = dispatchRule({ ...facts, ranged: !!ranged });
   const applyMode = cfg.mode === "apply";
   const inScope = cfg.apply.scope === "all" || !!worker;
+  // Security HIGH or CRITICAL holds apply mode: no model, no effort, no provider call, so no
+  // updatedInput and no permissionDecision "allow" (the dispatch goes on as routing decided).
+  const held = !!sec?.hold && applyMode && inScope;
   const mayApply =
-    applyMode && inScope && (before.model === "pass" || before.model === "ranged") && !explicit;
+    applyMode &&
+    inScope &&
+    !held &&
+    (before.model === "pass" || before.model === "ranged") &&
+    !explicit;
   const sessionId =
     input.session_id && input.session_id !== "unknown" ? input.session_id : undefined;
   // Without the adjudicator: FORCE runs CLAUDE_CODE_SUBAGENT_MODEL (else the main session's model)
@@ -565,9 +624,9 @@ export async function onPreAgent(
   const opts = engineOptions(db, cfg, deps);
   // The provider is consulted when the verdict will be applied: the model (mayApply) or, on a
   // pinned, explicit-model or FORCE dispatch, the effort alone, which overrides the call's and
-  // the agent file's own. Advise mode, a fork, a blocked call and CLAUDE_CODE_EFFORT_LEVEL
-  // (nothing to apply) stay call-free.
-  const willApplyEffort = applyMode && inScope && !blocked && !fork && !effortEnv;
+  // the agent file's own. Advise mode, a fork, a blocked call, a security hold and
+  // CLAUDE_CODE_EFFORT_LEVEL (nothing to apply) stay call-free.
+  const willApplyEffort = applyMode && inScope && !blocked && !held && !fork && !effortEnv;
   opts.call = (mayApply || willApplyEffort) && !plan ? "inline" : "never";
   opts.row = row;
   const req: AdjudicationRequest = { key: "agent", surface: "agent", text };
@@ -587,7 +646,21 @@ export async function onPreAgent(
   const c = Math.round(plan?.complexity ?? v.complexity);
   const effort = plan?.effort ?? v.effort;
   const role = plan?.role ?? v.role.choice;
-  const clamped = clampTier(tier, cfg.apply.floor, cfg.apply.ceiling);
+  // Under security HIGH or CRITICAL a model advice never names a tier below the security floor or
+  // the dispatch's baseline (it says "keep <model>" when nothing is left to pass). Apply mode is
+  // held there, so the secured tiers are advice only. Loaded only for such a dispatch.
+  const S = sec?.hold ? await import("./security/hook.js") : undefined;
+  const floorLabel = S ? (await import("./security/advice.js")).FLOOR_LABEL : "";
+  let keepSec: string | undefined;
+  let flooredSec = false;
+  const secured = (t: Tier | undefined, ceiling?: Tier): Tier | undefined => {
+    if (!t || !S || !sec) return t;
+    const sm = S.secureModel(sec.level, t, cfg.security.modelFloor, baseline.model);
+    if (sm.keep) keepSec = sm.keep;
+    flooredSec ||= sm.floored;
+    return ceiling && tierRank(sm.tier) > tierRank(ceiling) ? ceiling : sm.tier;
+  };
+  const clamped = secured(clampTier(tier, cfg.apply.floor, cfg.apply.ceiling));
   // The plan row's brief scoring when there is one (its verdict is the decision), else this one's;
   // a row without `units` counts as not saturated (units.ts).
   const units = plan ? briefUnitsOf(plan.scores) : a.units;
@@ -595,11 +668,14 @@ export async function onPreAgent(
   const roleConf = (plan ? storedRoleConfidence(plan.scores) : undefined) ?? v.role.confidence;
   // A ranged agent's pick inside its range ∩ apply.floor..ceiling; it moves the model only when
   // it is not the fallback's tier (the bare tier would replace a pinned id or [1m] variant).
-  const pick = ranged ? rangedTier(tier, ranged, cfg.apply.floor, cfg.apply.ceiling) : undefined;
+  const pick = ranged
+    ? secured(rangedTier(tier, ranged, cfg.apply.floor, cfg.apply.ceiling), ranged.ceiling)
+    : undefined;
   const moves = !!ranged && rangedPasses(pick, ranged.fallback);
   // Apply mode in scope sets the advised effort whatever the call or the agent file says (the
   // hook's value wins); only CLAUDE_CODE_EFFORT_LEVEL outranks it, so that alone is `effortSet`.
-  const effortApply = applyMode && inScope && !blocked && !!effortLevel(effort);
+  // A security hold sets none: the effort stays advice, like the model.
+  const effortApply = applyMode && inScope && !blocked && !held && !!effortLevel(effort);
   const rule = dispatchRule({
     ...facts,
     ranged: moves,
@@ -630,7 +706,7 @@ export async function onPreAgent(
   } else if (ranged) {
     // Inside the range only; a pick that is the fallback's tier, or a low confidence, leaves the
     // call alone and the agent runs on its fallback.
-    if (moves && pick && conf >= cfg.apply.minConfidence) {
+    if (moves && pick && conf >= cfg.apply.minConfidence && !held) {
       action = "applied";
       model = pick;
       modelFinal = pick;
@@ -638,7 +714,7 @@ export async function onPreAgent(
       action = moves ? "advised" : "respected";
       modelFinal = ranged.fallback;
     }
-  } else if (clamped && conf >= cfg.apply.minConfidence && !pinUnknown) {
+  } else if (clamped && conf >= cfg.apply.minConfidence && !pinUnknown && !held) {
     action = "applied";
     model = clamped;
     modelFinal = clamped;
@@ -712,6 +788,16 @@ export async function onPreAgent(
               }`
             : `suggested effort ${effort}`;
   const extras = [effortHint];
+  // Apply mode would have moved the model or set the effort here: say why it did not.
+  const heldEffort = !blocked && !effortEnv && !!effortLevel(effort);
+  if (
+    S &&
+    sec &&
+    held &&
+    !fork &&
+    ((!isForced && !explicit && !pinnedRespected && !pinUnknown) || heldEffort)
+  )
+    extras.unshift(S.heldNote(sec));
   // A role is named only from a confident role table.
   if (role && role !== "none" && roleConf >= ROLE_NOTE_MIN) extras.push(`role ${role}`);
   if (applyMode && inScope && pinUnknown && !isForced && !explicit)
@@ -728,7 +814,7 @@ export async function onPreAgent(
       clamped ? ` (adjudicator would pick ${clamped}; ${why})` : ` (${why})`
     }; ${extras.join(", ")}`;
   } else if (rule.model === "ranged" && !explicit) {
-    note = `adjudicator: model ${pick} would do (${span}${why}): pass model:'${pick}'; ${extras.join(", ")}`;
+    note = `adjudicator: model ${pick} would do (${span}${why}): pass model:'${pick}'${flooredSec ? ` (${floorLabel})` : ""}; ${extras.join(", ")}`;
   } else if (ranged && pinDeferred && !explicit) {
     // The pick is the fallback's tier (or outside the apply bounds): the fallback stays.
     note = `adjudicator: ${rangedPart(ranged, pick)}; ${extras.join(", ")}`;
@@ -747,7 +833,9 @@ export async function onPreAgent(
     clamped &&
     clamped !== (tierOf(baseline.model) ?? baseline.model)
   ) {
-    note = `adjudicator: model ${clamped} would do (${why}): pass model:'${clamped}'; ${extras.join(", ")}`;
+    note = `adjudicator: model ${clamped} would do (${why}): pass model:'${clamped}'${flooredSec ? ` (${floorLabel})` : ""}; ${extras.join(", ")}`;
+  } else if (S && sec && keepSec && !explicit) {
+    note = `adjudicator: ${[S.keepNote(sec.level, keepSec), ...extras].join(", ")}`;
   } else {
     note = `adjudicator: ${extras.join(", ")}`;
   }

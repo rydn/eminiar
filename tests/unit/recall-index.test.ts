@@ -112,8 +112,8 @@ function seedWithoutIndex(version: string) {
 }
 
 describe("recall_fts migration (v12)", () => {
-  it("a fresh database has the table, the triggers, secure-delete and schema_version 12, and is ready", () => {
-    expect(db.metaGet("schema_version")).toBe("12");
+  it("a fresh database has the table, the triggers, secure-delete and the latest schema_version, and is ready", () => {
+    expect(db.metaGet("schema_version")).toBe("13");
     expect(recallObjects()).toEqual(
       expect.arrayContaining([
         "recall_fts",
@@ -131,7 +131,7 @@ describe("recall_fts migration (v12)", () => {
   it("upgrading a version 9 database only creates the empty index; recall is [] until the backfill", () => {
     const want = seedWithoutIndex("9");
     db = open();
-    expect(db.metaGet("schema_version")).toBe("12");
+    expect(db.metaGet("schema_version")).toBe("13");
     expect(indexed()).toEqual([]);
     expect(db.metaGet("recall_fts_backfill_after")).toBe("0");
     // never a partial answer and never the whole chunk index while the backfill is pending
@@ -154,7 +154,7 @@ describe("recall_fts migration (v12)", () => {
     );
     r.close();
     db = open();
-    expect(db.metaGet("schema_version")).toBe("12");
+    expect(db.metaGet("schema_version")).toBe("13");
     expect(recallObjects()).toEqual(
       expect.arrayContaining([
         "recall_fts",
@@ -192,7 +192,7 @@ describe("recall_fts migration (v12)", () => {
     db.metaSet("schema_version", "10");
     db.close();
     db = open();
-    expect(db.metaGet("schema_version")).toBe("12");
+    expect(db.metaGet("schema_version")).toBe("13");
     expect(indexed().map((r) => r.id)).toEqual(want);
     expect(db.metaGet("recall_fts_backfill_after")).toBeUndefined();
     expect(secureDelete()).toBe(1);
@@ -222,12 +222,12 @@ describe("recall_fts migration (v12)", () => {
     db.close();
     db = open();
     expect(indexed()).toEqual(before);
-    expect(db.metaGet("schema_version")).toBe("12");
+    expect(db.metaGet("schema_version")).toBe("13");
     expect(db.recallBackfillStep()).toEqual({ done: true, rows: 0 });
   });
 
   it("a heal that finds the database locked leaves it for later and does not throw", () => {
-    seedWithoutIndex("12");
+    seedWithoutIndex("13");
     const other = new Database(path);
     other.exec("BEGIN IMMEDIATE");
     try {

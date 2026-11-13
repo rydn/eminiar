@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, extname, join, relative, resolve } from "node:path";
+import { adjudicatorWanted } from "../config.js";
 import type { ProjectContext } from "../context.js";
 import { sessionContext } from "../context.js";
 import { type DocSource, readManifestAt } from "../docs/manifest.js";
@@ -1565,12 +1566,19 @@ export const preToolUse: HookHandler = async (
   if (spawn?.kind === "deny") return spawn.output;
   // A swarm worker is briefed at SubagentStart; a prompt brief as well would say it twice.
   const out = await route(ctx, input as RoutedInput, spawn?.kind === "worker");
-  // The adjudicator (off by default) is loaded only when enabled, so off costs this one check.
-  // It extends routing's output (the Agent model joins routing's one updatedInput); never denies.
-  if (!ctx.config.adjudicator.enabled || input.client === "cursor") return out;
+  // The adjudicator and the security advice (both off by default) are loaded only when wanted, so
+  // off costs this one check. They extend routing's output (the Agent model joins routing's one
+  // updatedInput, the security line joins its additionalContext); neither ever denies.
+  const adj = ctx.config.adjudicator;
+  if (input.client === "cursor" || !adjudicatorWanted(adj, "preTool", input.tool_name)) return out;
   try {
-    const { afterRouting } = await import("../adjudicator/hooks.js");
-    return await afterRouting(ctx, input, spawn, out);
+    if (adj.enabled) {
+      const { afterRouting } = await import("../adjudicator/hooks.js");
+      return await afterRouting(ctx, input, spawn, out);
+    }
+    // Security alone (the routing adjudicator is off): its light module, Agent/Task only.
+    const { securityAfterRouting } = await import("../adjudicator/security/hook.js");
+    return securityAfterRouting(ctx, input, spawn, out);
   } catch {
     return out;
   }

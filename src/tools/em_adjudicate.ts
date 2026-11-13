@@ -17,6 +17,9 @@ import {
 import { registerProvider } from "../adjudicator/providers/index.js";
 import { head } from "../adjudicator/redact.js";
 import { type SavingsReportOptions, savingsReport } from "../adjudicator/savings.js";
+import { explain as explainSecurity, mcpBlock, viewOfRow } from "../adjudicator/security/advice.js";
+import { assessText, planModelStatus, record } from "../adjudicator/security/assess.js";
+import { AUTONOMIES } from "../adjudicator/security/types.js";
 import { learnedBias } from "../adjudicator/swarm.js";
 import type {
   AdjudicationRequest,
@@ -30,12 +33,14 @@ import type { ProjectContext } from "../context.js";
 import { getProvider } from "../embeddings/provider.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
+import { findSwarm, loadSwarmConfig } from "../swarm/config.js";
 import { capOutput } from "../swarm/format.js";
+import type { RoleSpec } from "../swarm/types.js";
 import { formatUsd } from "../usage/pricing.js";
 import { parseSince } from "./em_usage.js";
 import { defineTool, errorResult, LOCAL_WRITE, type ToolResult, text } from "./types.js";
 
-export const ADJUDICATE_ACTIONS = ["score", "explain", "stats", "feedback"] as const;
+export const ADJUDICATE_ACTIONS = ["score", "explain", "stats", "feedback", "security"] as const;
 export const FEEDBACK_VALUES = ["good", "too_small", "too_big"] as const;
 
 /** The compact actions stay under this; explain may run longer. */
@@ -46,6 +51,8 @@ export const NOTE_MAX = 500;
 
 const OFF =
   "The adjudicator is off for this project: run `eminiar adjudicator enable`, then /mcp reconnect.";
+const SECURITY_OFF =
+  "Security advice is off for this project: run `eminiar adjudicator security enable`, then /mcp reconnect.";
 
 const r2 = (n: number) => (Math.round(n * 100) / 100).toFixed(2);
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -292,6 +299,25 @@ const SCHEMA = {
     .optional()
     .describe(`feedback: a short note, kept redacted and cut to ${NOTE_MAX} chars`),
   since: z.string().optional().describe("stats: ISO date or relative like 7d, 12h"),
+  tools: z
+    .array(z.string().max(100))
+    .max(60)
+    .optional()
+    .describe("security: the tools the agent gets (names as an agent file spells them)"),
+  agent_type: z
+    .string()
+    .max(100)
+    .optional()
+    .describe("security: a subagent_type whose definition gives the tools"),
+  role: z
+    .string()
+    .max(60)
+    .optional()
+    .describe("security: a swarm role whose tools are the agent's (a task's role wins)"),
+  autonomy: z
+    .enum(AUTONOMIES)
+    .optional()
+    .describe("security: how unattended the work is (default: from the agent's permission mode)"),
 };
 
 type Args = z.infer<z.ZodObject<typeof SCHEMA>>;
@@ -300,9 +326,9 @@ export const emAdjudicate = defineTool({
   name: "em_adjudicate",
   annotations: { ...LOCAL_WRITE, openWorldHint: true, idempotentHint: false },
   description:
-    'The adjudicator (opt-in): score how complex a request or task is and which tool, Claude model size (Agent `model`: haiku|sonnet|opus|fable) and swarm role fit it. score {text} or {tasks:[{key,title,detail?,role?}]} returns one line per item with its decision id; explain {id} shows the full score tables, provider status, cost and outcome; stats {since} summarises decisions, follow rate and savings; feedback {id, outcome:"good"|"too_small"|"too_big", note?} teaches the learned bias.',
+    'The adjudicator (opt-in): score how complex a request or task is and which tool, Claude model size (Agent `model`: haiku|sonnet|opus|fable) and swarm role fit it. score {text} or {tasks:[{key,title,detail?,role?}]} returns one line per item with its decision id; explain {id} shows the full score tables, provider status, cost and outcome; stats {since} summarises decisions, follow rate and savings; feedback {id, outcome:"good"|"too_small"|"too_big", note?} teaches the learned bias; security {text | tasks, tools? | agent_type? | role?, autonomy?} rates the security risk of the work for an agent with those tools (advice only, needs adjudicator.security.enabled).',
   schema: SCHEMA,
-  available: (config) => !!config.adjudicator?.enabled,
+  available: (config) => !!config.adjudicator?.enabled || !!config.adjudicator?.security?.enabled,
   handler: (args, ctx) => runAdjudicate(args, ctx),
 });
 
@@ -360,13 +386,12 @@ export async function runAdjudicate(
       } catch {
         breaker = undefined;
       }
-      return text(
-        formatExplain(row, {
-          provider: r.enabled ? r.provider : "off",
-          ...(r.detail ? { detail: r.detail } : {}),
-          ...(breaker ? { breaker } : {}),
-        }),
-      );
+      const out = formatExplain(row, {
+        provider: r.enabled ? r.provider : "off",
+        ...(r.detail ? { detail: r.detail } : {}),
+        ...(breaker ? { breaker } : {}),
+      });
+      return text(cfg?.security?.enabled ? withSecurityLink(out, store, row) : out);
     }
     case "stats": {
       let since: number | undefined;
@@ -377,6 +402,8 @@ export async function runAdjudicate(
       }
       return text(formatStats(db(), ctx.config, since));
     }
+    case "security":
+      return runSecurity(args, ctx, deps);
     case "feedback": {
       if (!cfg?.enabled) return text(OFF);
       if (args.id === undefined || !args.outcome)
@@ -403,4 +430,149 @@ export async function runAdjudicate(
     }
   }
   return errorResult(`unknown action "${String(args.action)}"`);
+}
+
+// --- security ------------------------------------------------------------------------------
+
+/** A swarm role by role name or agent type, from the project's swarm file. */
+function findRole(root: string, name: string): RoleSpec | undefined {
+  const loaded = loadSwarmConfig(root);
+  if (loaded.state !== "ok") return undefined;
+  for (const sw of loaded.config.swarms) {
+    const hit = findSwarm(loaded.config, sw.name)?.roles.find(
+      (r) => r.role === name || r.agentType === name,
+    );
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** Explain, plus the security assessment stored beside this decision (when there is one). */
+function withSecurityLink(out: string, store: StorageAdapter, row: AdjudicationRow): string {
+  try {
+    const s = store.security.byAdjudication(row.id);
+    if (!s) return out;
+    const sec = explainSecurity(viewOfRow(s), {
+      surface: s.surface,
+      ts: s.ts,
+      agentType: s.agentType,
+      runId: s.runId,
+      taskId: s.taskId,
+    });
+    return `${out}\n\n${capOutput(sec, 3000)}`;
+  } catch {
+    return out;
+  }
+}
+
+/**
+ * security: one block per item (the text, or each task) with its level, legs, rules, floors, the
+ * grant, the model and the remedy. The heuristic always answers; with security.model "provider"
+ * and the adjudicator on, the provider's answer is blended in too (it can only raise a level).
+ * Every item is stored as an `mcp` assessment. Advice only.
+ */
+async function runSecurity(
+  args: Args,
+  ctx: ProjectContext,
+  deps: {
+    db?: StorageAdapter;
+    provider?: Parameters<typeof adjudicate>[1]["provider"];
+    now?: () => number;
+  },
+): Promise<ToolResult> {
+  const cfg = ctx.config.adjudicator;
+  const sec = cfg?.security;
+  if (!cfg || !sec?.enabled) return text(SECURITY_OFF);
+  const items: Array<{ key: string; text: string; role?: string | undefined }> = [];
+  if (args.text?.trim()) items.push({ key: "text", text: args.text, role: args.role });
+  for (const t of args.tasks ?? [])
+    items.push({
+      key: t.key,
+      text: [t.title, t.detail ?? ""].join("\n").trim(),
+      role: t.role ?? args.role,
+    });
+  if (!items.length) return errorResult("security needs text or tasks:[{key, title}]");
+  const roles = new Map<string, RoleSpec>();
+  for (const name of new Set(items.map((i) => i.role).filter((r): r is string => !!r))) {
+    const r = findRole(ctx.root, name);
+    if (!r) return errorResult(`no swarm role "${name}" in the project's swarm file`);
+    roles.set(name, r);
+  }
+  const base = (it: (typeof items)[number], o: Parameters<typeof assessText>[2] = {}) => {
+    const r = it.role ? roles.get(it.role) : undefined;
+    return assessText(
+      sec,
+      {
+        text: it.text,
+        ...(args.tools ? { tools: args.tools } : {}),
+        ...(args.agent_type ? { agentType: args.agent_type } : {}),
+        ...(r
+          ? {
+              role: {
+                tools: r.tools,
+                disallowedTools: r.disallowedTools,
+                description: r.description,
+                toolsProfile: r.toolsProfile,
+              },
+            }
+          : {}),
+        ...(args.autonomy ? { autonomy: args.autonomy } : {}),
+      },
+      { root: ctx.root, cwd: ctx.root, ...(deps.now ? { now: deps.now } : {}), ...o },
+    );
+  };
+  let assessed = items.map((it) => base(it));
+  const store = deps.db ?? getStorage(ctx);
+  let rowIds: Array<number | undefined> = [];
+  if (sec.model === "provider" && cfg.enabled) {
+    try {
+      const out = await adjudicate(
+        items.map((it, i) => ({
+          key: it.key,
+          surface: "mcp" as const,
+          text: it.text,
+          hints: { security: (assessed[i] as (typeof assessed)[number]).hint },
+        })),
+        {
+          config: cfg,
+          store: store.adjudicator,
+          context: "server",
+          call: "inline",
+          budgetMs: cfg.timeouts.planMs,
+          row: { action: "none" },
+          bias: learnedBias(store, cfg),
+          projectRoot: ctx.root,
+          ...(deps.provider !== undefined ? { provider: deps.provider } : {}),
+          ...(deps.now ? { now: deps.now } : {}),
+        },
+      );
+      rowIds = out.map((a) => a.rowId);
+      assessed = items.map((it, i) => {
+        const v = out[i]?.verdict;
+        const status = planModelStatus(sec, true, {
+          security: v?.security,
+          provider: v?.provider,
+          providerStatus: v?.providerStatus,
+        });
+        return base(it, {
+          answer: v?.security,
+          status: v?.security ? undefined : status,
+          source: v?.security ? "blend" : "heuristic",
+        });
+      });
+    } catch {
+      // the heuristic stands: modelStatus says no answer came
+    }
+  }
+  const blocks = assessed.map((a, i) => {
+    const it = items[i] as (typeof items)[number];
+    const id = record(store, cfg, {
+      surface: "mcp",
+      assessed: a,
+      text: it.text,
+      ...(rowIds[i] !== undefined ? { adjudicationId: rowIds[i] } : {}),
+    });
+    return mcpBlock(id !== undefined ? { ...a.view, id } : a.view, { label: it.key });
+  });
+  return text(capOutput(blocks.join("\n"), 8000));
 }

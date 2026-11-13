@@ -1,3 +1,12 @@
+import type {
+  Autonomy,
+  GrantStatus,
+  SecurityAction,
+  SecurityAssessment,
+  Level as SecurityLevel,
+  SecurityModelStatus,
+  SecuritySurface,
+} from "../adjudicator/security/types.js";
 import type { AdjudicationRow, Verdict } from "../adjudicator/types.js";
 
 export type ContentType = "prose" | "code" | "json";
@@ -769,4 +778,140 @@ export interface AdjudicatorStore {
   exchangePurge(): number;
   /** Clears all five adjudicator tables (the exchange log included). */
   purge(): void;
+}
+
+/**
+ * One security assessment as stored in adjudicator_security. Only ids, numbers, tags and the
+ * 80-char redacted head: never a secret, a tool argument, a path or a matched text. The store
+ * redacts and caps again on the way in, so a careless caller cannot widen what is kept.
+ */
+export interface SecurityInput {
+  /** Epoch ms; default now. */
+  ts?: number;
+  surface: SecuritySurface;
+  sessionId?: string | null;
+  toolUseId?: string | null;
+  agentType?: string | null;
+  runId?: string | null;
+  taskId?: number | null;
+  /** adjudications.id of the routing row this assessment sits beside. */
+  adjudicationId?: number | null;
+  inputHash?: string | null;
+  /** Redacted head of the assessed text (at most 80 characters); null when privacy.storeHead is off. */
+  inputHead?: string | null;
+  level: SecurityLevel;
+  score: number;
+  action: SecurityAction;
+  heuristicLevel: SecurityLevel;
+  heuristicScore: number;
+  modelLevel?: SecurityLevel | null;
+  modelScore?: number | null;
+  modelStatus: SecurityModelStatus;
+  source: SecurityAssessment["source"];
+  autonomy?: Autonomy | null;
+  grantStatus?: GrantStatus | null;
+  /** Rule and floor ids that fired. */
+  rules?: string[];
+  /**
+   * Exposures, rule adds, floors, the model answer, the remedy, the normalised tools and the
+   * reasons. Sanitised on insert (secret-named keys and argument-like keys dropped, strings
+   * redacted and cut) and capped at SECURITY_DETAIL_MAX bytes.
+   */
+  detail?: unknown;
+  /** True when a line was shown to the agent or the user. */
+  noted?: boolean;
+  version?: string;
+}
+
+export interface SecurityRow {
+  id: number;
+  ts: number;
+  surface: SecuritySurface;
+  sessionId: string | null;
+  toolUseId: string | null;
+  agentType: string | null;
+  runId: string | null;
+  taskId: number | null;
+  adjudicationId: number | null;
+  inputHash: string | null;
+  inputHead: string | null;
+  level: SecurityLevel;
+  score: number;
+  action: SecurityAction;
+  heuristicLevel: SecurityLevel;
+  heuristicScore: number;
+  modelLevel: SecurityLevel | null;
+  modelScore: number | null;
+  modelStatus: string;
+  source: string;
+  autonomy: string | null;
+  grantStatus: string | null;
+  rules: string[];
+  detail: unknown;
+  noted: boolean;
+  version: string;
+}
+
+export interface SecurityListFilter {
+  /** ts >= since (epoch ms) */
+  since?: number;
+  /** Exactly this level. */
+  level?: SecurityLevel;
+  /** This level or worse. */
+  minLevel?: SecurityLevel;
+  surface?: SecuritySurface;
+  runId?: string;
+  taskId?: number;
+  /** Clamped to 1..500 (default 50). */
+  limit?: number;
+  offset?: number;
+}
+
+export interface SecuritySummary {
+  total: number;
+  byLevel: Record<SecurityLevel, number>;
+  bySurface: Record<string, number>;
+  /** Oldest day first; UTC days (YYYY-MM-DD). */
+  perDay: Array<{ day: string } & Record<SecurityLevel, number>>;
+  /** Rule and floor ids by how many assessments fired them, most first. */
+  rules: Array<{ id: string; n: number }>;
+  /** matrix[heuristic level][final level]: what the model changed. */
+  matrix: Record<SecurityLevel, Record<SecurityLevel, number>>;
+  /** model_status of every assessment. */
+  byStatus: Record<string, number>;
+  /** Assessments the model answered, split by how its level compared with the heuristic's. */
+  modelRaised: number;
+  modelLower: number;
+  modelAgreed: number;
+  /** Assessments without a model answer. */
+  heuristicOnly: number;
+}
+
+/**
+ * Persistence of security assessments (table adjudicator_security, migration v13). A separate
+ * store from AdjudicatorStore on purpose: the try-it wrapper and the routing stats never see
+ * these rows. Synchronous; insert never throws.
+ */
+export interface SecurityStore {
+  /**
+   * Store one assessment. Fails open: a busy or foreign database (no v13 table, read-only)
+   * returns undefined and the advice still shows. Waits at most `lockWaitMs` (default 0: try
+   * once) for another connection's lock. About one insert in a hundred also prunes rows older
+   * than 90 days.
+   */
+  insert(input: SecurityInput, o?: { lockWaitMs?: number }): number | undefined;
+  get(id: number): SecurityRow | undefined;
+  /** The row written beside a routing row (adjudications.id). */
+  byAdjudication(adjudicationId: number): SecurityRow | undefined;
+  /** Newest first; `total` counts every row matching the filter. */
+  list(filter?: SecurityListFilter): { rows: SecurityRow[]; total: number };
+  /** The task's latest assessment: its newest agent row, else its newest plan row. */
+  forTask(runId: string, taskId: number): SecurityRow | undefined;
+  /** The same per task of one run, one query, by task id. */
+  forRun(runId: string): SecurityRow[];
+  summary(since?: number): SecuritySummary;
+  /** Delete rows with ts < before (epoch ms); returns rows deleted. */
+  prune(before: number): number;
+  /** Delete every row; returns how many. Zero when the table is missing. */
+  purge(): number;
 }

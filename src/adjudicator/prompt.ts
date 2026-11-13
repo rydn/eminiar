@@ -1,4 +1,5 @@
 import { forRemote } from "./redact.js";
+import { security } from "./security/load.js";
 import { type AdjudicationRequest, DEFAULT_ROLES, type Tier, TOOL_IDS } from "./types.js";
 
 /**
@@ -113,19 +114,37 @@ export interface StateItem {
   role?: string;
   files?: number;
   deps?: number;
+  /** Security questions only: provider-safe tool ids (MCP as mcp:<class>:<verb>), at most 40. */
+  tools?: string[];
+  /** Security questions only: capability tags of the grant. */
+  capabilities?: string[];
 }
 
-/** Items as sent: positional id, redacted text cut to maxChars, and the task hints when given. */
+/**
+ * Items as sent: positional id, redacted text cut to maxChars, and the task hints when given.
+ * With o.security, an item whose request carries hints.security also gets its sanitized tool ids
+ * and capability tags (security/prompt.ts); nothing else is ever added, and without o.security
+ * the items are exactly what they were before security existed.
+ */
 export function buildItems(
   reqs: readonly AdjudicationRequest[],
   maxChars: number,
   offset = 0,
+  o: { security?: boolean } = {},
 ): StateItem[] {
   return reqs.map((r, i) => {
     const item: StateItem = { id: itemId(offset + i), text: forRemote(r.text, maxChars) };
     if (r.hints?.role) item.role = r.hints.role;
     if (r.hints?.files !== undefined) item.files = r.hints.files;
     if (r.hints?.deps !== undefined) item.deps = r.hints.deps;
+    const sec =
+      o.security && r.hints?.security
+        ? security().prompt.sanitizeSecurityHint(r.hints.security)
+        : undefined;
+    if (sec) {
+      item.tools = sec.tools;
+      item.capabilities = sec.caps;
+    }
     return item;
   });
 }
@@ -202,6 +221,8 @@ export function jevQuestions(
         criteria: toolCriteria,
       };
   }
+  // Security questions only for items that carry tools (buildItems, with a security hint).
+  if (items.some((it) => it.tools)) Object.assign(out, security().prompt.securityQuestions(items));
   return out;
 }
 

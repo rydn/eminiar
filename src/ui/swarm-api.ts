@@ -8,8 +8,12 @@
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { SecurityConfig } from "../adjudicator/security/assess.js";
+import { roleRisk, runRiskOf, runRows, taskRisksOf } from "../adjudicator/security/swarm-risk.js";
+import type { TaskRisk } from "../adjudicator/security/types.js";
 import { decisionOf, swarmDecisions } from "../adjudicator/swarm-decisions.js";
 import { TIERS } from "../adjudicator/types.js";
+import { loadConfig } from "../config.js";
 import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
@@ -125,9 +129,21 @@ function runCounts(db: StorageAdapter, run: RunRow, now: number): RunCounts {
   return { tasks, workers };
 }
 
+/**
+ * adjudicator.security when it is on (the swarm risk fields exist only then), else undefined.
+ * Read per request like the security and adjudicator routes (never ctx.config, which is memoised
+ * per process), so `eminiar adjudicator security on|off` shows with the dashboard open. Off
+ * costs no database read: the callers skip the rows when this is undefined.
+ */
+function securityOf(ctx: ProjectContext): SecurityConfig | undefined {
+  const sec = loadConfig(ctx.root).adjudicator.security;
+  return sec.enabled ? sec : undefined;
+}
+
 function swarmView(
   spec: SwarmSpec,
   files: Map<string, { path: string; action: RoleFileAction; reason?: string | undefined }>,
+  sec?: SecurityConfig,
 ) {
   return {
     name: spec.name,
@@ -151,6 +167,8 @@ function swarmView(
       scope: r.scope,
       memoryTags: r.memoryTags,
       isolation: r.isolation ?? null,
+      // Present only with security on: the role's heuristic risk at default autonomy.
+      ...(sec ? { risk: roleRisk(sec, r) } : {}),
       hasHooks: !!r.hooks && Object.values(r.hooks).some((v) => Array.isArray(v) && v.length > 0),
       file: files.get(r.agentType) ?? {
         path: `.claude/agents/${r.agentType}.md`,
@@ -181,6 +199,7 @@ export function swarmOverview(ctx: ProjectContext, limit = RUNS_LIMIT) {
   const runsLimit = Math.max(1, Math.min(Math.floor(limit) || RUNS_LIMIT, RUNS_LIMIT_MAX));
   // Runs are listed whatever the file's state: the ledger outlives a deleted or broken file.
   const listed = listRuns(db, runsLimit);
+  const sec = securityOf(ctx);
   const runs = listed.runs.map((r) => ({
     id: r.id,
     swarm: r.swarm,
@@ -191,6 +210,8 @@ export function swarmOverview(ctx: ProjectContext, limit = RUNS_LIMIT) {
     updated_at: r.updated_at,
     ended_at: r.ended_at,
     counts: runCounts(db, r, now),
+    // Security on only: the worst latest per-task level and the counts per level.
+    ...(sec ? { risk: runRiskOf(runRows(db, r.id)) } : {}),
   }));
   const runsMore = listed.more;
   if (loaded.state === "absent")
@@ -239,7 +260,7 @@ export function swarmOverview(ctx: ProjectContext, limit = RUNS_LIMIT) {
     sync: config.sync,
     file: config.rel,
     issues: [] as ConfigIssue[],
-    swarms: config.swarms.map((s) => swarmView(s, files)),
+    swarms: config.swarms.map((s) => swarmView(s, files, sec)),
     // Generated files the YAML no longer produces (or every one, when disabled).
     orphans: plan
       .filter((a) => !roleTypes.has(a.agentType))
@@ -374,6 +395,8 @@ export function newestEvents(
 }
 
 export type TaskView = TaskRow & {
+  /** Security on only: the task's latest assessment (its agent row, else its plan row). */
+  risk?: TaskRisk;
   /** `detail` / `result` were cut to TASK_TEXT_MAX; GET /api/swarm/task has the whole task. */
   clipped?: true;
 };
@@ -432,17 +455,27 @@ export function runDetail(ctx: ProjectContext, run: RunRow, opts: RunDetailOpts 
     ]),
   ];
   const since = opts.tasksSince;
-  const tasks = (
-    since === undefined
-      ? snap.tasks
-      : snap.tasks.filter((t) => t.updated_at >= since - TASKS_SINCE_OVERLAP_MS)
-  ).map(clipTask);
+  const sec = securityOf(ctx);
+  const rows = sec ? runRows(db, run.id) : [];
+  const taskRisk = sec ? taskRisksOf(rows) : undefined;
+  // A task changed for a delta client when its row did, or when its latest assessment was written
+  // since: the plan rows land after a slow model call, an agent row after a re-dispatch.
+  const changedSince = (t: TaskRow): boolean =>
+    since === undefined ||
+    t.updated_at >= since - TASKS_SINCE_OVERLAP_MS ||
+    (taskRisk?.get(t.id)?.ts ?? 0) >= since - TASKS_SINCE_OVERLAP_MS;
+  const tasks = snap.tasks.filter(changedSince).map(clipTask);
   const decisions = Object.fromEntries(swarmDecisions(db, run.id).map((d) => [d.taskId, d]));
   const decisionsHash = hashDecisions(decisions);
   const decisionsUnchanged = opts.decisionsHash === decisionsHash;
   return {
     ...snap,
-    tasks,
+    tasks: taskRisk
+      ? tasks.map((t) => {
+          const risk = taskRisk.get(t.id);
+          return risk ? { ...t, risk } : t;
+        })
+      : tasks,
     /**
      * The adjudicator's decision per task id (advice vs what ran), for every task of the run.
      * Omitted (with `decisionsUnchanged`) when the client's `decisionsHash` still matches.
@@ -454,6 +487,7 @@ export function runDetail(ctx: ProjectContext, run: RunRow, opts: RunDetailOpts 
     taskCount: snap.tasks.length,
     /** `tasks` holds only the tasks updated since `tasksSince`. */
     tasksPartial: since !== undefined,
+    ...(sec ? { risk: runRiskOf(rows) } : {}),
     roles,
     stages: spec?.stages ?? [],
     maxAgents: spec?.maxAgents ?? null,

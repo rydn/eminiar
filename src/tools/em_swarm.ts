@@ -1,5 +1,16 @@
 import { z } from "zod";
-import { adjudicatePlan, planAdviceBlock, planNextHint } from "../adjudicator/swarm.js";
+import {
+  finishPlan,
+  type PlanSecurity,
+  type PlanSecurityResult,
+  planSecurity,
+} from "../adjudicator/security/assess.js";
+import {
+  adjudicatePlan,
+  planAdviceBlock,
+  planAdviceEnabled,
+  planNextHint,
+} from "../adjudicator/swarm.js";
 import { getContext, type ProjectContext } from "../context.js";
 import { memoriesRel } from "../memory/store.js";
 import type { StorageAdapter } from "../storage/adapter.js";
@@ -19,6 +30,7 @@ import {
   formatRunStatus,
   formatSwarmList,
   formatSync,
+  OUTPUT_MAX,
   type RunListItem,
   runListItem,
   runRef,
@@ -286,6 +298,8 @@ function planned(
   advice = "",
   /** planNextHint: what to pass on the Agent call, worded like the advice block's head. */
   adviceHint = "",
+  /** The security result (head + a line per risky task); undefined when security advice is off. */
+  security?: PlanSecurityResult,
 ): string {
   const all = db.swarm.tasks(run.id);
   const byId = new Map(all.map((t) => [t.id, t]));
@@ -307,14 +321,50 @@ function planned(
         advice ? adviceHint : ""
       }; run_in_background: true runs them in parallel. Watch with em_swarm {action:"status"}.`
     : "Next: the coordinator spawns workers for these; name the new task ids in your final message.";
-  return capOutput(
-    [
-      head,
-      next,
-      ...rows.map((t) => `#${t.id} ${clip(t.title, 120)}${t.role ? ` (${t.role})` : ""}`),
-      ...(advice ? [advice] : []),
-    ].join("\n"),
+  const body = [
+    head,
+    next,
+    ...rows.map((t) => `#${t.id} ${clip(t.title, 120)}${t.role ? ` (${t.role})` : ""}`),
+    ...(advice ? [advice] : []),
+  ].join("\n");
+  if (!security) return capOutput(body);
+  // The security block has its own budget and is never the part that gets cut: the task list
+  // and routing advice are capped to what is left of OUTPUT_MAX once the block is in.
+  const block = securityBlock(security);
+  return `${capOutput(body, OUTPUT_MAX - block.length - 1, "em_swarm status lists every task")}\n${block}`;
+}
+
+/** Characters the security block may take in a plan answer (head + lines). */
+const SECURITY_BLOCK_MAX = 1500;
+const LEVEL_ORDER = { low: 0, medium: 1, high: 2, critical: 3 } as const;
+
+/**
+ * The plan's security block within SECURITY_BLOCK_MAX: the head always, then the task lines in
+ * plan order, keeping the highest (level, score) ones when they do not all fit. Lines left out
+ * are counted in the head, so a short answer never hides that tasks carry risk.
+ */
+function securityBlock(sec: PlanSecurityResult, max = SECURITY_BLOCK_MAX): string {
+  const risky = sec.items.flatMap((x) => (x.line ? [x] : []));
+  const byRisk = [...risky].sort(
+    (a, b) =>
+      LEVEL_ORDER[b.level] - LEVEL_ORDER[a.level] ||
+      b.view.score - a.view.score ||
+      a.taskId - b.taskId,
   );
+  // Worst case head: the note below adds at most ~70 characters to it.
+  let room = max - sec.head.length - 80;
+  const keep = new Set<number>();
+  for (const x of byRisk) {
+    const line = x.line as string;
+    if (line.length + 1 > room) continue;
+    room -= line.length + 1;
+    keep.add(x.taskId);
+  }
+  const dropped = risky.length - keep.size;
+  const head = dropped
+    ? `${sec.head} · ${dropped} more line${dropped === 1 ? "" : "s"} left out; see em_adjudicate security / dashboard`
+    : sec.head;
+  return [head, ...risky.filter((x) => keep.has(x.taskId)).map((x) => x.line as string)].join("\n");
 }
 
 // --- dispatch ------------------------------------------------------------------------------
@@ -464,6 +514,27 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
       let advice = "";
       let adviceHint = "";
       let adviceNote = "";
+      // Security advice (opt-in, advice only): every task against its role's grant, heuristic
+      // first; the adjudicator's plan call asks the model too and floors the advised model.
+      // Nothing here runs, or is read, while adjudicator.security.enabled is off.
+      let secPlan: PlanSecurity | undefined;
+      let secResult: PlanSecurityResult | undefined;
+      if (ctx.config.adjudicator?.security?.enabled) {
+        try {
+          secPlan = planSecurity(ctx, db, run, swarm, rows, {
+            engine: planAdviceEnabled(ctx.config),
+          });
+        } catch (err) {
+          process.stderr.write(
+            `eminiar: security plan advice skipped: ${(err as Error)?.message ?? String(err)}\n`,
+          );
+        }
+      }
+      const secHook = secPlan && {
+        hints: secPlan.hints,
+        finish: (answers: Parameters<typeof finishPlan>[1]) =>
+          (secResult ??= finishPlan(secPlan as PlanSecurity, answers)),
+      };
       if (ctx.config.adjudicator?.enabled && ctx.config.adjudicator.surfaces.plan) {
         const unavailable = "Adjudicator advice unavailable for this plan (the tasks are planned).";
         try {
@@ -474,6 +545,7 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
             onError: () => {
               adviceNote = unavailable;
             },
+            ...(secHook ? { security: secHook } : {}),
           });
           advice = planAdviceBlock(list);
           adviceHint = planNextHint(list);
@@ -484,7 +556,17 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
           adviceNote = unavailable;
         }
       }
-      const out = planned(db, rows, swarm, run, caller, advice, adviceHint);
+      // The routing advice failed or is off: the security block is the heuristic's alone.
+      if (secPlan && !secResult) {
+        try {
+          secResult = finishPlan(secPlan);
+        } catch (err) {
+          process.stderr.write(
+            `eminiar: security plan advice skipped: ${(err as Error)?.message ?? String(err)}\n`,
+          );
+        }
+      }
+      const out = planned(db, rows, swarm, run, caller, advice, adviceHint, secResult);
       return adviceNote ? `${out}\n${adviceNote}` : out;
     }
 

@@ -124,6 +124,8 @@ interface Setup {
   env?: Record<string, string>;
   /** Importing hooks.ts throws instead of returning the stand-in. */
   hooksBroken?: boolean;
+  /** hooks.ts is the real module (the engine, the prompt builders and the providers load with it). */
+  realHooks?: boolean;
 }
 
 interface World {
@@ -169,7 +171,8 @@ async function boot(setup: Setup = {}): Promise<World> {
   probe.others = [];
   probe.step = "boot";
   vi.resetModules();
-  vi.doMock(HOOKS, setup.hooksBroken ? hooksThatFailToLoad : hooksStandIn);
+  if (setup.realHooks) vi.doUnmock(HOOKS);
+  else vi.doMock(HOOKS, setup.hooksBroken ? hooksThatFailToLoad : hooksStandIn);
   for (const file of OTHER_MODULES)
     vi.doMock(join(ADJUDICATOR_DIR, file), async (importOriginal) => {
       probe.others.push(`${file} @ ${probe.step}`);
@@ -343,6 +346,7 @@ async function runSession(
 }
 
 const ADJUDICATOR_TABLES = [
+  "adjudicator_security",
   "adjudications",
   "adjudicator_bias",
   "adjudicator_cache",
@@ -424,6 +428,22 @@ const OFF: Array<{ name: string; setup: Setup; mode?: string }> = [
     mode: "apply",
   },
   {
+    name: "security configured completely, then switched off",
+    setup: {
+      personal: {
+        adjudicator: {
+          enabled: false,
+          security: {
+            enabled: false,
+            minLevel: "medium",
+            notifyUser: "high",
+            surfaces: { agent: true, prompt: true, plan: true },
+          },
+        },
+      },
+    },
+  },
+  {
     name: "EMINIAR_ADJUDICATOR=0 over a personal opt-in",
     setup: { personal: configured(true), env: { EMINIAR_ADJUDICATOR: "0" } },
     mode: "apply",
@@ -444,6 +464,8 @@ describe("adjudicator off: hooks.ts is never imported", () => {
         enabled: false,
         ...(c.mode ? { mode: c.mode } : {}),
       });
+      // Security is off in every one of these (the tables below include adjudicator_security).
+      expect(w.context().config.adjudicator.security.enabled).toBe(false);
       expectUntouched(w);
       // Routing's own answers: no model or effort for the Agent call, no advice anywhere.
       const updated = out["PreToolUse(Agent)"]?.hookSpecificOutput?.updatedInput;
@@ -452,6 +474,7 @@ describe("adjudicator off: hooks.ts is never imported", () => {
       expect(out.UserPromptSubmit?.systemMessage).toBeUndefined();
       // The call-outs speak as "eminiar adjudicator: ..." or "adjudicator: model ...".
       expect(JSON.stringify(out)).not.toMatch(/adjudicator:/i);
+      expect(JSON.stringify(out)).not.toMatch(/eminiar security/i);
     },
   );
 
@@ -531,5 +554,194 @@ describe("the Cursor client", () => {
     await runSession(w, { client: "cursor" });
     expect(w.context().config.adjudicator.enabled).toBe(true);
     expectUntouched(w);
+  });
+});
+
+/**
+ * Security advice on, the routing adjudicator off (security-only mode): the routing adjudicator's
+ * hooks.ts (and the engine and the providers behind it) is still never loaded. Only the security
+ * module is, and only for an Agent/Task PreToolUse and a prompt, never for another event or tool.
+ */
+describe("security only (the adjudicator off)", () => {
+  const securityOnly: Setup = { personal: { adjudicator: { security: { enabled: true } } } };
+  const SECURITY_SITES = ["UserPromptSubmit", "PreToolUse(Agent)"];
+  /** What security's light module may load: itself and the shared helpers agent-pin.ts needs. */
+  const allowedOther = (f: string): boolean =>
+    f.startsWith("security/") ||
+    ["agent-pin.ts", "task-lookup.ts", "savings.ts", "env.ts", "effort.ts"].includes(f);
+  const importedAt = (): string[] => probe.others.map((o) => o.split(" @ ")[1] ?? "");
+  const importedFiles = (): string[] => probe.others.map((o) => o.split(" @ ")[0] ?? "");
+
+  /** Every adjudicator table except the security one, and the adjudicator meta keys. */
+  const routingFootprint = (w: World): Record<string, unknown> => {
+    const { rows, meta } = footprint(w);
+    return {
+      rows: Object.fromEntries(
+        Object.entries(rows).filter(([t, n]) => t !== "adjudicator_security" && n > 0),
+      ),
+      meta,
+    };
+  };
+  const securityRows = (w: World): number => footprint(w).rows.adjudicator_security ?? 0;
+
+  it("a whole session never loads hooks.ts, the engine or a provider", async () => {
+    const w = await boot(securityOnly);
+    expect(w.context().config.adjudicator).toMatchObject({
+      enabled: false,
+      security: { enabled: true },
+    });
+    expect(probe.others).toEqual([]);
+    const out = await runSession(w);
+    expect({ imported: probe.evaluated, read: probe.reads, called: probe.calls }).toEqual({
+      imported: [],
+      read: [],
+      called: [],
+    });
+    expect(importedFiles().filter((f) => !allowedOther(f))).toEqual([]);
+    expect(importedFiles()).toEqual(expect.arrayContaining(["security/hook.ts"]));
+    // the routing adjudicator wrote nothing and said nothing
+    expect(routingFootprint(w)).toEqual({ rows: {}, meta: [] });
+    expect(JSON.stringify(out)).not.toMatch(/adjudicator:/i);
+  });
+
+  it("loads the security module only for an Agent/Task call and a prompt", async () => {
+    const w = await boot(securityOnly);
+    for (const s of STEPS) {
+      if (SECURITY_SITES.includes(s.label)) continue;
+      await fire(w, s);
+    }
+    await sweep(w);
+    // SessionStart, PreToolUse(Bash), PostToolUse and the rest: nothing was imported or stored.
+    expect(probe.others).toEqual([]);
+    expect(securityRows(w)).toBe(0);
+
+    await fire(w, step("UserPromptSubmit"));
+    expect(new Set(importedAt())).toEqual(new Set(["UserPromptSubmit"]));
+    expect(securityRows(w)).toBe(1);
+
+    probe.others = [];
+    const w2 = await boot(securityOnly);
+    await fire(w2, step("PreToolUse(Agent)"));
+    expect(new Set(importedAt())).toEqual(new Set(["PreToolUse(Agent)"]));
+    expect(importedFiles().filter((f) => !allowedOther(f))).toEqual([]);
+    expect(securityRows(w2)).toBe(1);
+    expect(routingFootprint(w2)).toEqual({ rows: {}, meta: [] });
+  });
+
+  it("a switched-off surface loads nothing", async () => {
+    for (const surfaces of [{ agent: false }, { prompt: false }]) {
+      const w = await boot({
+        personal: { adjudicator: { security: { enabled: true, surfaces } } },
+      });
+      const site = "agent" in surfaces ? "PreToolUse(Agent)" : "UserPromptSubmit";
+      await fire(w, step(site));
+      expect(probe.others, JSON.stringify(surfaces)).toEqual([]);
+      expect(securityRows(w)).toBe(0);
+    }
+  });
+
+  it("never denies, rewrites or allows: the Agent call's decision is routing's own", async () => {
+    const decided = (o: HookOutput | undefined) => ({
+      decision: o?.hookSpecificOutput?.permissionDecision,
+      updated: o?.hookSpecificOutput?.updatedInput,
+      reason: o?.hookSpecificOutput?.permissionDecisionReason,
+      stop: o?.continue,
+    });
+    const without = decided(await fire(await boot(), step("PreToolUse(Agent)")));
+    const w = await boot(securityOnly);
+    const out = await fire(w, step("PreToolUse(Agent)"));
+    expect(securityRows(w)).toBe(1);
+    expect(decided(out)).toEqual(without);
+  });
+
+  it("the Cursor client loads nothing and stores nothing", async () => {
+    const w = await boot(securityOnly);
+    await runSession(w, { client: "cursor" });
+    expect(probe.others).toEqual([]);
+    expect(securityRows(w)).toBe(0);
+    expect(probe.evaluated).toEqual([]);
+  });
+
+  it("with the adjudicator on too, only the routing call-outs run for non-security events", async () => {
+    const w = await boot({
+      personal: { adjudicator: { enabled: true, security: { enabled: true } } },
+    });
+    await fire(w, step("PreToolUse(Bash)"));
+    expect(probe.calls).toEqual(["afterRouting"]);
+    expect(probe.others).toEqual([]);
+    expect(securityRows(w)).toBe(0);
+  });
+});
+
+/**
+ * The routing adjudicator on, security off: hooks.ts, the engine, the prompt builders and the
+ * providers are the real ones, and nothing of src/adjudicator/security/ is imported on the hook
+ * path (they would parse for nothing: security/prompt.ts alone pulls grant.ts and types.ts).
+ */
+describe("adjudicator on, security off", () => {
+  const routingOnly: Setup = {
+    realHooks: true,
+    personal: {
+      adjudicator: {
+        enabled: true,
+        mode: "advise",
+        provider: "heuristic",
+        promptMode: "blocking",
+        surfaces: { prompt: true, agent: true, plan: true, tools: true },
+        security: { enabled: false },
+      },
+    },
+  };
+  /** The registry engine.ts imports: a leaf with no import, the one security/ file allowed. */
+  const LEAF = "security/load.ts";
+  const securityFiles = (): string[] =>
+    probe.others
+      .map((o) => o.split(" @ ")[0] ?? "")
+      .filter((f) => f.startsWith("security/") && f !== LEAF);
+  const routingFiles = (): string[] =>
+    probe.others.map((o) => o.split(" @ ")[0] ?? "").filter((f) => !f.startsWith("security/"));
+
+  it("a whole session loads the engine and no security module", async () => {
+    const w = await boot(routingOnly);
+    expect(w.context().config.adjudicator).toMatchObject({
+      enabled: true,
+      security: { enabled: false },
+    });
+    const out = await runSession(w);
+    // The probe is not blind: the real routing modules loaded...
+    expect(routingFiles()).toEqual(expect.arrayContaining(["engine.ts", "prompt.ts"]));
+    // ...and with them not one file of security/ but the leaf registry (load.ts imports nothing).
+    expect(securityFiles()).toEqual([]);
+    expect(JSON.stringify(out)).not.toMatch(/eminiar security/i);
+    expect(footprint(w).rows.adjudicator_security ?? 0).toBe(0);
+  });
+
+  it("the typesafe provider (security model off) loads none either", async () => {
+    const w = await boot({
+      ...routingOnly,
+      personal: {
+        adjudicator: {
+          ...(routingOnly.personal?.adjudicator as Record<string, unknown>),
+          provider: "typesafe",
+          typesafe: { baseUrl: "http://127.0.0.1:9", model: "m" },
+        },
+      },
+    });
+    await runSession(w);
+    expect(securityFiles()).toEqual([]);
+  });
+
+  it("security on: only then are the security modules loaded", async () => {
+    const w = await boot({
+      ...routingOnly,
+      personal: {
+        adjudicator: {
+          ...(routingOnly.personal?.adjudicator as Record<string, unknown>),
+          security: { enabled: true },
+        },
+      },
+    });
+    await fire(w, step("UserPromptSubmit"));
+    expect(securityFiles()).toEqual(expect.arrayContaining(["security/hook.ts"]));
   });
 });

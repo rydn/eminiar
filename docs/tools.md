@@ -2,7 +2,7 @@
 
 [← Docs index](README.md)
 
-eminiar adds 24 MCP tools, plus `em_adjudicate` while the opt-in adjudicator is on. In Claude
+eminiar adds 24 MCP tools, plus `em_adjudicate` while the opt-in adjudicator or its security advice is on. In Claude
 Code their full names are `mcp__plugin_eminiar_eminiar__em_*`. This page uses the short names.
 
 You do not normally call these tools yourself. Claude calls them, and the hooks remind Claude to
@@ -173,6 +173,10 @@ that are not swarm workers can only `list`, `status`, `read` and `post`. See
 
 With the adjudicator on and `adjudicator.surfaces.plan` set, `plan` also appends a suggested
 agent, model and effort for each new task. See [Adjudicator](adjudicator.md#swarm-plans).
+With `adjudicator.security.enabled` and `security.surfaces.plan`, `plan` also appends a security
+block: a head with the counts per level and one line per task at or above `security.minLevel`, each
+with the legs, the rule and the leg to drop. It is advice only and works with the adjudicator off.
+See [Security advice](adjudicator.md#security-advice).
 
 ## Adjudicator
 
@@ -180,8 +184,9 @@ agent, model and effort for each new task. See [Adjudicator](adjudicator.md#swar
 |---|---|---|
 | `em_adjudicate` | `action`, `text`, `tasks`, `id`, `outcome`, `note`, `since` | Score how complex a request or task is, and which tool, Claude model size and swarm role fit it |
 
-The tool is registered only while `adjudicator.enabled` is on; after `eminiar adjudicator enable`
-run `/mcp reconnect`. See [Adjudicator](adjudicator.md).
+The tool is registered only while `adjudicator.enabled` or `adjudicator.security.enabled` is on;
+after `eminiar adjudicator enable` or `eminiar adjudicator security on` run `/mcp reconnect`. See
+[Adjudicator](adjudicator.md).
 
 | Action | Parameters | Does |
 |---|---|---|
@@ -189,6 +194,7 @@ run `/mcp reconnect`. See [Adjudicator](adjudicator.md).
 | `explain` | `id` | One stored decision in full: the input head, the tier, role and tool tables with reasons, the complexity terms, blend weights and bias, the features, provider status, latency, tokens and cost, and the outcome with actual model and savings |
 | `stats` | `since` (ISO date or `7d`, `12h`) | Decisions by surface and source, provider status, latency, follow / apply / respect rates, outcomes, spend, realised and net savings, and potential savings |
 | `feedback` | `id`, `outcome`: `good`, `too_small` or `too_big`, `note?` (≤ 4000; stored redacted and cut to 500) | Closes the decision with that outcome and updates the learned bias. Refused while the adjudicator is off |
+| `security` | `text` (≤ 8000 chars) or `tasks: [{key, title, detail?, role?}]`, `tools?` (≤ 60 names), `agent_type?`, `role?`, `autonomy?`: `manual`, `default` or `autonomous` | Rates the security risk of the work for an agent with those tools: one block per item with the level, score, legs and where they come from, rules and floors, autonomy, grant, the model's answer and the one leg to drop, plus an assessment id. Advice only. Needs `adjudicator.security.enabled`; the model is asked only when `security.model` is `provider` and the adjudicator is on. `explain` with a decision id also shows the security assessment stored beside it. See [Security advice](adjudicator.md#security-advice) |
 
 ```text
 em_adjudicate {action: "score", text: "rename parseDate in src/utils/date.ts"}
@@ -203,7 +209,7 @@ em_adjudicate {action: "feedback", id: 42, outcome: "too_small", note: "needed o
 | `em_usage` | Tokens, cache, cost and insights per model call from the local transcripts. `view`: `summary`, `daily`, `weekly`, `monthly`, `models`, `sessions`, `blocks`, `turns`, `tools`, `insights`, `savings`; `scope`: `project` or `session`; `since`: `30d` or an ISO date; `json`. See [Usage insights](usage.md) |
 | `em_doctor` | Installation health |
 | `em_reindex` | Rebuild part of the index: `code`, `git`, `metrics`, `docs`, `memories`, `embeddings` or `all`. Incremental unless `full: true` |
-| `em_purge` | Permanently delete project data: `index`, `sessions` (events and the session history `em_recall` searches, snapshots, stats), `graph`, `memories` (the database mirror only), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests) or `all`. Needs `confirm: true` |
+| `em_purge` | Permanently delete project data: `index`, `sessions` (events and the session history `em_recall` searches, snapshots, stats), `graph`, `memories` (the database mirror only), `usage` (API calls, tool uses, context events, transcript offsets, statusline snapshots), `adjudicator` (decisions, verdict cache, provider breaker state, learned bias, captured Jev requests, security assessments) or `all`. Needs `confirm: true` |
 
 ## Slash commands
 

@@ -19,11 +19,13 @@ import {
 import { ErrorBox, toast, useAsync } from "../components.js";
 import { Badge, Card, EmptyState, SegBar, Segmented, Skeleton } from "../ds.js";
 import { navigate } from "../router.js";
+import { RiskBadge } from "../security.js";
 import { Blackboard } from "../swarm/Blackboard.js";
 import { RoleChip, State } from "../swarm/bits.js";
 import { ConfigTopology } from "../swarm/ConfigTopology.js";
 import { Feed } from "../swarm/Feed.js";
 import { type Finished, RunHero } from "../swarm/RunHero.js";
+import { RunRiskMark } from "../swarm/RunRiskMark.js";
 import {
   capacity,
   filterRuns,
@@ -34,6 +36,7 @@ import {
   startCommand,
 } from "../swarm/run-helpers.js";
 import { SwarmNav } from "../swarm/SwarmNav.js";
+import { atLeastRail } from "../swarm/security-helpers.js";
 import { FILE_STATE, GLYPH, STATE_TONE, shortAgent, TOPOLOGY_GLYPH } from "../swarm/style.js";
 import { TaskBoard } from "../swarm/TaskBoard.js";
 import { Timeline } from "../swarm/Timeline.js";
@@ -43,6 +46,7 @@ import { Workers } from "../swarm/Workers.js";
 import { Yaml } from "../swarm/Yaml.js";
 import { ago, cls } from "../util.js";
 import { SwarmConfig } from "./SwarmConfig.js";
+import { badgeLabel } from "./security-helpers.js";
 
 const LIST_POLL_MS = 15_000;
 const EVENTS_POLL_MS = 2_000;
@@ -238,6 +242,16 @@ function SwarmRow({ s }: { s: SwarmDefUi }): JSX.Element {
               title={`${r.description}\n${r.agentType} · ${FILE_STATE[r.file.action].word}`}
             >
               {r.count > 1 ? <span class="n">×{r.count}</span> : null}
+              {r.risk && atLeastRail(r.risk.level) ? (
+                <RiskBadge
+                  level={r.risk.level}
+                  score={r.risk.score}
+                  compact
+                  title={`${badgeLabel(r.risk.level, r.risk.score)} at default autonomy${
+                    r.risk.reasons.length ? `\n${r.risk.reasons.join("\n")}` : ""
+                  }`}
+                />
+              ) : null}
             </RoleChip>
           ))}
         </span>
@@ -362,6 +376,7 @@ function RunItem({ r, selected }: { r: SwarmRunSummary; selected: boolean }): JS
             {GLYPH.failed} {bad}
           </span>
         ) : null}
+        {r.risk ? <RunRiskMark risk={r.risk} compact quiet /> : null}
         {t.total ? <span class="spacer" /> : null}
         {t.total ? <span class="ds-num">{Math.round(p * 100)}%</span> : null}
       </div>
@@ -652,7 +667,14 @@ function RunView({
       if (d.tasksPartial) {
         for (const t of d.tasks) {
           const had = tasks.current.get(t.id);
-          if (!had || had.updated_at !== t.updated_at || had.status !== t.status) changed = true;
+          if (
+            !had ||
+            had.updated_at !== t.updated_at ||
+            had.status !== t.status ||
+            // A new assessment can arrive with no change to the task row itself.
+            had.risk?.id !== t.risk?.id
+          )
+            changed = true;
           tasks.current.set(t.id, t);
         }
         // A task missed by the delta (should not happen): take them all again.
@@ -660,7 +682,12 @@ function RunView({
       } else tasks.current = new Map(d.tasks.map((t) => [t.id, t]));
       if (changed) {
         tasksList.current = [...tasks.current.values()].sort((a, b) => a.id - b.id);
-        tasksMax.current = tasksList.current.reduce((m, t) => Math.max(m, t.updated_at), 0);
+        // The delta cursor covers the assessments too: the server re-sends a task whose latest
+        // security row is newer than the cursor.
+        tasksMax.current = tasksList.current.reduce(
+          (m, t) => Math.max(m, t.updated_at, t.risk?.ts ?? 0),
+          0,
+        );
       }
       if (!sameList(roles.current, d.roles)) roles.current = d.roles;
       const s = d.now - Date.now();

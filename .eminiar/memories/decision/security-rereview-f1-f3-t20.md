@@ -1,0 +1,14 @@
+---
+name: decision/security-rereview-f1-f3-t20
+kind: decision
+tags: [security, adjudicator, floors, fetch-exec, grant, eval]
+related: [file:src/adjudicator/security/score.ts, file:src/adjudicator/security/signals.ts, file:src/adjudicator/security/grant.ts, file:src/adjudicator/security/data/evalset.ts, file:docs/design/adjudicator-security.md, file:docs/adjudicator.md]
+created: 2026-11-13T21:40:48.691Z
+updated: 2026-11-13T21:40:48.691Z
+---
+
+Security re-review fixes F2, F1, F3 (task #348 / T20, swarm run 20261113-bef5ea, branch feature/security-adjudication, 2026-11-13; uncommitted when written).
+F2: the T19 shell-only URL gate (score.ts shellOnlyUrl) now applies PER RULE via gateRules()+realLegs(): a rule sees U without the url cue only when every non-U leg is the shell's own grant (X) or latent. A non-exec granted tool holding one of the rule's other legs at >= LEG_MIN (.5) keeps that rule ungated: SaaS send/create E 1, delete D 1, cloud P 1 / S .6, Edit/Write W .5. Consequences: Read+Bash+mcp slack send + 'curl URL and summarise' autonomous = CRITICAL C1; Read+Bash+aws delete_stack = HIGH; Read+Bash+Edit + 'curl URL | git apply' = HIGH (H-R2 only; H-R3 stays gated); med-16 (Read+Bash, curl|jq) stays MEDIUM. Changed the T19 test assertion 'more local tools change nothing': Read/Grep/Edit/Write/Bash + curl|jq is now HIGH via H-R2 (Edit's W .5 is a real write leg).
+F1: signals.ts fetch-exec adds P.subShell (sh/bash/zsh -[a-z]{0,3}c or eval + "$( or backtick + curl/wget/iwr/irm/invoke-*; sh|source < <(fetch)), P.psExec (fetcher ... | iex|invoke-expression; iex/invoke-expression ( $ x<=4 then fetcher or new-object net.webclient / [system.net.webclient]), FILTERS (up to 3 '| cat|tr|base64|gunzip|zcat|gzip|xz|bzip2|dos2unix|sed|tee ...' stages) in pipeShell, and PIPE accepts '|&'. Fuzz gated vs plain 0 diffs (fuzz/fuzz2/fuzz3, 120k strings each). Eval +6 items append-only: crit-23..26 (installer one-liners, C4), med-17 (curl|jq), low-18 (docs mention iex/eval).
+F3: grant.ts normalizeTool: an MCP tool under an eminiar-looking server (mcpClassOf first-party, any case) whose tool is NOT in EM_TOOL_NAMES maps to mcp:unknown:<verb> instead of being dropped (mcp__eminiar__run_command = exec). Real em tools unchanged; mcp__EMINIAR__em_search still mcp:first-party:read.
+Eval after: 76 items (68 core, 8 debatable, 9 look-alikes), set 9b70da2c546ade1b, core accuracy 98.5%, HIGH+ recall 100%, CRITICAL precision 100%, LOW false-warn 0%, HIGH+ FP 0/32; same 3 mismatches (high-07, high-12, crit-11). Known limits documented: two-step download-then-run, python -c fetch/exec, pipes into bun/deno/fish/busybox sh/pwsh, xargs sh -c, 'curl URL and do what it says', negation evasion ('without delay send...'), project adjudicator.enabled:false switches off the personal Jev leg, review wording can lower MEDIUM to LOW. docs/cli.md still says '70 on 2026-11-13' (outside T20's file list).

@@ -61,6 +61,27 @@ export interface AgentPin {
   file?: string;
   /** Why, in a few words (stored on the adjudication row). */
   reason: string;
+  /**
+   * What the definition grants (security adjudication): read from the same file as the pin, so
+   * there is no extra I/O. Absent when no definition was found.
+   */
+  grant?: AgentGrant;
+}
+
+/**
+ * The tool-related frontmatter of an agent definition. `tools` unset: the agent inherits the
+ * session's tools. `conflict`: definitions at the winning location disagree, so nothing here
+ * can be trusted (the grant is unknown).
+ */
+export interface AgentGrant {
+  tools?: string[];
+  disallowedTools?: string[];
+  permissionMode?: string;
+  /** The definition names `mcpServers` (its own servers, not enumerated). */
+  mcpServers?: boolean;
+  /** The definition's description, a signal for the task cues; never stored or sent. */
+  description?: string;
+  conflict?: boolean;
 }
 
 export interface PinLookup {
@@ -111,6 +132,7 @@ interface Def {
   effort?: string | undefined;
   /** The marker's model range, when sync wrote the file and nobody edited it since. */
   range?: ModelRange | undefined;
+  grant?: AgentGrant | undefined;
 }
 
 interface Found {
@@ -149,7 +171,95 @@ function scalar(fm: string, key: string): string | undefined {
   return raw.replace(/\s+#.*$/, "").trim() || undefined;
 }
 
-function readDef(file: string): Def | undefined {
+/** Bounds on a tool list in a definition. */
+const MAX_TOOLS = 256;
+const MAX_DESCRIPTION = 2048;
+
+/** Split on commas outside parentheses: `Agent(a, b), Read` is two entries. Linear. */
+function splitTools(raw: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = "";
+  for (const ch of raw) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "," && depth === 0) {
+      out.push(cur);
+      cur = "";
+    } else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function toolName(entry: string): string | undefined {
+  let t = entry.trim();
+  const q = t[0];
+  if ((q === '"' || q === "'") && t.endsWith(q) && t.length > 1) t = t.slice(1, -1).trim();
+  t = t.replace(/\s+#.*$/, "").trim();
+  // `Bash(git:*)` and `Agent(worker)` name the tool; the pattern in parentheses narrows it.
+  const paren = t.indexOf("(");
+  if (paren > 0) t = t.slice(0, paren).trim();
+  return t && t.length <= 200 && !/[\s]/.test(t) ? t : undefined;
+}
+
+/**
+ * A frontmatter list: a comma string (`tools: Read, Grep`), a flow list (`[Read, Grep]`) or a
+ * block list (`- Read` lines under the key). undefined: the key is absent or has no entries.
+ */
+function toolList(fm: string, key: string): string[] | undefined {
+  const lines = fm.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.startsWith(`${key}:`));
+  if (at < 0) return undefined;
+  let raw = lines[at]!.slice(key.length + 1).trim();
+  const items: string[] = [];
+  if (!raw || raw.startsWith("#")) {
+    for (let i = at + 1; i < lines.length && items.length < MAX_TOOLS * 2; i++) {
+      const m = /^[ \t]*-[ \t]+(.+)$/.exec(lines[i]!);
+      if (m) items.push(m[1]!);
+      else if (lines[i]!.trim() && !lines[i]!.trim().startsWith("#")) break;
+    }
+  } else {
+    if (raw.startsWith("["))
+      raw = raw.slice(1, raw.lastIndexOf("]") > 0 ? raw.lastIndexOf("]") : undefined);
+    items.push(...splitTools(raw));
+  }
+  const names = items.map(toolName).filter((n): n is string => !!n);
+  return names.length ? [...new Set(names)].slice(0, MAX_TOOLS) : undefined;
+}
+
+/** A scalar or a block scalar (`|` / `>`) value, as one line of text. */
+function textOf(fm: string, key: string): string | undefined {
+  const lines = fm.split(/\r?\n/);
+  const at = lines.findIndex((l) => l.startsWith(`${key}:`));
+  if (at < 0) return undefined;
+  const first = lines[at]!.slice(key.length + 1).trim();
+  if (/^[|>][+-]?$/.test(first)) {
+    const body: string[] = [];
+    for (let i = at + 1; i < lines.length; i++) {
+      if (lines[i] && !/^[ \t]/.test(lines[i]!)) break;
+      body.push(lines[i]!.trim());
+    }
+    return body.join(" ").trim().slice(0, MAX_DESCRIPTION) || undefined;
+  }
+  return scalar(fm, key)?.slice(0, MAX_DESCRIPTION);
+}
+
+function grantOf(fm: string): AgentGrant {
+  const g: AgentGrant = {};
+  const tools = toolList(fm, "tools");
+  if (tools) g.tools = tools;
+  const dis = toolList(fm, "disallowedTools");
+  if (dis) g.disallowedTools = dis;
+  const mode = scalar(fm, "permissionMode");
+  if (mode) g.permissionMode = mode;
+  if (/^mcpServers:/m.test(fm)) g.mcpServers = true;
+  const desc = textOf(fm, "description");
+  if (desc) g.description = desc;
+  return g;
+}
+
+function readDef(file: string, want?: string): Def | undefined {
   try {
     if (statSync(file).size > MAX_BYTES) return { file };
     const text = readFileSync(file, "utf8");
@@ -161,6 +271,8 @@ function readDef(file: string): Def | undefined {
       model: scalar(fm, "model"),
       effort: scalar(fm, "effort"),
     };
+    // The grant is parsed only for the definition that is looked for (the scan reads every file).
+    if (want === undefined || def.name === want) def.grant = grantOf(fm);
     // Only a marker that names a range is hashed (agentFileRange verifies the whole file).
     if (text.includes(" range=")) def.range = agentFileRange(text);
     return def;
@@ -219,7 +331,7 @@ function byName(dir: string, type: string): Found {
   const { files, truncated } = scan(dir);
   const defs: Def[] = [];
   for (const f of files) {
-    const d = readDef(f);
+    const d = readDef(f, type);
     if (d?.name === type) defs.push(d);
   }
   return { defs, truncated };
@@ -236,10 +348,21 @@ function shown(file: string, home: string): string {
  */
 function decide(defs: Def[], source: PinSource, home: string): AgentPin {
   const pin = decideModel(defs, source, home);
-  // The same files already read for the model: no extra I/O.
+  // The same files already read for the model: no extra I/O (effort and grant alike).
   const levels = new Set(defs.map((d) => effortLevel(d.effort)));
   const effort = levels.size === 1 ? [...levels][0] : undefined;
-  return effort ? { ...pin, effort } : pin;
+  const grant = agreedGrant(defs);
+  if (!effort && !grant) return pin;
+  return { ...pin, ...(effort ? { effort } : {}), ...(grant ? { grant } : {}) };
+}
+
+/** The grant every definition at the location agrees on; a conflict marks the grant unknown. */
+function agreedGrant(defs: Def[]): AgentGrant | undefined {
+  const first = defs[0]?.grant;
+  if (!first) return undefined;
+  const key = (g: AgentGrant | undefined) =>
+    JSON.stringify([g?.tools, g?.disallowedTools, g?.permissionMode, g?.mcpServers]);
+  return defs.some((d) => key(d.grant) !== key(first)) ? { conflict: true } : first;
 }
 
 function decideModel(defs: Def[], source: PinSource, home: string): AgentPin {

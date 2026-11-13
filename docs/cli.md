@@ -150,6 +150,44 @@ eminiar adjudicator exchanges off                 # turn off and delete this pro
 eminiar adjudicator exchanges purge [--yes]       # delete this project's captured requests
 ```
 
+### Security advice
+
+Opt-in, advice only (nothing is ever blocked). See [Security advice](adjudicator.md#security-advice).
+
+```sh
+eminiar adjudicator security status [--json]      # on/off and who decides, model status, last 7 days, last eval
+eminiar adjudicator security on [--model] [--yes] # turn on (~/.eminiar/config.json only); --model also asks Jev
+eminiar adjudicator security off [--model]        # turn off; with --model only the Jev questions stop
+eminiar adjudicator security test "<task>" [--tools a,b] [--agent T] [--role R] [--autonomy manual|default|autonomous] [--provider typesafe] [--json]
+eminiar adjudicator security explain <id> [--json]
+eminiar adjudicator security list [--since 7d] [--level high] [--limit N] [--json]
+eminiar adjudicator security eval [--provider typesafe] [--fixture f.json] [--replace] [--save] [--json]
+```
+
+- `status` (the default) shows whether it is on and which layer decides (environment, project file,
+  global file or default), the surfaces, `minLevel`, `notifyUser`, the model status (off, ready,
+  needs the adjudicator, unsupported for the provider, or why Jev cannot run), the assessments of
+  the last 7 days by level, any project key that was ignored, and the last saved eval.
+- `on` and `off` write only `~/.eminiar/config.json`; `--project` is refused (exit 2) and so is a
+  personal file that cannot be trusted. A project can turn security on by hand in
+  `eminiar.config.json`, but this command never writes it. `on --model` needs the adjudicator on
+  with Jev, its consent and a key, prints what is sent (tool ids and capability tags next to the
+  redacted task text that already goes) and asks y/N; without a terminal it needs `--yes`. It never
+  grants consent or stores a key.
+- `test` assesses one task now and stores nothing. `--tools` names the tools the agent holds
+  (default: everything a subagent inherits); `--agent` and `--role` look the grant up instead.
+  `--provider typesafe` also asks Jev, when `security.model` is `provider` and consent and a key
+  exist.
+- `explain <id>` prints the full reasoning of a stored assessment: every exposure by kind, each
+  rule's contribution, the floors, the autonomy, the grant, the model's answer and the reasons.
+- `list` shows stored assessments, newest first.
+- `eval` runs the labelled items (76 on 2026-11-13) through the heuristic (and Jev, when consented and keyed),
+  prints per-level precision and recall, the confusion matrix and the HIGH+ miss and false-warn
+  rates, and lists mismatches by item id. `--save` keeps the report for the dashboard and
+  `eminiar doctor`. Its numbers show consistency with the design, not independent accuracy.
+
+Setting `EMINIAR_ADJUDICATOR_SECURITY=0` turns the advice off over every file.
+
 - `status` is the default subcommand. It shows which layer decides `enabled` (environment,
   project file, global file or default), the effective provider and why it differs from the
   configured one, the key source, consent, the provider's breaker state with today's calls and
