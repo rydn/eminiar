@@ -19,9 +19,10 @@ export const TIERS = ["haiku", "sonnet", "opus", "fable"] as const;
 export type Tier = (typeof TIERS)[number];
 
 /**
- * Claude Code's effort levels (sub-agents "Choose an effort level"). Advice: the coordinator
- * passes it as `effort` on the Agent call (Claude Code AGENT_EFFORT_SINCE or later, non-fork
- * subagents; CLAUDE_CODE_EFFORT_LEVEL outranks it). The hook never injects it.
+ * Claude Code's effort levels (sub-agents "Choose an effort level"). Advise mode: the
+ * coordinator passes it as `effort` on the Agent call (Claude Code AGENT_EFFORT_SINCE or later,
+ * non-fork subagents; CLAUDE_CODE_EFFORT_LEVEL outranks it). Apply mode: the PreToolUse(Agent)
+ * hook sets it in `updatedInput` (see memory adjudicator/apply-sets-effort).
  */
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];

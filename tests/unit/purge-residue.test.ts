@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { chunk, hashText } from "../../src/chunker/index.js";
 import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
@@ -112,5 +113,110 @@ describe.each(["sessions", "index", "all"] as const)("purge(%s) then VACUUM", (s
     expect(left).toEqual([]);
     expect(raw).not.toContain(TOKEN);
     expect(raw).not.toContain(PEM_LINE);
+  });
+});
+
+describe("purge and the recall index", () => {
+  function withRecall(scope: "sessions" | "index") {
+    const dir = mkdtempSync(join(tmpdir(), "em-residue-"));
+    const path = join(dir, "t.db");
+    const db = new SqliteAdapter(path, { vectors: false });
+    const content = `ZqErrorToken failure ${TOKEN}\n${PEM_LINE}\n`;
+    const add = (source: string, title: string, text: string) =>
+      db.upsertDocument(
+        { source, title, contentType: "prose", contentHash: hashText(text) },
+        chunk(text, title, undefined, undefined).chunks,
+      );
+    db.transaction(() => {
+      for (let i = 0; i < 50; i++) add("memory", `m${i}`, `kept memory number ${i} alpha`);
+      add("session", "error", content);
+    });
+    db.purge(scope);
+    const sql = (db as unknown as { db: { prepare(s: string): { get(): unknown } } }).db;
+    const count = (q: string) => (sql.prepare(q).get() as { n: number }).n;
+    const out = {
+      err: count("SELECT count(*) n FROM recall_fts WHERE recall_fts MATCH 'ZqErrorToken'"),
+      all: count("SELECT count(*) n FROM recall_fts"),
+      file: "",
+    };
+    db.close();
+    out.file = readFileSync(path).toString("latin1");
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  }
+
+  it("purge(sessions) leaves no recall match or token for a purged error", () => {
+    const r = withRecall("sessions");
+    expect(r.err).toBe(0);
+    expect(r.all).toBe(50);
+    // the index stores the lowercased word pieces, so look for those, not the original casing
+    expect(r.file.toLowerCase()).not.toContain("zqerrortoken");
+    expect(r.file.toLowerCase()).not.toContain("zq7xk2vwrt9lm4np8bs3hd6jc1fy5gu0ea2w");
+  });
+
+  it("purge(index) leaves the recall index empty and free of the token", () => {
+    const r = withRecall("index");
+    expect(r.all).toBe(0);
+    // the index stores the lowercased word pieces, so look for those, not the original casing
+    expect(r.file.toLowerCase()).not.toContain("zqerrortoken");
+    expect(r.file.toLowerCase()).not.toContain("zq7xk2vwrt9lm4np8bs3hd6jc1fy5gu0ea2w");
+  });
+
+  /**
+   * An older eminiar (0.14.x) on a database this one migrated: its purge('sessions') knows
+   * nothing of recall_fts, so only the trigger deletes the error rows from it, as a plain
+   * DELETE FROM chunks, then VACUUMs. `recallSecureDelete: 0` turns the table's persistent
+   * option off first (the control); otherwise it is left as this version set it.
+   */
+  function olderPurge(recallSecureDelete?: 0): string {
+    const dir = mkdtempSync(join(tmpdir(), "em-residue-old-"));
+    const path = join(dir, "t.db");
+    const db = new SqliteAdapter(path, { vectors: false });
+    const text = `ZqErrorToken failure ${TOKEN}\n`;
+    db.transaction(() => {
+      for (let i = 0; i < 50; i++) {
+        const t = `kept memory number ${i} alpha`;
+        db.upsertDocument(
+          { source: "memory", title: `m${i}`, contentType: "prose", contentHash: hashText(t) },
+          chunk(t, `m${i}`, undefined, undefined).chunks,
+        );
+      }
+      db.upsertDocument(
+        { source: "session", title: "error", contentType: "prose", contentHash: hashText(text) },
+        chunk(text, "error", undefined, undefined).chunks,
+      );
+    });
+    db.close();
+    const old = new Database(path);
+    if (recallSecureDelete === 0)
+      old.exec("INSERT INTO recall_fts(recall_fts, rank) VALUES ('secure-delete', 0)");
+    // what 0.14.x purgeDocumentsBySource does: secure-delete on its own two FTS tables only
+    const fts = ["chunks_fts_porter", "chunks_fts_trigram"];
+    for (const t of fts) old.exec(`INSERT INTO ${t}(${t}, rank) VALUES ('secure-delete', 1)`);
+    old.exec(
+      "DELETE FROM chunks WHERE document_id IN (SELECT id FROM documents WHERE source = 'session')",
+    );
+    for (const t of fts) old.exec(`INSERT INTO ${t}(${t}, rank) VALUES ('secure-delete', 0)`);
+    old.exec("DELETE FROM documents WHERE source = 'session'");
+    old.exec("VACUUM");
+    old.close();
+    const file = readFileSync(path).toString("latin1").toLowerCase();
+    rmSync(dir, { recursive: true, force: true });
+    return file;
+  }
+
+  it("an older eminiar's purge through the trigger leaves no token: secure-delete is persistent", () => {
+    // a fresh database has it on, so the older purge needs nothing from this version
+    const file = olderPurge();
+    // FTS5 prefix-compresses a term against the one before it ("zq7x…" then "errortoken"), so
+    // look for the suffix as well as the whole long token
+    expect(file).not.toContain("errortoken");
+    expect(file).not.toContain("zq7xk2vwrt9lm4np8bs3hd6jc1fy5gu0ea2w");
+  });
+
+  it("control: without the persistent option the same older purge leaves the token behind", () => {
+    const file = olderPurge(0);
+    expect(file).toContain("zq7xk2vwrt9lm4np8bs3hd6jc1fy5gu0ea2w");
+    expect(file).toContain("errortoken");
   });
 });

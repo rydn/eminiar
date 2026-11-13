@@ -153,10 +153,10 @@ and the index-run log.
 
 ### Swarms
 
-A live monitor for [agent swarms](design/agent-swarms.md), the opt-in feature that runs a team of
+A live monitor for [agent swarms](swarms.md), the opt-in feature that runs a team of
 Claude Code subagents from `.eminiar/swarm.yaml`. Every state is written as a glyph and a word,
 so colour is never the only cue: ○ pending or idle, ● running or active, ◆ blocked, ✓ done,
-✗ failed, ◌ stale (running but silent for 30 minutes), ★ the coordinator (your main session).
+✗ failed, ◌ stale (running but silent for 15 minutes), ★ the coordinator (your main session).
 
 The tab has two pages, switched in the sub-nav at the top. **Runs** (`#/swarm`) is the live
 monitor described below. **Configure** (`#/swarm/config`) is the [configuration studio](#configure),
@@ -198,6 +198,13 @@ invalid, disabled, agent files out of date, or enabled and in sync. The state is
   per kind. You can filter by role or kind (tool calls, tasks, blackboard, workers, run, errors).
 - **Blackboard.** The shared notes with key, author, version and age. Click a note to read its
   value.
+- **Adjudicator decisions.** Each task card and worker card shows a `model · effort` chip for what
+  actually ran, with a `≠` and an amber outline when it differs from the adjudicator's suggestion.
+  An effort of `default` means the agent file's own setting ran and the level is not known (older
+  rows, or no effort passed). The worker drawer has a **Decision** section: ran at, suggested
+  (model, effort, confidence), the outcome (followed, overrode, pinned, forced, fork or none) in a
+  sentence, and the top reasons. The run snapshot carries `decisions` keyed by task id. With the
+  adjudicator off, or before a task is dispatched, the chip is absent and the drawer says so.
 - **Left rail.** A **Swarms** card lists the configured swarms: topology, role count, slots
   against `max_agents`, and role chips in a colour per role. A badge shows how many agent files
   need a sync. Click a swarm, or the **Configure** link, to edit it. **Sync agent files**
@@ -220,7 +227,7 @@ incrementally, so a task's risk arrives with its next row change or a reload.
 With no runs yet, the page says so and shows the command to start one
 (`/eminiar:em-swarm <swarm> <goal>`) with a preview of each swarm. Without a swarm file, the
 tab explains the feature, shows the starter file read-only, and offers a **Create
-.eminiar/swarm.yaml** button and the command `eminiar swarm init`. An invalid file lists its
+from the starter** button, which writes `.eminiar/swarm.yaml`, and the command `eminiar swarm init`. An invalid file lists its
 errors with their line numbers and a Configure link. A file with `enabled: false` shows "Swarms
 are disabled", because the hooks ignore the swarms until it is switched back on.
 
@@ -229,8 +236,9 @@ API (JSON, loopback only):
 | Route | Returns |
 |---|---|
 | `GET /api/swarm` | state (`absent`, `invalid` or `ok`), swarms and roles with agent-file state, issues, recent runs with counts, the starter YAML when absent |
-| `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments |
-| `GET /api/swarm/events?id=&after=` | up to 200 events after an event id, oldest first |
+| `GET /api/swarm/run?id=` | the run, tasks, workers (status derived), notes, the latest events, counts and per-worker timeline segments, plus the adjudicator's `decisions` for the run's tasks. `tasksSince=<ms>` sends only the tasks updated since then, `events=0` leaves the events out. Long task text is cut |
+| `GET /api/swarm/task?id=&run=` | one whole task, with its full `detail` and `result` and the adjudicator's `decision` for it. `run` is optional and must match the task's run |
+| `GET /api/swarm/events?id=&after=` | up to 200 events after an event id, oldest first, with `last` and `more` for the next page |
 | `POST /api/swarm/init` | writes the starter file if none exists (409 otherwise) and syncs the agent files |
 | `POST /api/swarm/sync` | syncs the agent files with the swarm file |
 | `POST /api/swarm/release` | `{id, agent}`, returning a stale worker's task to pending |
@@ -508,4 +516,5 @@ http://127.0.0.1:7331/#/explore?file=src/server.ts
 - File reads are checked to stay inside the project root, and the file viewer refuses a file that
   a Claude Code `Read` deny or `ask` rule matches, checked as `em_execute_file` does.
 
-`eminiar serve` is an older name for the same command.
+`eminiar serve` is an older name for the same server. It does not open the browser unless you
+pass `--open`.

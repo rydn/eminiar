@@ -4,7 +4,7 @@ kind: decision
 tags: [adjudicator, effort, agent-pin, savings]
 related: [file:src/adjudicator/swarm.ts, file:src/adjudicator/hooks.ts, file:src/adjudicator/savings.ts, file:src/adjudicator/learn.ts, file:src/adjudicator/types.ts, file:src/adjudicator/heuristic.ts, file:src/tools/em_swarm.ts, file:src/swarm/brief.ts, file:docs/adjudicator.md, file:docs/design/adjudicator.md]
 created: 2026-11-04T13:50:50.813Z
-updated: 2026-11-04T13:50:50.813Z
+updated: 2026-11-11T19:48:28.740Z
 ---
 
 Adjudicator advice: model pins and per-call effort (tasks #66/#68, swarm run 20261104-483f39, 2026-11-04, branch feature/adjudicator).
@@ -13,7 +13,7 @@ Adjudicator advice: model pins and per-call effort (tasks #66/#68, swarm run 202
 - types.ts: EFFORTS gained "max"; AGENT_EFFORT_SINCE = "2.1.292".
 - heuristic.ts effortFor: c ≥ MAX_EFFORT_AT (3.75) → max, so max is only suggested at the top of the scale.
 - Plan advice and the PreToolUse(Agent) note tell the coordinator to pass effort: "pass effort:'X' (Claude Code 2.1.292+)". They fall back to "suggested effort X" when the call already passes effort or CLAUDE_CODE_EFFORT_LEVEL is set.
-- The hook still NEVER injects effort, in apply mode too.
+- SUPERSEDED 2026-11-11 (user decision, swarm run 20261111-14ebfc): apply mode now ALWAYS sets the advised effort in the same updatedInput as the model; see [[adjudicator/apply-sets-effort]]. Advise mode still never injects effort. (Original rule: the hook never injected effort, in apply mode too.)
 
 (2) Coordinator decision: advise mode respects agent model pins the same way apply mode does, under the same apply.respectFrontmatter rule.
 - Plan advice: adjudicatePlan calls resolveAgentPin once per agentType and sets PlanAdvice.pin to {status: pinned|unknown}. The line then reads "#N → agent · pinned opus (adjudicator would pick haiku; remove the pin in swarm.yaml to let it choose) · effort …" or "model pin is unknown (…)", never "model X". The head adds "a pinned agent keeps its model: pass no `model`".

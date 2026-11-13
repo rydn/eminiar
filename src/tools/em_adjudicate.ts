@@ -38,7 +38,7 @@ import { capOutput } from "../swarm/format.js";
 import type { RoleSpec } from "../swarm/types.js";
 import { formatUsd } from "../usage/pricing.js";
 import { parseSince } from "./em_usage.js";
-import { defineTool, errorResult, type ToolResult, text } from "./types.js";
+import { defineTool, errorResult, LOCAL_WRITE, type ToolResult, text } from "./types.js";
 
 export const ADJUDICATE_ACTIONS = ["score", "explain", "stats", "feedback", "security"] as const;
 export const FEEDBACK_VALUES = ["good", "too_small", "too_big"] as const;
@@ -222,6 +222,13 @@ export function formatStats(
     `advice followed ${pct(s.rates.follow)} · applied ${pct(s.rates.apply)} · respected ${pct(s.rates.respect)}${
       s.applyChecked ? ` · apply ineffective ${s.applyIneffective} of ${s.applyChecked}` : ""
     }`,
+    ...(s.effortFollowed + s.effortIgnored
+      ? [
+          `effort followed ${pct(s.rates.effortFollow)} (${s.effortFollowed} followed, ${s.effortIgnored} ignored of ${s.effortFollowed + s.effortIgnored})${
+            s.effortIneffective ? ` · set but not run ${s.effortIneffective}` : ""
+          }`,
+        ]
+      : []),
     `outcomes ${counts(s.byOutcome)}`,
     `spend ${formatUsd(sv.spendUsd)} · realised ${formatUsd(sv.realisedUsd)}${
       sv.redoPenaltyUsd ? ` (redo ${formatUsd(sv.redoPenaltyUsd)})` : ""
@@ -317,6 +324,7 @@ type Args = z.infer<z.ZodObject<typeof SCHEMA>>;
 
 export const emAdjudicate = defineTool({
   name: "em_adjudicate",
+  annotations: { ...LOCAL_WRITE, openWorldHint: true, idempotentHint: false },
   description:
     'The adjudicator (opt-in): score how complex a request or task is and which tool, Claude model size (Agent `model`: haiku|sonnet|opus|fable) and swarm role fit it. score {text} or {tasks:[{key,title,detail?,role?}]} returns one line per item with its decision id; explain {id} shows the full score tables, provider status, cost and outcome; stats {since} summarises decisions, follow rate and savings; feedback {id, outcome:"good"|"too_small"|"too_big", note?} teaches the learned bias; security {text | tasks, tools? | agent_type? | role?, autonomy?} rates the security risk of the work for an agent with those tools (advice only, needs adjudicator.security.enabled).',
   schema: SCHEMA,

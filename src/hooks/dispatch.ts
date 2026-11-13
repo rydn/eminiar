@@ -1,6 +1,6 @@
 import { sessionContext } from "../context.js";
 import { failedText, rawEnforced, swarmAgentReturned, swarmGate } from "../swarm/hooks.js";
-import { budgetFor, clearBudget, startBudget } from "./budget.js";
+import { budgetFor, budgetLeft, clearBudget, startBudget } from "./budget.js";
 import { cursorDir, detectClient, fromCursor, toCursor } from "./cursor.js";
 import { handlers } from "./index.js";
 import { hookLog } from "./log.js";
@@ -32,6 +32,8 @@ async function runWithin(
     const r = await Promise.race([handler(input), deadline]);
     if (r === "late") {
       late = true;
+      // A timer can fire a hair before the clock reaches the deadline: spend what is left.
+      startBudget(0);
       return { out: undefined, timedOut: true };
     }
     return { out: r, timedOut: false };
@@ -47,12 +49,13 @@ async function runWithin(
  * is taken from `--client <name>` or detected from the payload. A hook must never block
  * the model: every failure path still returns a well-formed, permissive answer, and a run
  * that outlasts its budget (src/hooks/budget.ts) is answered without the handler, before
- * Claude Code's own timeout would discard the answer.
+ * Claude Code's own timeout would discard the answer. `opts.startedAt` is when the budget began
+ * on the `performance.now()` clock (default: now); src/hook.ts passes 0, the process start.
  */
 export async function dispatch(
   raw: string,
   argv: string[],
-  opts: { budgetMs?: number } = {},
+  opts: { budgetMs?: number; startedAt?: number } = {},
 ): Promise<string> {
   late = false;
   let parsed: Record<string, unknown>;
@@ -67,15 +70,16 @@ export async function dispatch(
   if (forced !== -1 && argv[forced + 1]) parsed.hook_event_name = argv[forced + 1];
   if (argv.includes("--selftest")) return JSON.stringify({ systemMessage: "eminiar hook ok" });
 
-  if (detectClient(parsed, argv) === "cursor") return runCursor(parsed, opts.budgetMs);
+  if (detectClient(parsed, argv) === "cursor")
+    return runCursor(parsed, opts.budgetMs, opts.startedAt);
 
   const input = parsed as unknown as HookInput;
   const handler = handlers[input.hook_event_name];
   if (!handler) return "{}";
   const ms = opts.budgetMs ?? budgetFor(input.hook_event_name);
-  startBudget(ms);
+  startBudget(ms, opts.startedAt);
   try {
-    const r = await runWithin(handler, input, ms);
+    const r = await runWithin(handler, input, budgetLeft());
     if (r.timedOut) {
       const err = new Error(`hook budget of ${ms} ms exceeded`);
       hookLog("error", `${input.hook_event_name}: ${err.message}; answered without it`);
@@ -132,16 +136,20 @@ function failClosed(input: HookInput, err: unknown): string | undefined {
   }
 }
 
-async function runCursor(parsed: Record<string, unknown>, budgetMs?: number): Promise<string> {
+async function runCursor(
+  parsed: Record<string, unknown>,
+  budgetMs?: number,
+  startedAt?: number,
+): Promise<string> {
   const input = fromCursor(parsed);
   const event = input.hook_event_name;
   let out: HookOutput | undefined;
   const handler = handlers[event];
   if (handler) {
     const ms = budgetMs ?? budgetFor(event);
-    startBudget(ms);
+    startBudget(ms, startedAt);
     try {
-      const r = await runWithin(handler, input, ms);
+      const r = await runWithin(handler, input, budgetLeft());
       if (r.timedOut) hookLog("error", `cursor ${event}: hook budget of ${ms} ms exceeded`);
       out = r.out;
     } catch (err) {

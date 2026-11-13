@@ -13,7 +13,7 @@ import type {
   AdjudicatorProvider,
   ProviderResult,
 } from "../../src/adjudicator/types.js";
-import { TIERS } from "../../src/adjudicator/types.js";
+import { EFFORTS, TIERS } from "../../src/adjudicator/types.js";
 import { loadConfig } from "../../src/config.js";
 import { getContext, resetContextCache } from "../../src/context.js";
 import { handlers } from "../../src/hooks/index.js";
@@ -214,7 +214,7 @@ function call(over: Partial<ApiCallInput>): ApiCallInput {
 }
 
 /** A provider that answers every request with `tier` and counts its calls. */
-function fakeProvider(tier = "haiku"): AdjudicatorProvider & { calls: number } {
+function fakeProvider(tier = "haiku", complexity = 1): AdjudicatorProvider & { calls: number } {
   const p = {
     id: "openai-compatible" as const,
     remote: false,
@@ -225,7 +225,7 @@ function fakeProvider(tier = "haiku"): AdjudicatorProvider & { calls: number } {
       return {
         answers: reqs.map((r) => ({
           key: r.key,
-          complexity: { value: 1, confidence: 0.9 },
+          complexity: { value: complexity, confidence: 0.9 },
           tier: { probs: { [tier]: 1 }, confidence: 0.9, calibrated: true },
         })),
         usage: { inTok: 10, outTok: 5, costUsd: 0 },
@@ -695,7 +695,7 @@ describe("PreToolUse Agent, apply mode", () => {
       routing,
     );
 
-  /** Every original field survives, plus a valid model; never effort, never a denial. */
+  /** Every original field survives, plus a valid model and a valid effort; never a denial. */
   function expectFullInput(out: HookOutput | undefined, original: Record<string, unknown>) {
     const h = out?.hookSpecificOutput;
     expect(h?.permissionDecision).toBe("allow");
@@ -703,7 +703,8 @@ describe("PreToolUse Agent, apply mode", () => {
     for (const [k, v] of Object.entries(original)) if (k !== "prompt") expect(ui[k]).toEqual(v);
     expect(String(ui.prompt)).toContain(String(original.prompt));
     expect(TIERS).toContain(ui.model);
-    expect(ui).not.toHaveProperty("effort");
+    // The advised effort rides in the same updatedInput as the model, and only a valid level.
+    expect(EFFORTS).toContain(ui.effort);
     return ui;
   }
 
@@ -744,12 +745,21 @@ describe("PreToolUse Agent, apply mode", () => {
 
   it("respects an explicit model, the FORCE env and a frontmatter pin", async () => {
     apply({}, "off");
+    // The model is respected (the call's own stays, none is injected); the effort is still set.
     const explicit = await preTool("Agent", { ...AGENT_INPUT, model: "opus" });
-    expect(explicit?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    expect(explicit?.hookSpecificOutput?.updatedInput).toEqual({
+      ...AGENT_INPUT,
+      model: "opus",
+      effort: "low",
+    });
 
     process.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = "1";
     const forced = await preTool("Agent", { ...AGENT_INPUT });
-    expect(forced?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    expect(forced?.hookSpecificOutput?.updatedInput).toEqual({
+      ...AGENT_INPUT,
+      effort: "low",
+    });
+    expect(forced?.hookSpecificOutput?.updatedInput).not.toHaveProperty("model");
     process.env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = "0";
     const notForced = await preTool("Agent", {
       ...AGENT_INPUT,
@@ -771,7 +781,12 @@ describe("PreToolUse Agent, apply mode", () => {
       ...AGENT_INPUT,
       subagent_type: "pinned",
     });
-    expect(pinned?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    expect(pinned?.hookSpecificOutput?.updatedInput).toEqual({
+      ...AGENT_INPUT,
+      subagent_type: "pinned",
+      effort: "low",
+    });
+    expect(pinned?.hookSpecificOutput?.updatedInput).not.toHaveProperty("model");
     const inherits = await preTool("Agent", {
       ...AGENT_INPUT,
       subagent_type: "inherits",
@@ -804,7 +819,12 @@ describe("PreToolUse Agent, apply mode", () => {
       prompt: "Rename the variable foo to bar in src/a.ts",
     };
     const out = await preTool("Agent", input);
-    expect(out?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    // The pin is respected: no model on the call, but the advised effort is still set.
+    expect(out?.hookSpecificOutput?.updatedInput).toEqual({
+      ...input,
+      effort: "low",
+    });
+    expect(out?.hookSpecificOutput?.updatedInput).not.toHaveProperty("model");
     const r = rowsOf(sid, "agent")[0]!;
     expect(r.action).toBe("respected");
     expect(r.baselineModel).toBe("opus");
@@ -842,8 +862,14 @@ describe("PreToolUse Agent, apply mode", () => {
       ...AGENT_INPUT,
       subagent_type: "ghost-plugin:helper",
     });
-    expect(out?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    // The unknown pin is never overridden (no model); the effort is still set.
+    expect(out?.hookSpecificOutput?.updatedInput).toEqual({
+      ...AGENT_INPUT,
+      subagent_type: "ghost-plugin:helper",
+      effort: "low",
+    });
     expect(out?.hookSpecificOutput?.additionalContext).toMatch(/model pin is unknown/);
+    expect(out?.hookSpecificOutput?.additionalContext).toMatch(/effort low applied/);
     const r = rowsOf(sid, "agent")[0]!;
     expect(r.action).toBe("advised");
     expect(r.modelFinal).toBeNull();
@@ -857,7 +883,10 @@ describe("PreToolUse Agent, apply mode", () => {
       ...AGENT_INPUT,
       subagent_type: "nowhere-agent",
     });
-    expect(bare?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    expect(bare?.hookSpecificOutput?.updatedInput).toMatchObject({
+      effort: "low",
+    });
+    expect(bare?.hookSpecificOutput?.updatedInput).not.toHaveProperty("model");
     expect(rowsOf(sid, "agent").map((x) => x.action)).toEqual(["advised", "advised"]);
   });
 
@@ -891,13 +920,19 @@ describe("PreToolUse Agent, apply mode", () => {
       description: "security",
       subagent_type: "my-plugin:review:security",
     });
-    expect(sec?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    expect(sec?.hookSpecificOutput?.updatedInput).toMatchObject({
+      effort: "low",
+    });
+    expect(sec?.hookSpecificOutput?.updatedInput).not.toHaveProperty("model");
     const missing = await preTool("Agent", {
       ...AGENT_INPUT,
       description: "missing",
       subagent_type: "my-plugin:absent",
     });
-    expect(missing?.hookSpecificOutput?.updatedInput).toBeUndefined();
+    expect(missing?.hookSpecificOutput?.updatedInput).toMatchObject({
+      effort: "low",
+    });
+    expect(missing?.hookSpecificOutput?.updatedInput).not.toHaveProperty("model");
     const rs = rowsOf(sid, "agent").sort((a, b) => a.id - b.id);
     expect(rs.map((r) => r.action)).toEqual(["applied", "respected", "advised"]);
     expect(rs[1]!.modelFinal).toBe("opus");
@@ -935,6 +970,163 @@ describe("PreToolUse Agent, apply mode", () => {
         isForced,
       );
     }
+  });
+
+  describe("effort", () => {
+    const scoresOf = () => JSON.parse(rowsOf(sid, "agent")[0]!.scores as string);
+
+    it("goes into the same updatedInput as the model and is recorded as applied", async () => {
+      apply({}, "off");
+      const out = await preTool("Agent", { ...AGENT_INPUT });
+      const ui = out?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+      expect(TIERS).toContain(ui.model);
+      expect(ui.effort).toBe("low");
+      expect(out?.hookSpecificOutput?.permissionDecision).toBe("allow");
+      expect(out?.hookSpecificOutput?.additionalContext).toMatch(
+        /adjudicator: model \w+ applied \(.*\); effort low applied/,
+      );
+      expect(out?.hookSpecificOutput?.additionalContext).not.toMatch(/pass effort/);
+      expect(scoresOf().effortApplied).toBe("low");
+    });
+
+    it("overrides the effort the call passed, and keeps both on the row", async () => {
+      apply({}, "off");
+      const out = await preTool("Agent", { ...AGENT_INPUT, effort: "max" });
+      const ui = out?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+      expect(ui.effort).toBe("low");
+      expect(TIERS).toContain(ui.model);
+      expect(scoresOf()).toMatchObject({
+        passedEffort: "max",
+        effortApplied: "low",
+      });
+    });
+
+    it("overrides the effort the agent file sets, with or without a model pin", async () => {
+      apply({}, "off");
+      mkdirSync(join(root, ".claude", "agents"), { recursive: true });
+      writeFileSync(
+        join(root, ".claude", "agents", "eff-free.md"),
+        "---\nname: eff-free\neffort: high\n---\nbody\n",
+      );
+      writeFileSync(
+        join(root, ".claude", "agents", "eff-pinned.md"),
+        "---\nname: eff-pinned\nmodel: opus\neffort: high\n---\nbody\n",
+      );
+      const free = await preTool("Agent", {
+        ...AGENT_INPUT,
+        subagent_type: "eff-free",
+      });
+      const fui = free?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+      expect(fui.effort).toBe("low");
+      expect(TIERS).toContain(fui.model);
+      const pinned = await preTool("Agent", {
+        ...AGENT_INPUT,
+        description: "pinned",
+        subagent_type: "eff-pinned",
+      });
+      const pui = pinned?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+      expect(pui.effort).toBe("low");
+      expect(pui).not.toHaveProperty("model");
+      const rs = rowsOf(sid, "agent").sort((a, b) => a.id - b.id);
+      for (const r of rs)
+        expect(JSON.parse(r.scores as string)).toMatchObject({
+          agentEffort: "high",
+          effortApplied: "low",
+        });
+    });
+
+    it("a fork gets no effort and no updatedInput; the note says a fork takes none", async () => {
+      apply({}, "off");
+      const out = await preTool("Agent", {
+        ...AGENT_INPUT,
+        subagent_type: "fork",
+      });
+      expect(out?.hookSpecificOutput?.updatedInput).toBeUndefined();
+      expect(out?.hookSpecificOutput?.additionalContext).toMatch(
+        /fork runs on the main session's model; no `model` to pass, effort not applied \(a fork takes none/,
+      );
+      expect(scoresOf().effortApplied).toBeUndefined();
+    });
+
+    it("CLAUDE_CODE_EFFORT_LEVEL outranks it: the model is still applied, the note says why", async () => {
+      apply({}, "off");
+      process.env.CLAUDE_CODE_EFFORT_LEVEL = "max";
+      const out = await preTool("Agent", { ...AGENT_INPUT });
+      const ui = out?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+      expect(TIERS).toContain(ui.model);
+      expect(ui).not.toHaveProperty("effort");
+      expect(out?.hookSpecificOutput?.additionalContext).toMatch(
+        /effort low not applied: CLAUDE_CODE_EFFORT_LEVEL is set and outranks it/,
+      );
+      const sc = scoresOf();
+      expect(sc.effortApplied).toBeUndefined();
+      expect(sc.effortEnv).toBe("max");
+      // the call's own effort is left exactly as the call had it
+      const own = await preTool("Agent", {
+        ...AGENT_INPUT,
+        description: "own",
+        effort: "high",
+      });
+      expect(own?.hookSpecificOutput?.updatedInput).toMatchObject({
+        effort: "high",
+      });
+    });
+
+    it("with the env var set and the model respected, nothing is rewritten at all", async () => {
+      apply({}, "off");
+      process.env.CLAUDE_CODE_EFFORT_LEVEL = "low";
+      const out = await preTool("Agent", { ...AGENT_INPUT, model: "opus" });
+      expect(out?.hookSpecificOutput?.updatedInput).toBeUndefined();
+      expect(out?.hookSpecificOutput?.permissionDecision).toBeUndefined();
+      expect(out?.hookSpecificOutput?.additionalContext).toMatch(/not applied: CLAUDE_CODE_EFFORT/);
+    });
+
+    it("a denied or asked call is never rewritten, and no effort is recorded as applied", async () => {
+      const ctx = apply({}, "off");
+      const { afterRouting } = await hooksModule();
+      for (const decision of ["deny", "ask"] as const) {
+        const routed: HookOutput = {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: decision,
+            permissionDecisionReason: "nope",
+          },
+        };
+        const input = base({
+          tool_name: "Agent",
+          tool_input: { ...AGENT_INPUT, description: decision },
+        });
+        const out = await afterRouting(ctx, input, undefined, routed);
+        expect(out?.hookSpecificOutput?.permissionDecision).toBe(decision);
+        expect(out?.hookSpecificOutput?.updatedInput).toBeUndefined();
+        expect(out?.hookSpecificOutput?.additionalContext ?? "").not.toMatch(/effort \w+ applied/);
+      }
+      for (const r of rowsOf(sid, "agent"))
+        expect(JSON.parse(r.scores as string).effortApplied).toBeUndefined();
+    });
+
+    it("advise mode injects no effort and no model, and records none as applied", async () => {
+      apply({ mode: "advise" }, "off");
+      for (const extra of [{}, { effort: "high" }]) {
+        const out = await preTool("Agent", {
+          ...AGENT_INPUT,
+          description: "adv",
+          ...extra,
+        });
+        expect(out?.hookSpecificOutput?.updatedInput).toBeUndefined();
+        expect(out?.hookSpecificOutput?.additionalContext).toMatch(/^adjudicator: /);
+        expect(out?.hookSpecificOutput?.additionalContext).not.toMatch(/effort \w+ applied/);
+      }
+      for (const r of rowsOf(sid, "agent"))
+        expect(JSON.parse(r.scores as string).effortApplied).toBeUndefined();
+    });
+
+    it("scope swarm leaves a non-worker dispatch alone: no effort either", async () => {
+      apply({ apply: { scope: "swarm", minConfidence: 0 } }, "off");
+      const out = await preTool("Agent", { ...AGENT_INPUT });
+      expect(out?.hookSpecificOutput?.updatedInput).toBeUndefined();
+      expect(scoresOf().effortApplied).toBeUndefined();
+    });
   });
 
   it("scope swarm leaves a non-worker dispatch to advice", async () => {
@@ -987,6 +1179,53 @@ describe("onPreAgent", () => {
     expect(provider.calls).toBe(1);
     expect(b?.action).toBe("applied");
     expect(TIERS).toContain(b?.model);
+  });
+
+  it("a pinned agent in apply mode asks the provider and gets the provider's effort, not the heuristic's; its model stays", async () => {
+    const ctx = configure({
+      enabled: true,
+      provider: "openai-compatible",
+      openai: { preset: "ollama" },
+      mode: "apply",
+      apply: { scope: "all", minConfidence: 0 },
+    });
+    mkdirSync(join(root, ".claude", "agents"), { recursive: true });
+    writeFileSync(
+      join(root, ".claude", "agents", "pin-prov.md"),
+      "---\nname: pin-prov\nmodel: opus\n---\nbody\n",
+    );
+    const { afterRouting } = await hooksModule();
+    const heavy =
+      "Redesign the distributed consensus protocol across all services, migrate storage, and prove correctness under partitions";
+    const dispatch = async (description: string, provider: AdjudicatorProvider | null) => {
+      const out = await afterRouting(
+        ctx,
+        base({
+          tool_name: "Agent",
+          tool_input: { description, prompt: heavy, subagent_type: "pin-prov" },
+        }),
+        undefined,
+        undefined,
+        { provider },
+      );
+      return out?.hookSpecificOutput?.updatedInput as Record<string, unknown>;
+    };
+    // without a provider the heuristic rates this task at the top of the ladder
+    const heuristic = await dispatch("no provider", null);
+    expect(heuristic.effort).toBe("max");
+    expect(heuristic).not.toHaveProperty("model");
+    // the provider rates it trivial: asked once, its verdict is the effort the hook applies
+    const provider = fakeProvider("haiku", 0.2);
+    const ui = await dispatch("with provider", provider);
+    expect(provider.calls).toBe(1);
+    expect(ui.effort).toBe("low");
+    expect(ui).not.toHaveProperty("model");
+    const r = rowsOf(sid, "agent").find(
+      (x) => JSON.parse(x.scores as string).effortApplied === "low",
+    );
+    expect(r).toBeDefined();
+    expect(r).toMatchObject({ modelRequested: null, effort: "low" });
+    expect(r!.action).not.toBe("applied");
   });
 
   it("advises a model the coordinator can pass when it differs from the baseline", async () => {
@@ -1069,7 +1308,10 @@ describe("onPreAgent", () => {
     expect(r.taskId).toBe(task.id);
     expect(r.tier).toBe("haiku");
     expect(r.action).toBe("applied");
-    expect(a?.note).toMatch(/pass effort:'low' \(Claude Code 2\.1\.292\+\), role coder/);
+    expect(a?.effort).toBe("low");
+    expect(a?.note).toMatch(/effort low applied, role coder/);
+    expect(a?.note).not.toMatch(/pass effort/);
+    expect(JSON.parse(r.scores as string).effortApplied).toBe("low");
   });
 
   describe("advise mode respects model pins like apply mode (#68)", () => {
@@ -1170,6 +1412,11 @@ describe("onPreAgent", () => {
       );
       expect(own?.note).toMatch(/suggested effort \w+/);
       expect(own?.note).not.toMatch(/pass effort/);
+      // The row records the effort the call passed (never injected), for the swarm decision view.
+      expect(JSON.parse(db().adjudicator.get(own!.rowId!)!.scores!).passedEffort).toBe("high");
+      expect(
+        JSON.parse(db().adjudicator.get(first.a!.rowId!)!.scores!).passedEffort,
+      ).toBeUndefined();
       process.env.CLAUDE_CODE_EFFORT_LEVEL = "low";
       try {
         const env = await onPreAgent(
@@ -1182,6 +1429,7 @@ describe("onPreAgent", () => {
         );
         expect(env?.note).toMatch(/suggested effort \w+/);
         expect(env?.note).not.toMatch(/pass effort/);
+        expect(JSON.parse(db().adjudicator.get(env!.rowId!)!.scores!).effortEnv).toBe("low");
       } finally {
         delete process.env.CLAUDE_CODE_EFFORT_LEVEL;
       }
@@ -1853,14 +2101,21 @@ describe("resolveAgentPin: Claude Code's agent lookup order", () => {
     const env = { HOME: home, CLAUDE_CONFIG_DIR: config };
     put(join(home, ".claude", "agents"), "u.md", md("u", "opus"));
     put(join(config, "agents"), "u.md", md("u", "haiku"));
-    expect(look("u", { env })).toMatchObject({ status: "pinned", source: "user", model: "haiku" });
+    expect(look("u", { env })).toMatchObject({
+      status: "pinned",
+      source: "user",
+      model: "haiku",
+    });
     put(join(inst, "agents"), "a.md", md("a", "sonnet"));
     put(
       join(config, "plugins"),
       "installed_plugins.json",
       JSON.stringify({ plugins: { "pc@m": [{ installPath: inst }] } }),
     );
-    expect(look("pc:a", { env })).toMatchObject({ status: "pinned", model: "sonnet" });
+    expect(look("pc:a", { env })).toMatchObject({
+      status: "pinned",
+      model: "sonnet",
+    });
   });
 });
 
@@ -1893,6 +2148,54 @@ describe("withModel", () => {
       permissionDecision: "allow",
       updatedInput: { a: 1, model: "opus" },
     });
+  });
+
+  it("sets the effort next to the model, or alone, and drops a level outside EFFORTS", async () => {
+    const { withModel } = await hooksModule();
+    const input = { a: 1, effort: "max" };
+    expect(withModel(undefined, input, "haiku", "low")?.hookSpecificOutput?.updatedInput).toEqual({
+      a: 1,
+      model: "haiku",
+      effort: "low",
+    });
+    // no model (a pinned agent): the effort is still sent, the call's other fields untouched
+    const alone = withModel(undefined, { a: 1, model: "opus" }, undefined, "high");
+    expect(alone?.hookSpecificOutput?.updatedInput).toEqual({
+      a: 1,
+      model: "opus",
+      effort: "high",
+    });
+    expect(alone?.hookSpecificOutput?.permissionDecision).toBe("allow");
+    // routing's own updatedInput is the base, and its prompt prefix survives
+    const routed: HookOutput = {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+        updatedInput: { a: 1, prompt: "PREFIX p" },
+      },
+    };
+    expect(
+      withModel(routed, { a: 1, prompt: "p" }, undefined, "xhigh")?.hookSpecificOutput
+        ?.updatedInput,
+    ).toEqual({ a: 1, prompt: "PREFIX p", effort: "xhigh" });
+    // an invalid level is never sent (it would fail the whole Agent call); with no model, no rewrite
+    for (const bad of ["auto", "turbo", "", undefined]) {
+      expect(withModel(undefined, { a: 1 }, undefined, bad)).toBeUndefined();
+      expect(
+        withModel(undefined, { a: 1 }, "haiku", bad)?.hookSpecificOutput?.updatedInput,
+      ).toEqual({ a: 1, model: "haiku" });
+    }
+    // a deny or ask is returned as is, effort or not
+    for (const decision of ["deny", "ask"] as const) {
+      const blocked: HookOutput = {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: decision,
+        },
+      };
+      expect(withModel(blocked, { a: 1 }, "haiku", "low")).toBe(blocked);
+      expect(withModel(blocked, { a: 1 }, undefined, "low")).toBe(blocked);
+    }
   });
 });
 

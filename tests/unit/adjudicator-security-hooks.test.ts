@@ -227,13 +227,10 @@ describe("apply mode on a HIGH dispatch", () => {
       tool_input: { description: "d", prompt: "Summarise the parser module and list its exports." },
     });
     const held = fakeProvider();
-    const a = await onPreAgent(
-      ctx,
-      input,
-      undefined,
-      { provider: held },
-      { level: "high", hold: true },
-    );
+    const a = await onPreAgent(ctx, input, undefined, { provider: held }, false, {
+      level: "high",
+      hold: true,
+    });
     expect(held.calls).toBe(0);
     expect(a?.model).toBeUndefined();
     expect(a?.action).toBe("advised");

@@ -119,6 +119,9 @@ export interface VocabTerm {
   df: number;
 }
 
+/** The sources the recall index holds: memories, documentation pages and captured tool errors. */
+export type RecallSource = "memory" | "docs" | "error";
+
 export type PurgeScope =
   | "index"
   | "sessions"
@@ -566,7 +569,24 @@ export interface AdjudicationSummary {
    * respected) and respect = respected / (applied + respected): apply-mode dispatches. null when
    * the denominator is 0.
    */
-  rates: { follow: number | null; apply: number | null; respect: number | null };
+  rates: {
+    follow: number | null;
+    apply: number | null;
+    respect: number | null;
+    /** effortFollowed / (effortFollowed + effortIgnored); null with no counted dispatch. */
+    effortFollow: number | null;
+  };
+  /** Dispatches whose scores.effortFollow is "followed" (see src/adjudicator/effort.ts). */
+  effortFollowed: number;
+  /** Dispatches whose scores.effortFollow is "ignored". */
+  effortIgnored: number;
+  /**
+   * Dispatches whose set effort (effortApplied when the hook applied one, else passedEffort)
+   * differs from the level that ran (actualEffort).
+   */
+  effortIneffective: number;
+  /** Dispatches with both a set effort (effortApplied or passedEffort) and actualEffort (the m of "n of m"). */
+  effortChecked: number;
   /**
    * Dispatches that ran on a model the advice did not name, counted exactly like the savings
    * report's keptModel (src/storage/dispatch.ts keptDispatch): the agent's pin was kept and it
@@ -692,6 +712,8 @@ export interface AdjudicatorStore {
   ): AdjudicationRow | undefined;
   /** Oldest first. */
   forTask(runId: string, taskId: number): AdjudicationRow[];
+  /** Every row of a swarm run (those with a task id), oldest first: one query for a whole run. */
+  forRun(runId: string): AdjudicationRow[];
   /** Rows with final = 0, oldest first; `olderThan` (epoch ms) keeps only rows with ts < it. */
   nonFinal(limit: number, olderThan?: number): AdjudicationRow[];
 

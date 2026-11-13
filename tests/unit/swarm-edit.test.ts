@@ -118,6 +118,22 @@ describe("renderSwarmDoc", () => {
     expect(block.indexOf("model")).toBeLessThan(block.indexOf("prompt"));
   });
 
+  it("writes tools_profile after isolation and before tools", () => {
+    const doc = load(BASE);
+    doc.swarms.team!.agents.scout = {
+      tools: ["Read"],
+      tools_profile: "readonly",
+      isolation: "worktree",
+      description: "Looks",
+    } as never;
+    const r = ok(renderSwarmDoc(BASE, doc));
+    const block = r.text.slice(r.text.indexOf("scout:"));
+    const at = (k: string) => block.indexOf(`${k}:`);
+    expect(at("description")).toBeLessThan(at("isolation"));
+    expect(at("isolation")).toBeLessThan(at("tools_profile"));
+    expect(at("tools_profile")).toBeLessThan(at("tools"));
+  });
+
   it("deletes a role and keeps a valid file", () => {
     const doc = load(BASE);
     delete doc.swarms.team!.agents.checker;

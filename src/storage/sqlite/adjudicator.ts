@@ -73,6 +73,42 @@ const COLUMNS: ReadonlyArray<readonly [Exclude<keyof AdjudicationRow, "id">, str
   ["feedbackNote", "feedback_note"],
 ];
 
+/** Effort levels, mirrored from adjudicator/types.ts: with the adjudicator off nothing from src/adjudicator may load at boot. */
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * The effort keys summary() counts, read from a scores JSON (passedEffort, effortApplied,
+ * actualEffort, effortFollow). Same result as adjudicator/effort.ts rowEffort for those keys;
+ * never throws. `set` is the effort set for the call: the one the hook applied, else the one the
+ * call passed.
+ */
+function scoresEffort(scores: string | null | undefined): {
+  set?: string;
+  actual?: string;
+  follow?: "followed" | "ignored";
+} {
+  if (!scores) return {};
+  let o: unknown;
+  try {
+    o = JSON.parse(scores);
+  } catch {
+    return {};
+  }
+  if (!o || typeof o !== "object" || Array.isArray(o)) return {};
+  const r = o as Record<string, unknown>;
+  const level = (v: unknown): string | undefined => {
+    const t = typeof v === "string" ? v.trim().toLowerCase() : "";
+    return EFFORT_LEVELS.includes(t) ? t : undefined;
+  };
+  const out: { set?: string; actual?: string; follow?: "followed" | "ignored" } = {};
+  const set = level(r.effortApplied) ?? level(r.passedEffort);
+  if (set) out.set = set;
+  const actual = level(r.actualEffort);
+  if (actual) out.actual = actual;
+  if (r.effortFollow === "followed" || r.effortFollow === "ignored") out.follow = r.effortFollow;
+  return out;
+}
+
 const LATENCY_RING = 50;
 const MAX_LIST = 500;
 
@@ -373,6 +409,14 @@ export class SqliteAdjudicatorStore implements AdjudicatorStore {
     ).map(toRow);
   }
 
+  forRun(runId: string): AdjudicationRow[] {
+    return (
+      this.prep(
+        "SELECT * FROM adjudications WHERE run_id = ? AND task_id IS NOT NULL ORDER BY ts, id",
+      ).all(runId) as Row[]
+    ).map(toRow);
+  }
+
   nonFinal(limit: number, olderThan?: number): AdjudicationRow[] {
     const n = Math.max(1, Math.min(limit, 10_000));
     const rows =
@@ -615,6 +659,10 @@ export class SqliteAdjudicatorStore implements AdjudicatorStore {
     let applyChecked = 0;
     const kept = { pin: 0, force: 0, fork: 0 };
     let followed = 0;
+    let effortFollowed = 0;
+    let effortIgnored = 0;
+    let effortIneffective = 0;
+    let effortChecked = 0;
     let adviseDispatches = 0;
     rows.forEach((r, i) => {
       const f = fields[i] as (typeof fields)[number];
@@ -627,6 +675,14 @@ export class SqliteAdjudicatorStore implements AdjudicatorStore {
         if (typeof r.action === "string" && ADVISE_ACTIONS.has(r.action) && !keptModel(f)) {
           adviseDispatches += 1;
           if (r.action === "followed") followed += 1;
+        }
+        // Effort follow-through lives in the scores JSON (#170): no schema column.
+        const e = scoresEffort(f.scores);
+        if (e.follow === "followed") effortFollowed += 1;
+        else if (e.follow === "ignored") effortIgnored += 1;
+        if (e.set && e.actual) {
+          effortChecked += 1;
+          if (e.set !== e.actual) effortIneffective += 1;
         }
       }
       bump(bySurface, r.surface);
@@ -659,7 +715,12 @@ export class SqliteAdjudicatorStore implements AdjudicatorStore {
         follow: ratio(followed, adviseDispatches),
         apply: ratio(a("applied"), a("applied") + a("respected")),
         respect: ratio(a("respected"), a("applied") + a("respected")),
+        effortFollow: ratio(effortFollowed, effortFollowed + effortIgnored),
       },
+      effortFollowed,
+      effortIgnored,
+      effortIneffective,
+      effortChecked,
       keptModel: kept,
       costUsd,
       savingsUsd,

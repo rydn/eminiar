@@ -867,8 +867,8 @@ const forced = (env: NodeJS.ProcessEnv) => subagentModelForced(env);
 /**
  * The opted-in swarms whose every role keeps a plain model pin (resolveAgentPin status pinned:
  * no model_range, or a ranged agent file edited by hand), read like em_swarm plan's all-pinned
- * nudge (swarm.ts ALL_PINNED_NOTE). Apply mode respects those pins, so it cannot change any of
- * their workers. [] with apply.respectFrontmatter off, under FORCE (warned about on its own) and
+ * nudge (swarm.ts ALL_PINNED_NOTE). Apply mode respects those pins, so it cannot change the model
+ * of any of their workers (it still sets their effort). [] with apply.respectFrontmatter off, under FORCE (warned about on its own) and
  * without swarms. Read-only; never throws.
  */
 export function pinnedSwarms(root: string, config: Config, env: NodeJS.ProcessEnv): string[] {
@@ -888,7 +888,7 @@ export function pinnedSwarms(root: string, config: Config, env: NodeJS.ProcessEn
 /** The status warning and doctor detail for pinnedSwarms. */
 export function pinnedSwarmsNote(names: readonly string[]): string {
   const which = `${names.length === 1 ? "swarm" : "swarms"} ${names.map((n) => `"${n}"`).join(", ")}`;
-  return `every role of ${which} pins a model, so apply mode cannot change any worker (add model_range in swarm.yaml, then \`eminiar swarm sync\`)`;
+  return `every role of ${which} pins a model, so apply mode cannot change any worker's model (add model_range in swarm.yaml, then \`eminiar swarm sync\`)`;
 }
 
 export async function statusReport(

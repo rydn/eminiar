@@ -6825,6 +6825,63 @@ table.adj-eval {
   }
 }
 
+.sw-dec {
+  color: var(--accent-2);
+  border-color: var(--accent-2-soft);
+}
+.sw-dec.warn {
+  color: var(--ink-warn);
+  border-color: var(--warn);
+}
+.sw-dec.warn {
+  border-style: dashed;
+}
+.sw-dec-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.sw-wk-dec {
+  display: flex;
+  min-width: 0;
+  margin-top: 6px;
+}
+.sw-wk-dec .sw-dec {
+  margin-left: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-dec-box {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: var(--space-2);
+}
+.sw-dec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.sw-dec-head .t {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sw-dec-why {
+  margin: 0;
+  padding-left: 16px;
+}
+
 /* --- security panel and shared risk components (sec-*) -----------------------------------
    Used by the Adjudicator tab and the swarm views. Existing tokens only. A level is always a
    glyph and a word too (○ low · ◐ medium · ▲ high · ⬢ critical), so colour is never the only

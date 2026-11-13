@@ -26,6 +26,13 @@ import type { StorageAdapter } from "../storage/adapter.js";
 import type { AdjudicationPatch, AdjudicatorBiasRow, ApiCallRow } from "../storage/types.js";
 import type { TaskRow, WorkerRow } from "../swarm/types.js";
 import type { PricingOverrides } from "../usage/pricing.js";
+import {
+  dominantEffort,
+  effortFactsRecorded,
+  effortFollowOf,
+  rowEffort,
+  withEffortScores,
+} from "./effort.js";
 import { complexityBucket, topIntent } from "./heuristic.js";
 import {
   actualCost,
@@ -39,6 +46,7 @@ import {
   totalTokens,
 } from "./savings.js";
 import { type AdjudicationOutcome, type AdjudicationRow, type Features, TIERS } from "./types.js";
+import { briefUnitsOf } from "./units.js";
 
 // --- constants -----------------------------------------------------------------------
 
@@ -585,7 +593,8 @@ class Reconciler {
           this.learning.enabled && (outcome === "success" || outcome === "failure")
             ? this.lessonOf(row, outcome === "success", teach, d.actualCostUsd ?? row.actualCostUsd)
             : [];
-        const scores = withTaught(row.scores, lesson);
+        // d.scores first: a patch (the effort keys, #170) set in this same commit must survive.
+        const scores = withTaught(d.scores ?? row.scores, lesson);
         if (scores !== undefined) d.scores = scores;
       }
     }
@@ -642,9 +651,9 @@ class Reconciler {
     // named for the agent actually dispatched, whose range can differ from the planned role's; a
     // row written without it falls back to the plan row's pick, then the raw verdict tier.
     const deferred = keptModel(row) !== undefined;
+    const parent = row.parentId ? this.db.adjudicator.get(row.parentId) : undefined;
     let action = row.action ?? null;
     if (action === "advised" && row.modelRequested && !deferred) {
-      const parent = row.parentId ? this.db.adjudicator.get(row.parentId) : undefined;
       const advice =
         advisedPick(row) ??
         (parent ? advisedPick(parent) : undefined) ??
@@ -659,6 +668,7 @@ class Reconciler {
     }
 
     if (!calls.length) return patch;
+    this.effortPatch(row, parent, calls, patch);
     const actual = actualCost(calls, this.pricing);
     const base = repriceAt(calls, baseline, this.pricing);
     patch.actualModel = dominantModel(calls) ?? null;
@@ -672,6 +682,104 @@ class Reconciler {
     }
     patch.savingsUsd = savings;
     return patch;
+  }
+
+  /**
+   * Effort follow-through (#170): the level the subagent ran at (the dominant api_calls.effort of
+   * its calls) goes into scores.actualEffort; an agent row also gets scores.effortFollow, the
+   * verdict of comparing it with the advised effort (effort.ts effortFollowOf: not counted for a
+   * fork, the env override or a saturated brief). Writes patch.scores only when it changes.
+   */
+  private effortPatch(
+    row: AdjudicationRow,
+    parent: AdjudicationRow | undefined,
+    calls: readonly ApiCallRow[],
+    patch: AdjudicationPatch,
+    verdict = true,
+  ): void {
+    const ran = dominantEffort(calls);
+    const e = rowEffort(row.scores);
+    const follow =
+      row.surface === "agent" && verdict
+        ? effortFollowOf({
+            advised: row.effort ?? null,
+            ...(ran ? { ran } : {}),
+            ...(e.passed ? { passed: e.passed } : {}),
+            ...(e.applied ? { applied: e.applied } : {}),
+            ...(e.agent ? { agent: e.agent } : {}),
+            env: e.env !== undefined,
+            fork: keptModel(row) === "fork",
+            // The plan row's brief scoring is the decision when there is one (hooks onPreAgent).
+            saturated: !!briefUnitsOf((parent ?? row).scores)?.saturated,
+          })
+        : undefined;
+    if (!ran && !follow && !e.follow) return;
+    const scores = withEffortScores(row.scores, {
+      ...(ran ? { actual: ran } : {}),
+      ...(follow ? { follow } : {}),
+    });
+    if (scores !== undefined && scores !== row.scores) patch.scores = scores;
+  }
+
+  /**
+   * Effort backfill (#227): final agent rows reconciled before the effort keys existed never
+   * get scores.actualEffort / effortFollow, so the effort rate reads n/a. Newest first, scan at
+   * most EFFORT_BACKFILL_SCAN agent rows, repair at most EFFORT_BACKFILL_LIMIT: final rows linked
+   * to an agent (agentId) whose scores lack actualEffort and whose api_calls have an effort.
+   * Reuses effortPatch and writes only `scores` (the effort keys; nothing else on the row).
+   * Idempotent: a repaired row has the key and drops out of the selection. A legacy row that
+   * records none of the dispatch facts (effortFactsRecorded) gets actualEffort only, no verdict.
+   * Calls load per session per page from the oldest candidate row, not from the run's cache.
+   */
+  backfillEffort(): number {
+    if (!this.learning.enabled) return 0;
+    let fixed = 0;
+    let seen = 0;
+    while (seen < EFFORT_BACKFILL_SCAN && fixed < EFFORT_BACKFILL_LIMIT) {
+      const page = this.db.adjudicator.list({ surface: "agent", limit: 200, offset: seen }).rows;
+      if (!page.length) break;
+      seen += page.length;
+      // Not the run's session cache (calls()): that window starts at the oldest pending row (or
+      // the first backfill row seen) minus the lookback, so an older final row of the same session
+      // finds no calls and starves. Load each session once per page from the oldest candidate
+      // row in it (minus the 5 s slack the row's own calls may precede its ts by).
+      const wanted = page.filter(
+        (r) => r.final && r.agentId && r.sessionId && !rowEffort(r.scores).actual,
+      );
+      const need = new Map<string, number>();
+      for (const r of wanted) {
+        const sid = r.sessionId as string;
+        const cur = need.get(sid);
+        if (cur === undefined || r.ts < cur) need.set(sid, r.ts);
+      }
+      const loaded = new Map<string, ApiCallRow[]>();
+      for (const row of wanted) {
+        if (fixed >= EFFORT_BACKFILL_LIMIT) break;
+        const sessionId = row.sessionId as string;
+        try {
+          let all = loaded.get(sessionId);
+          if (!all) {
+            all = this.db.apiCalls({ sessionId, since: (need.get(sessionId) ?? row.ts) - 5_000 });
+            loaded.set(sessionId, all);
+          }
+          const agentId = row.agentId;
+          const calls = all.filter((c) => c.agent_id === agentId && c.ts >= row.ts - 5_000);
+          if (!calls.length) continue;
+          const parent = row.parentId ? this.db.adjudicator.get(row.parentId) : undefined;
+          const patch: AdjudicationPatch = {};
+          // A legacy row (reconciled before the dispatch facts were recorded) gets the level it
+          // ran at but no verdict: see effortFactsRecorded.
+          this.effortPatch(row, parent, calls, patch, effortFactsRecorded(rowEffort(row.scores)));
+          if (patch.scores === undefined) continue;
+          this.db.adjudicator.update(row.id, { scores: patch.scores });
+          fixed++;
+        } catch {
+          // Best-effort: one bad row never stops the pass.
+        }
+      }
+    }
+    this.result.updated += fixed;
+    return fixed;
   }
 
   /** Apply the redo penalty to earlier credited attempts of a task that already went final. */
@@ -862,13 +970,25 @@ class Reconciler {
  * are skipped and repeated runs over pending rows write the same values. One bad row never
  * stops the rest.
  */
+/** Effort backfill bounds per reconcile pass: rows scanned and rows repaired. */
+export const EFFORT_BACKFILL_SCAN = 1000;
+export const EFFORT_BACKFILL_LIMIT = 200;
+
 export function reconcile(db: StorageAdapter, opts: ReconcileOptions = {}): ReconcileResult {
   const now = opts.now ?? Date.now();
   const limit = Math.max(1, Math.min(opts.limit ?? 200, 10_000));
   const learning = learningOf(opts.learning, opts.config);
   const pricing = opts.pricing ?? (opts.config?.usage?.pricing as PricingOverrides | undefined);
   const rows = db.adjudicator.nonFinal(limit, now - SETTLE_MS);
-  if (!rows.length) return { scanned: 0, updated: 0, finalized: 0, linked: 0, learned: 0 };
+  if (!rows.length) {
+    const idle = new Reconciler(db, now, learning, pricing, new Map());
+    try {
+      idle.backfillEffort();
+    } catch {
+      // Best-effort.
+    }
+    return idle.result;
+  }
 
   const isSwarm = (r: AdjudicationRow) =>
     (r.surface === "agent" || r.surface === "plan") && !!r.runId && typeof r.taskId === "number";
@@ -918,6 +1038,11 @@ export function reconcile(db: StorageAdapter, opts: ReconcileOptions = {}): Reco
     } catch {
       // Never let one row (or a locked DB) break reconcile for the rest.
     }
+  }
+  try {
+    rec.backfillEffort();
+  } catch {
+    // Best-effort: the backfill never breaks reconcile.
   }
   return rec.result;
 }

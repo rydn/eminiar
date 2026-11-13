@@ -666,18 +666,215 @@ CREATE INDEX IF NOT EXISTS adjudicator_exchanges_ts ON adjudicator_exchanges(ts)
 `,
   },
   {
+    // v12: the recall index (see RECALL_INDEX_SQL). Not v10: a development build of the
+    // adjudicator line already took 10 (decision_calls, decision_cache) on real databases, and the
+    // playbooks migration takes 11. The table and its triggers only: a hook may be the first to
+    // open the database, so the migration must stay cheap, and the rows that predate the triggers
+    // are copied in later, in short slices (backfillRecallIndex), by the MCP server, `eminiar
+    // reindex`, or a hook that does not block the prompt (Stop, SessionEnd, PreCompact, SubagentStop).
+    // Idempotent, and also run at every open as a heal (ensureRecallIndex), because a database
+    // can claim this version or a later one without the table (another build's numbering).
+    version: 12,
+    up: (db) => {
+      ensureRecallIndex(db);
+    },
+  },
+  {
     // Security assessments (docs/design/adjudicator-security.md, swarm run 20261113-bef5ea): one
     // row per assessed agent spawn, swarm task, prompt or em_adjudicate item. A separate table,
     // not columns on `adjudications`, so the adjudicator store, its try-it wrapper and the routing
-    // stats stay untouched. Numbered 13 because 10 (jev-integrations, reserved), 11 (playbooks)
-    // and 12 (recall index) are taken on other lines; recheck at merge. Idempotent, and also run
-    // lazily by SqliteSecurityStore for a database that claims 13 or later without the table.
+    // stats stay untouched. Numbered 13 because 10 (jev-integrations, reserved on the playbooks
+    // line), 11 (playbooks) and 12 (recall index, above) are taken; rechecked at the merge of
+    // main 25f304a, where 13 was still free on main and on feature/run_book. Idempotent, and also
+    // run lazily by SqliteSecurityStore for a database that claims 13 or later without the table.
     // Never stores a secret or a tool argument: input_head is the 80-char redacted head and
     // detail holds ids, numbers and tags only (see security.ts).
     version: 13,
     sql: SECURITY_SQL,
   },
 ];
+
+/**
+ * The documents whose chunks the recall index holds, as a condition on `d` (documents), and the
+ * source marker each one gets. Built-in SQL only: an older eminiar on the same database fires the
+ * triggers too, and a custom SQL function would break its inserts.
+ */
+const RECALL_DOC_WHERE =
+  "(d.source = 'memory' OR d.source LIKE 'docs:%' OR (d.source = 'session' AND d.title = 'error'))";
+const RECALL_SRC_SQL =
+  "CASE WHEN d.source = 'memory' THEN 'memory' WHEN d.source = 'session' THEN 'error' ELSE 'docs' END";
+
+/**
+ * The recall index. Prompt recall (UserPromptSubmit, the subagent brief, error recall) only ever
+ * surfaces memories, documentation pages and captured tool errors, but it used to search the
+ * whole chunk index, which grows with every captured code, exec and session output: seconds cold
+ * on a large database. recall_fts holds just those chunks, so a recall query costs in proportion
+ * to memories + docs + errors. A regular (content-storing) FTS5 table, not external content: a
+ * chunk delete cannot see its document's source (the parent row may be gone), and secure-delete
+ * and rebuild need the stored content. `src` is the source marker the query filters on inside the
+ * index. Every statement is IF NOT EXISTS, so it can run again on any database.
+ */
+const RECALL_INDEX_SQL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS recall_fts USING fts5(
+  title, body, src,
+  tokenize = 'porter unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS chunks_recall_ai AFTER INSERT ON chunks BEGIN
+  INSERT INTO recall_fts(rowid, title, body, src)
+  SELECT new.id, new.title, new.body, ${RECALL_SRC_SQL}
+    FROM documents d
+   WHERE d.id = new.document_id AND ${RECALL_DOC_WHERE};
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_recall_ad AFTER DELETE ON chunks BEGIN
+  DELETE FROM recall_fts WHERE rowid = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_recall_au AFTER UPDATE OF title, body ON chunks BEGIN
+  INSERT INTO recall_fts(recall_fts, rank) VALUES ('secure-delete', 0);
+  DELETE FROM recall_fts WHERE rowid = old.id;
+  INSERT INTO recall_fts(rowid, title, body, src)
+  SELECT new.id, new.title, new.body, ${RECALL_SRC_SQL}
+    FROM documents d
+   WHERE d.id = new.document_id AND ${RECALL_DOC_WHERE};
+  INSERT INTO recall_fts(recall_fts, rank) VALUES ('secure-delete', 1);
+END;
+`;
+
+/**
+ * With persistent secure-delete on, a delete and re-insert of the same rowid in one transaction
+ * (this trigger's UPDATE) leaves phantom rowids behind once the row is deleted later: an SQLite
+ * FTS5 bug (checked on 3.51.0 and 3.53.4) that fails 'integrity-check' and turns bm25 into NaN.
+ * The trigger therefore switches secure-delete off around its delete+insert and back on after;
+ * the updated row's old tokens stay as tombstones until a merge. A trigger without that toggle
+ * (a v12 install from before this) is replaced on open.
+ */
+const RECALL_TRIGGERS = ["chunks_recall_ai", "chunks_recall_ad", "chunks_recall_au"] as const;
+
+/**
+ * Meta key of a recall index still being filled: the id of the last document whose chunks the
+ * backfill has copied in. Absent means the index is complete (ready); while it is present,
+ * recall returns nothing rather than a partial answer or the slow whole-index query.
+ */
+export const RECALL_BACKFILL_KEY = "recall_fts_backfill_after";
+
+/** True when recall_fts, its three triggers and its persistent secure-delete are all in place. */
+export function recallIndexIntact(db: Database.Database): boolean {
+  const names = recallIndexObjects(db);
+  if (names.size !== RECALL_TRIGGERS.length + 1) return false;
+  return recallSecureDelete(db) && recallUpdateTriggerCurrent(db);
+}
+
+function recallIndexObjects(db: Database.Database): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT name FROM sqlite_master WHERE name IN ('recall_fts', ${RECALL_TRIGGERS.map((t) => `'${t}'`).join(", ")})`,
+    )
+    .all() as Array<{ name: string }>;
+  return new Set(rows.map((r) => r.name));
+}
+
+function recallUpdateTriggerCurrent(db: Database.Database): boolean {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'chunks_recall_au'").get() as
+    | { sql: string | null }
+    | undefined;
+  return (row?.sql ?? "").includes("'secure-delete'");
+}
+
+function recallSecureDelete(db: Database.Database): boolean {
+  const row = db.prepare("SELECT v FROM recall_fts_config WHERE k = 'secure-delete'").get() as
+    | { v: unknown }
+    | undefined;
+  return Number(row?.v) === 1;
+}
+
+/**
+ * Create the recall index where it is missing or incomplete, whatever schema_version says. Cheap
+ * and idempotent: no rows are copied here (a hook may be the caller). A table left without one of
+ * its triggers may be out of step with chunks, so it is dropped and made again, empty. A new
+ * table on a database that already has chunks is marked for the backfill (RECALL_BACKFILL_KEY);
+ * on one with no chunks it is complete as it stands. FTS5 secure-delete is turned on for good
+ * (it is stored in the table's config, so every process deleting from it, an older eminiar's
+ * triggers included, removes the deleted rows' tokens from the index segments). Run it inside a
+ * write transaction. Returns true when it changed anything.
+ */
+export function ensureRecallIndex(db: Database.Database): boolean {
+  const names = recallIndexObjects(db);
+  if (names.size === RECALL_TRIGGERS.length + 1) {
+    let changed = false;
+    if (!recallSecureDelete(db)) {
+      db.exec("INSERT INTO recall_fts(recall_fts, rank) VALUES ('secure-delete', 1)");
+      changed = true;
+    }
+    if (!recallUpdateTriggerCurrent(db)) {
+      // only the trigger body is stale; the table is in step, so keep it and its rows
+      db.exec("DROP TRIGGER chunks_recall_au");
+      db.exec(RECALL_INDEX_SQL);
+      changed = true;
+    }
+    return changed;
+  }
+  for (const t of RECALL_TRIGGERS) db.exec(`DROP TRIGGER IF EXISTS ${t}`);
+  if (names.has("recall_fts")) db.exec("DROP TABLE recall_fts");
+  db.exec(RECALL_INDEX_SQL);
+  db.exec("INSERT INTO recall_fts(recall_fts, rank) VALUES ('secure-delete', 1)");
+  if (db.prepare("SELECT 1 FROM chunks LIMIT 1").get())
+    db.prepare(
+      "INSERT INTO meta (key, value) VALUES (?, '0') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    ).run(RECALL_BACKFILL_KEY);
+  else db.prepare("DELETE FROM meta WHERE key = ?").run(RECALL_BACKFILL_KEY);
+  return true;
+}
+
+/** How many recall documents one backfill slice reads at most (it also stops at its row cap). */
+const RECALL_BACKFILL_DOCS = 500;
+
+/**
+ * One slice of the recall backfill: copy the chunks of the next recall documents after the saved
+ * cursor that are not in the index yet, until `maxRows` rows are copied or `holdMs` has passed
+ * (at least one document), and move the cursor; the last slice removes the key, which makes the
+ * index ready. Run it inside an IMMEDIATE transaction. Safe against rows that change between
+ * slices: the triggers have kept every insert, update and delete in step since the table was
+ * made, and a slice copies only chunks the index does not hold yet, so a row a trigger already
+ * wrote is never written twice and a deleted chunk is simply not found.
+ */
+export function recallBackfillSlice(
+  db: Database.Database,
+  maxRows: number,
+  holdMs: number,
+): { done: boolean; rows: number } {
+  const saved = db.prepare("SELECT value FROM meta WHERE key = ?").get(RECALL_BACKFILL_KEY) as
+    | { value: string }
+    | undefined;
+  if (saved === undefined) return { done: true, rows: 0 };
+  const started = performance.now();
+  let after = Number(saved.value) || 0;
+  const docs = db
+    .prepare(
+      `SELECT d.id FROM documents d WHERE d.id > ? AND ${RECALL_DOC_WHERE} ORDER BY d.id LIMIT ?`,
+    )
+    .all(after, RECALL_BACKFILL_DOCS) as Array<{ id: number }>;
+  const missing = db.prepare(
+    `SELECT c.id, c.title, c.body, ${RECALL_SRC_SQL} src
+       FROM chunks c JOIN documents d ON d.id = c.document_id
+      WHERE c.document_id = ? AND NOT EXISTS (SELECT 1 FROM recall_fts r WHERE r.rowid = c.id)`,
+  );
+  const insert = db.prepare("INSERT INTO recall_fts(rowid, title, body, src) VALUES (?, ?, ?, ?)");
+  let rows = 0;
+  let seen = 0;
+  for (const { id } of docs) {
+    // read in full before writing: the insert goes into the table the read looks at
+    const add = missing.all(id) as Array<{ id: number; title: string; body: string; src: string }>;
+    for (const r of add) insert.run(r.id, r.title, r.body, r.src);
+    rows += add.length;
+    after = id;
+    seen++;
+    if (rows >= maxRows || performance.now() - started >= holdMs) break;
+  }
+  const done = seen === docs.length && docs.length < RECALL_BACKFILL_DOCS;
+  if (done) db.prepare("DELETE FROM meta WHERE key = ?").run(RECALL_BACKFILL_KEY);
+  else
+    db.prepare("UPDATE meta SET value = ? WHERE key = ?").run(String(after), RECALL_BACKFILL_KEY);
+  return { done, rows };
+}
 
 /**
  * Columns added to the v8 tables after v8 first ran on development databases (v8 was not yet

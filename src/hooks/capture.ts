@@ -6,6 +6,7 @@ import {
   ev,
   withPriority,
 } from "../capture/classify.js";
+import { isHarnessEnvelope, stripLeadingReminders } from "../capture/envelope.js";
 import { sessionContext } from "../context.js";
 import { indexContent } from "../index/indexer.js";
 import { recallForError, recallForText, recordShown } from "../session/recall.js";
@@ -27,6 +28,8 @@ import type { HookHandler, HookInput } from "./types.js";
 
 /** What a stage of the prompt hook needs left of the run's budget to be worth starting. */
 const RECALL_NEEDS_MS = 600;
+/** What one recall index search needs left: the second of its two is skipped when below this. */
+const RECALL_STEP_NEEDS_MS = 300;
 const ADJUDICATOR_NEEDS_MS = 1500;
 /**
  * The security line of a prompt: a heuristic over the prompt and a handful of reads, a few
@@ -140,9 +143,13 @@ export const userPromptSubmit: HookHandler = async (input) => {
   // to remember to ask em_recall / em_docs first.
   const { recall } = ctx.config;
   const parts: string[] = [];
-  if (recall.onPrompt && hasBudget(RECALL_NEEDS_MS)) {
+  // Not for a turn the harness sent (a hand-back, a task notification): those are not the
+  // user's words, and their terms would only drag in unrelated memories. Harness context ahead
+  // of typed text is left out of the terms.
+  if (recall.onPrompt && !isHarnessEnvelope(input.prompt) && hasBudget(RECALL_NEEDS_MS)) {
     try {
-      const r = await recallForText(db, input.prompt, {
+      const r = await recallForText(db, stripLeadingReminders(input.prompt), {
+        stop: () => !hasBudget(RECALL_STEP_NEEDS_MS),
         maxMemories: recall.maxMemories,
         maxDocs: recall.maxDocs,
         sessionId,

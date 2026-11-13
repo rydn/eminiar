@@ -20,7 +20,7 @@ export interface CodeBackend {
   references(db: StorageAdapter, symbolId: string): GraphEdgeRow[];
 }
 
-export function getCodeBackend(ctx: ProjectContext): CodeBackend {
-  void ctx.config.code.backend; // only tree-sitter exists today
+export function getCodeBackend(_ctx: ProjectContext): CodeBackend {
+  // Only tree-sitter exists today, so there is nothing to choose.
   return treeSitterBackend;
 }

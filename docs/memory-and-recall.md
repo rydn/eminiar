@@ -67,7 +67,8 @@ Each memory file is:
 
 ## Onboarding memories
 
-`/em-onboard` writes five memories under `onboarding/`:
+`/eminiar:em-onboard` (`/em-onboard` with a `--method settings` install) writes five memories
+under `onboarding/`:
 
 | Memory | Contents |
 |---|---|
@@ -91,7 +92,7 @@ Hooks bring the relevant knowledge to Claude at the right moment.
 | **Before `git commit`** | The bug-prone and widely imported files in the commit | `eminiar history:` |
 | **After a failed tool call** | Earlier occurrences of the same error, with how they were resolved, and memories that mention it | `eminiar recall —` |
 | **Before `WebSearch` / `WebFetch`** | Indexed doc pages that already cover the query | `eminiar docs:` |
-| **When a subagent starts** | The project brief plus the memories and doc pages for its task | (in the prompt) |
+| **When a subagent is spawned** | The project brief plus the memories and doc pages for its task. Only `enforce` routing puts it in the subagent prompt; `annotate` gives it to the main session as context, and `off` adds nothing | `Project brief (eminiar):` |
 | **Session start** | Project brief: overview, accepted decisions, constraints, preferences, hot files | — |
 
 ### Rules that keep recall useful
@@ -106,10 +107,13 @@ Hooks bring the relevant knowledge to Claude at the right moment.
   so knowledge skimmed past early in a long session is not lost. After a `/compact` or a resume,
   the window restarts.
 - **Fast.** Hooks never run `git log` and never load the embedding model. Recall is a few FTS
-  queries. File history comes from a per-file risk table that is rebuilt when `HEAD` moves.
+  queries against a small recall index that holds only memories, documentation pages and past
+  errors, not the captured command output and code in the full index. File history comes from a per-file risk table that is rebuilt when `HEAD` moves.
   Until the first build (the server warm-up or `em_history {action:"overview"}`) the session
   start says so.
-- **Every routing mode.** Recall works even with `routing.mode: off`.
+- **Every routing mode.** Recall on prompts, files, commits, errors and web calls works even with
+  `routing.mode: off`. The subagent brief is the exception: it follows the routing mode (see the
+  table above).
 - **Measured.** Every decision is recorded, fired or quiet, with the reason each candidate stayed
   out. `em_stats` shows the hit rate per path. From the terminal:
 
@@ -127,7 +131,7 @@ history and symbol questions to the knowledge tools:
 | Native call | Redirected to |
 |---|---|
 | `git log`, `git blame`, `git show <sha>`, `git shortlog` | `em_history` with the matching action (`file`, `commit`, `branch`, `search`, `symbol`, `timeline`, `overview`) |
-| `Grep` for an identifier the graph defines | `em_symbols {name_path, mode:"references"}` / `em_search {source:"code"}`; a files-only grep is annotated, a content grep is denied |
+| `Grep` for an identifier the graph defines | `em_symbols {name_path, mode:"references"}` / `em_search {source:"code"}`; a files-only grep or a content grep with a `head_limit` is annotated, a content grep without one is denied |
 
 See [How it works › Routing](how-it-works.md#routing).
 

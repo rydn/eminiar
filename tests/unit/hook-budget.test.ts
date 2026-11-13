@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -117,6 +117,81 @@ describe("dispatch deadline", () => {
       expect(budgetLeft()).toBe(0);
     } finally {
       handlers.UserPromptSubmit = saved;
+    }
+  });
+});
+
+describe("budget counted from process start", () => {
+  const payload = JSON.stringify({
+    hook_event_name: "UserPromptSubmit",
+    session_id: "b2",
+    cwd: "",
+    prompt: "hello there",
+  });
+  const logFile = () => join(process.env.EMINIAR_HOME as string, "hook.log");
+  const logText = () => {
+    try {
+      return readFileSync(logFile(), "utf8");
+    } catch {
+      return "";
+    }
+  };
+
+  it("a boot that already spent most of the budget answers {} late, and logs it", async () => {
+    const saved = handlers.UserPromptSubmit as HookHandler;
+    handlers.UserPromptSubmit = () => new Promise<HookOutput>((r) => setTimeout(() => r({}), 300));
+    try {
+      const before = logText().length;
+      const out = await dispatch(payload, [], { startedAt: performance.now() - 3400 });
+      expect(out).toBe("{}");
+      expect(ranLate()).toBe(true);
+      expect(logText().slice(before)).toContain("hook budget of 3500 ms exceeded");
+    } finally {
+      handlers.UserPromptSubmit = saved;
+    }
+  });
+  it("without startedAt the full budget is available to the handler", async () => {
+    const saved = handlers.UserPromptSubmit as HookHandler;
+    handlers.UserPromptSubmit = () =>
+      new Promise<HookOutput>((r) => setTimeout(() => r({ systemMessage: "ok" }), 150));
+    try {
+      const out = await dispatch(payload, []);
+      expect(JSON.parse(out)).toEqual({ systemMessage: "ok" });
+      expect(ranLate()).toBe(false);
+    } finally {
+      handlers.UserPromptSubmit = saved;
+    }
+  });
+  it("budgetLeft reads the performance clock, whose 0 is the process start", () => {
+    startBudget(HOOK_BUDGET_MS, 0);
+    const left = budgetLeft();
+    expect(left).toBeLessThanOrEqual(HOOK_BUDGET_MS - performance.now() + 1);
+    expect(left).toBeGreaterThan(0);
+  });
+});
+
+describe("hooks.json deadlines", () => {
+  const table = JSON.parse(readFileSync(join(process.cwd(), "hooks", "hooks.json"), "utf8")) as {
+    hooks: Record<string, { hooks: { command: string; timeout: number }[] }[]>;
+  };
+  it("every --deadline sits above the soft budget and leaves 500 ms under the timeout", () => {
+    let seen = 0;
+    for (const entries of Object.values(table.hooks))
+      for (const e of entries)
+        for (const h of e.hooks) {
+          const m = / --deadline (\d+)$/.exec(h.command);
+          if (!m) continue;
+          seen++;
+          const ms = Number(m[1]) * 1000;
+          expect(ms).toBeGreaterThan(HOOK_BUDGET_MS);
+          expect(ms + 500).toBeLessThanOrEqual(h.timeout * 1000);
+        }
+    expect(seen).toBeGreaterThan(0);
+  });
+  it("UserPromptSubmit carries it; no other event does", () => {
+    for (const [ev, entries] of Object.entries(table.hooks)) {
+      const has = entries.some((e) => e.hooks.some((h) => h.command.includes("--deadline")));
+      expect(has, ev).toBe(ev === "UserPromptSubmit");
     }
   });
 });

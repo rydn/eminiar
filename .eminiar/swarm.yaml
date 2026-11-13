@@ -7,7 +7,7 @@ sync: auto # regenerate the agent files at session start when this file changes
 
 defaults:
   model: sonnet
-  model_range: {floor: haiku, ceiling: opus} # every role picks its own size per task; reviewers pin opus below
+  model_range: {floor: haiku, ceiling: fable} # roles without their own range pick a size per task; judgement roles set a higher floor below
   context:
     # what eminiar tells each worker when it starts
     memories: 5 # project memories matching the role and task
@@ -21,12 +21,12 @@ swarms:
   feature:
     description: Research, design, build, test and adversarially review a multi-module feature (core logic, hooks, CLI/onboarding, MCP tools, dashboard UI, docs).
     topology: hierarchical # hierarchical | mesh | pipeline
-    max_agents: 11 # workers running at once in one run
+    max_agents: 14 # workers running at once in one run: the role counts below add up to 14
     context:
       max_chars: 7000
     instructions: |
       Order: researcher + architect first (in parallel), then coders and the ui role fan out on
-      disjoint files, then testers, then two reviewers on the full diff. Loop review → fix until
+      disjoint files, then testers, then up to three reviewers on the full diff, one angle each. Loop review → fix until
       a review round finds nothing confirmed.
       Every task names the files it touches; no two parallel tasks share a file. Shared types and
       config schema land in their own early task that the others depend on.
@@ -48,7 +48,9 @@ swarms:
         model_range:
           floor: haiku
           ceiling: opus
+        effort: xhigh
         color: cyan
+        count: 3
         disallowed_tools: [Edit, Write, NotebookEdit]
         context:
           history: false
@@ -66,6 +68,8 @@ swarms:
       architect:
         description: Designs the change from the code graph, history, past decisions and the research notes.
         model: opus
+        model_range: {floor: sonnet, ceiling: fable} # never haiku; fable only for hard multi-subsystem designs
+        effort: xhigh
         color: purple
         disallowed_tools: [Edit, Write, NotebookEdit]
         memory_tags: [decision, constraint]
@@ -83,6 +87,7 @@ swarms:
         model_range:
           floor: haiku
           ceiling: opus
+        effort: high
         count: 4 # at most four coders at once
         color: blue
         scope: ["src/**", "bin/**", "scripts/**", "hooks/**", "skills/**", "docs/**"]
@@ -104,6 +109,8 @@ swarms:
       ui:
         description: Builds dashboard views and their API endpoints (Preact web app under src/ui).
         model: opus
+        model_range: {floor: sonnet, ceiling: opus}
+        effort: high
         color: green
         scope: ["src/ui/**", "docs/dashboard.md"]
         hooks:
@@ -125,6 +132,7 @@ swarms:
         model_range:
           floor: haiku
           ceiling: opus
+        effort: high
         count: 2
         color: yellow
         scope: ["tests/**"]
@@ -137,9 +145,9 @@ swarms:
       reviewer:
         description: Adversarial reviewer that tries to break the change before it ships.
         model: opus
-        model_range: {} # pinned: reviewers always run on opus
+        model_range: {floor: opus, ceiling: fable} # never below opus; the adjudicator may escalate
         effort: high
-        count: 2
+        count: 3
         color: red
         disallowed_tools: [Edit, Write, NotebookEdit]
         memory_tags: [constraint, preference]
@@ -154,23 +162,45 @@ swarms:
   review:
     description: Review the working tree from several angles at once.
     topology: mesh
-    max_agents: 11
+    max_agents: 8 # the role counts below add up to 8
+    instructions: |
+      Review the working tree against main (git diff main...HEAD plus uncommitted changes). Start
+      the roles together; give each task an area (files or a module) so same-role workers do not
+      overlap. Report only findings you could confirm with a concrete input or scenario, each with
+      a severity. Project rules a finding can violate: hooks fail open, optional features cost
+      nothing when off (hot path, `npm run bench`), secrets never reach the repo, index, logs or
+      dashboard, config changes update the schema and docs/configuration.md.
     agents:
       correctness:
         model: opus
-        model_range: {} # pinned: reviewers always run on opus
+        model_range: {floor: opus, ceiling: fable} # never below opus; the adjudicator may escalate
         description: Hunts for logic errors and unhandled edge cases.
+        count: 3
         disallowed_tools: [Edit, Write, NotebookEdit]
-        prompt: Find bugs, each with a concrete failing input. Post each under the key "finding-<n>".
+        prompt: |
+          Find bugs in the area your task names: logic errors, unhandled edge cases, broken
+          fail-open paths, races between hooks. Run the code with real inputs in the scratchpad
+          (em_execute) rather than reasoning alone. Post each confirmed bug under the key
+          "finding-correctness-<n>" with the failing input, expected vs actual, and a severity.
       security:
         model: opus
-        model_range: {} # pinned: reviewers always run on opus
+        model_range: {floor: opus, ceiling: fable} # never below opus; the adjudicator may escalate
         description: Looks for injection, path traversal, leaked secrets and unsafe defaults.
+        count: 3
         disallowed_tools: [Edit, Write, NotebookEdit]
-        prompt: Report only exploitable issues, each with the input that triggers it.
+        prompt: |
+          Report only exploitable issues in the area your task names: command and SQL injection,
+          path traversal, secrets reaching the repo, index, logs, memories or dashboard (files that
+          hold them must be 0600 under ~/.eminiar), and unsafe defaults. Post each under the key
+          "finding-security-<n>" with the input that triggers it and a severity.
       tests:
-        model: opus
-        model_range: {} # pinned: reviewers always run on opus
+        model: sonnet
+        model_range: {floor: sonnet, ceiling: opus}
         description: Checks that every changed behaviour has a test that would fail without it.
+        count: 2
         disallowed_tools: [Edit, Write, NotebookEdit]
-        prompt: List untested behaviour together with the test you would add.
+        prompt: |
+          For each changed behaviour in the area your task names, find the test that would fail
+          without it (tests/unit, tests/setup-env.ts). List untested behaviour, weak assertions and
+          tests that need network or a real model, each with the test you would add. Post them
+          under the key "finding-tests-<n>".

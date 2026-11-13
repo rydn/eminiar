@@ -110,7 +110,43 @@ from the transcripts.
 
 ## "UserPromptSubmit hook timed out after 5s — output discarded"
 
-Claude Code stops a hook at its `timeout` and drops what it wrote. It shows up when many
+Claude Code stops a hook at its `timeout` and drops what it wrote. In 0.13.4 to 0.14.x the
+usual cause was prompt recall on a large project database. Its FTS queries scanned the whole
+chunk index, captured command output and code included, and with a cold page cache they took
+4 to 14 s. The soft deadline could not interrupt them, so `hook.log` stayed empty. Since this
+fix, recall reads a small recall index of memories, docs and past errors (see
+[Hooks](how-it-works.md#hooks)). On a database from an older version the index starts empty:
+opening it, in a hook or anywhere else, only creates the index. The eminiar MCP server then
+fills it in the background after it starts, in short slices that leave the database free for
+hooks between them, and `eminiar reindex` fills it too. The hooks nobody waits on (`Stop`,
+`SessionEnd`, `PreCompact` and `SubagentStop`, never the prompt or tool hooks) also add a few
+slices each time they run, at most 300 ms of them. This is a one-time warm-up. Until it
+finishes, prompt, brief and error recall show nothing, and they never fall back to the slow
+query. A fill stopped part-way picks up where it left off.
+
+If recall stays quiet after an upgrade, `eminiar recall --explain "<prompt>"` and
+`eminiar doctor` say `recall index still filling (after document N)` while the fill is pending.
+Two setups leave the fill to the hooks alone, so it takes several turns:
+
+- An in-place `eminiar upgrade` while sessions run. The next hook runs the new code and
+  upgrades the database, but each running session's MCP server is still the old build, which
+  does not fill the index. Run `/mcp` and reconnect eminiar (or start a new session) to get the
+  new server, or run `eminiar reindex` to fill it at once.
+- No eminiar MCP server at all: hooks-only or CLI use, or Cursor without `em-server` in
+  `~/.cursor/mcp.json`. Run `eminiar reindex` once.
+
+The prompt hook also runs as
+`bin/em-hook --deadline 4`, which stops node at 4 s. The prompt then goes on without eminiar
+context, and `~/.eminiar/hook.log` gets a line
+`<time> error UserPromptSubmit: em-hook stopped node at the 4 s deadline; the prompt went on without eminiar context`.
+The plugin's `hooks/hooks.json` carries the flag. If you installed with the settings method
+(hooks in `~/.claude/settings.json`), run `eminiar install` again: it replaces the old
+`UserPromptSubmit` entry with the `--deadline 4` one instead of adding a second. Going back to
+an older eminiar with the settings method does not recognise the `--deadline 4` entry: it keeps
+it and adds its own, so the prompt hook runs twice until you delete one of them from
+`~/.claude/settings.json`.
+
+The message can also appear when many
 processes write to one project database at once, for example while an agent swarm runs: each
 SQLite statement used to wait up to 2 s for the write lock, and a handler runs several of them.
 Hooks now wait a limited time per statement (250 ms for the prompt hook and other read-only

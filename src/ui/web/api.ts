@@ -813,8 +813,22 @@ export interface SwarmSegment {
   io: Record<SwarmIo, number>;
   open?: boolean;
 }
+export type {
+  DecisionFollow as SwarmDecisionFollow,
+  SwarmDecision,
+  SwarmDecisionAdvice,
+  SwarmDecisionRan,
+} from "../../adjudicator/swarm-decision-types.js";
 export interface SwarmRunDetail {
   run: RunRow;
+  /** The adjudicator's decision per task id (newer servers). */
+  decisions?:
+    | Record<number, import("../../adjudicator/swarm-decision-types.js").SwarmDecision>
+    | undefined;
+  /** Opaque hash of the decisions map; send it back as `decisionsHash` to skip an unchanged map. */
+  decisionsHash?: string | undefined;
+  /** `decisions` was left out because `decisionsHash` still matches the client's. */
+  decisionsUnchanged?: boolean | undefined;
   /** Every task, or with `tasksPartial` only those updated since `tasksSince`. */
   tasks: SwarmTask[];
   /** How many tasks the run has (newer servers). */
@@ -877,6 +891,7 @@ export interface SwarmFinishResult {
 }
 export interface SwarmTaskFull {
   task: SwarmTask;
+  decision?: import("../../adjudicator/swarm-decision-types.js").SwarmDecision;
 }
 export interface SwarmSyncResult {
   actions: Array<{ agentType: string; path: string; action: string; reason?: string }>;
@@ -944,12 +959,26 @@ export interface AdjSummary {
   byOutcome: Record<string, number>;
   latency: AdjLatency;
   providerLatency: AdjLatency;
-  rates: { follow: number | null; apply: number | null; respect: number | null };
+  rates: {
+    follow: number | null;
+    apply: number | null;
+    respect: number | null;
+    /** effortFollowed / (effortFollowed + effortIgnored); absent from older servers. */
+    effortFollow?: number | null;
+  };
   costUsd: number;
   savingsUsd: number;
   netUsd: number;
   applyIneffective: number;
   applyChecked: number;
+  /** Dispatches whose subagent ran at the advised effort (or the level passed). */
+  effortFollowed?: number;
+  /** Dispatches whose subagent ran at another effort than advised. */
+  effortIgnored?: number;
+  /** Dispatches whose set effort (applied by the hook, else passed) differs from the level that ran. */
+  effortIneffective?: number;
+  /** Dispatches with both a set and an actual effort (the m in "n of m"). */
+  effortChecked?: number;
 }
 export interface AdjDayBucket {
   day: string;

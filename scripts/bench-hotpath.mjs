@@ -15,7 +15,8 @@
 // (the default) against a baseline build when --base points at one (a checkout of the commit before
 // the adjudicator, built with `npx tsup`, node_modules linked in), interleaved run by run; and an
 // enabled heuristic UserPromptSubmit / Agent call. Budgets (--assert exits 1 when one is broken):
-// disabled <= 1 ms p50 over the baseline; enabled heuristic UserPromptSubmit <= 150 ms p95.
+// disabled <= 1 ms p50 over the baseline; enabled heuristic UserPromptSubmit <= 150 ms p95;
+// the `--deadline 4` supervisor (UserPromptSubmit in hooks.json) <= 3 ms p50 over plain exec.
 //
 // The security advice (adjudicator.security, off by default) is measured the same way: its own
 // variants "security" (the routing adjudicator off) and "both", interleaved with the variant they
@@ -248,7 +249,7 @@ if (DO_HOOKS) {
   const once = (v, payload) =>
     new Promise((resolve, reject) => {
       const t = now();
-      const p = spawn("sh", [v.shim], { env: v.env, cwd: v.cwd, stdio: ["pipe", "pipe", "pipe"] });
+      const p = spawn("sh", [v.shim, ...(v.args ?? [])], { env: v.env, cwd: v.cwd, stdio: ["pipe", "pipe", "pipe"] });
       let out = "";
       p.stdout.on("data", (d) => { out += d; });
       p.stderr.on("data", () => {});
@@ -278,6 +279,9 @@ if (DO_HOOKS) {
   const securityOn = { adjudicator: { security: { enabled: true } } };
   const sec = variant("security", pkgRoot, {}, securityOn);
   const both = variant("both", pkgRoot, enabledHeuristic, securityOn);
+  // hooks.json runs UserPromptSubmit as `em-hook --deadline 4`: the shell supervisor around node.
+  const dl = variant("deadline", pkgRoot, {});
+  dl.args = ["--deadline", "4"];
   try {
     for (const kind of ["prompt", "bash"]) {
       const r = await race(base ? [base, cur] : [cur], kind, HOOK_RUNS);
@@ -287,6 +291,13 @@ if (DO_HOOKS) {
         const d50 = r.current.p50 - r.base.p50;
         checks.push({ name: `hook ${kind}: adjudicator off, p50 over baseline`, value: d50, budget: 1.0, unit: "ms", ok: d50 <= 1.0 });
       }
+    }
+    {
+      // The supervisor's cost on a normal run, against the same build exec'd directly.
+      const r = await race([cur, dl], "prompt", HOOK_RUNS);
+      results["hook.prompt.deadline"] = r.deadline;
+      const d50 = r.deadline.p50 - r.current.p50;
+      checks.push({ name: "hook prompt: --deadline supervisor, p50 over plain exec", value: d50, budget: 3.0, unit: "ms", ok: d50 <= 3.0 });
     }
     for (const kind of ["prompt", "agent"]) {
       const r = await race([cur, on, sec, both], kind, HOOK_RUNS);
@@ -306,6 +317,7 @@ if (DO_HOOKS) {
     on.cleanup();
     sec.cleanup();
     both.cleanup();
+    dl.cleanup();
   }
 }
 

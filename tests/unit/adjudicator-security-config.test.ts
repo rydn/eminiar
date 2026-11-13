@@ -231,7 +231,8 @@ describe("loadConfig: the security section", () => {
     personal({ security: { enabled: "yes" } });
     const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     expect(loadConfig(root).adjudicator.security.enabled).toBe(false);
-    expect(slow).toHaveBeenCalledTimes(2);
+    // the merged layers, then the personal file alone (loadConfig drops only the invalid layer)
+    expect(slow).toHaveBeenCalledTimes(3);
     expect(String(warn.mock.calls[0]?.[0])).toContain("invalid config");
   });
 

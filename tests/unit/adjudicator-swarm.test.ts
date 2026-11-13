@@ -355,6 +355,102 @@ describe("plan advice: model pins and the Agent call's effort (#68)", () => {
     ).toEqual([undefined, "pin", "force", "fork"]);
   });
 
+  it("apply mode: the rule table says the hook sets the effort (applied), unless the env outranks it", () => {
+    expect(dispatchRule({ forced: false, effortApply: true, effortSet: false })).toEqual({
+      model: "pass",
+      effort: "applied",
+    });
+    // a pinned agent, FORCE and a ranged role change the model, not who sets the effort
+    expect(
+      dispatchRule({ forced: false, effortApply: true, effortSet: false, pin: true }).effort,
+    ).toBe("applied");
+    expect(dispatchRule({ forced: true, effortApply: true, effortSet: false })).toEqual({
+      model: "forced",
+      effort: "applied",
+    });
+    expect(
+      dispatchRule({ forced: false, effortApply: true, effortSet: false, ranged: true }).effort,
+    ).toBe("applied");
+    // a saturated brief does not make it informational: the hook sets it anyway
+    expect(
+      dispatchRule({ forced: false, effortApply: true, effortSet: false, saturated: true }).effort,
+    ).toBe("applied");
+    // only CLAUDE_CODE_EFFORT_LEVEL outranks the hook (the caller passes just the env as effortSet)
+    expect(dispatchRule({ forced: false, effortApply: true, effortSet: true }).effort).toBe(
+      "informational",
+    );
+    // a fork takes no effort whatever the mode
+    expect(
+      dispatchRule({ forced: false, effortApply: true, fork: true, effortSet: false }),
+    ).toEqual({
+      model: "fork",
+      effort: "fork",
+    });
+    // without effortApply nothing changes
+    expect(dispatchRule({ forced: false, effortApply: false, effortSet: false }).effort).toBe(
+      "pass",
+    );
+    expect(dispatchRule({ forced: false, effortSet: false, saturated: true }).effort).toBe(
+      "informational",
+    );
+  });
+
+  it("apply mode: plan lines say 'applied by the hook'; the head and Next say to pass no effort", () => {
+    const applied: PlanAdvice = { ...base, effortApplied: true };
+    expect(
+      planLines([applied, { ...base, taskId: 4, saturated: true, effortApplied: true }]),
+    ).toEqual([
+      "#3 → swarm-feat-coder · model haiku · effort low (applied by the hook) (complexity 1, conf 0.90)",
+      "#4 → swarm-feat-coder · model haiku · effort low (applied by the hook) (brief saturated; complexity 1, conf 0.90)",
+    ]);
+    expect(planAdviceHead([applied], {})).toBe(
+      "Adjudicator suggestions: pass the model as `model` on each Agent call (the hook sets `effort` on the Agent call in apply mode, so pass no `effort`):",
+    );
+    expect(planNextHint([applied], {})).toBe(
+      ", passing `model` as each suggestion below says; the hook sets `effort` (apply mode): pass no `effort`",
+    );
+    expect(planPassing([applied], {})).toMatchObject({ model: true, effort: false, applied: true });
+
+    // every role pinned: no model to pass either, and still no effort
+    const pinned: PlanAdvice = {
+      ...applied,
+      pin: { status: "pinned", model: "opus", source: "project" },
+    };
+    const head = planAdviceHead([pinned], {});
+    expect(head).toContain("the hook sets `effort` on the Agent call in apply mode");
+    expect(head).toMatch(/; a pinned agent keeps its model: pass no `model`:$/);
+    expect(head).not.toMatch(/pass the model as `model`|as `effort`/);
+    const next = planNextHint([pinned], {});
+    expect(next).toContain("leave `model` unset for pinned agents");
+    expect(next).toContain("the hook sets `effort` (apply mode): pass no `effort`");
+    expect(next).not.toMatch(/passing `/);
+
+    // FORCE: the model is informational, the hook still sets the effort
+    const forced = planAdviceHead([{ ...applied, forced: true }], {
+      CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1",
+    });
+    expect(forced).toMatch(/the model is informational; the hook sets `effort`/);
+    expect(forced).not.toMatch(/pass the effort as `effort`/);
+
+    // a mixed plan (one task with the hook's effort, one without) still names effort for the rest
+    expect(planPassing([applied, { ...base, taskId: 4 }], {})).toMatchObject({
+      effort: true,
+      applied: true,
+    });
+    expect(planNextHint([applied, { ...base, taskId: 4 }], {})).toBe(
+      ", passing `model` and `effort` as each suggestion below says",
+    );
+
+    // advise mode (no effortApplied) is exactly as before
+    expect(planLines([base])[0]).toBe(
+      "#3 → swarm-feat-coder · model haiku · effort low (complexity 1, conf 0.90)",
+    );
+    expect(planAdviceHead([base], {})).toMatch(
+      /pass the model as `model` and the effort as `effort`/,
+    );
+    expect(planPassing([base], {}).applied).toBe(false);
+  });
+
   it("the Next hint and the head agree for pins, FORCE and the effort env (#73)", () => {
     const pinned: PlanAdvice = { ...base, pin: { status: "pinned", model: "opus" } };
     const cases: Array<{
@@ -466,7 +562,7 @@ describe("plan advice: model pins and the Agent call's effort (#68)", () => {
       ],
     } as unknown as SwarmSpec;
 
-    const plan = async (adjudicator: Record<string, unknown>) => {
+    const plan = async (adjudicator: Record<string, unknown>, env: NodeJS.ProcessEnv = {}) => {
       const ctx = { root, config: configWith({ enabled: true, ...adjudicator }) };
       const run = db.swarm.runCreate({
         id: `pins-${Math.random().toString(36).slice(2, 8)}`,
@@ -481,8 +577,74 @@ describe("plan advice: model pins and the Agent call's effort (#68)", () => {
           role,
         }),
       );
-      return adjudicatePlan(ctx, db, run, spec, tasks, { provider: null, env: {} });
+      return adjudicatePlan(ctx, db, run, spec, tasks, { provider: null, env });
     };
+
+    it("apply mode marks every task effortApplied, pinned or not; advise mode marks none", async () => {
+      const a = await plan({ mode: "apply" });
+      expect(a.map((x) => x.effortApplied)).toEqual([true, true, true]);
+      // the pins are still respected: the hook sets the effort, never a pinned model
+      expect(a.map((x) => x.pin?.status)).toEqual(["pinned", undefined, "unknown"]);
+      const lines = planLines(a);
+      expect(lines[0]).toMatch(
+        /^#\d+ → pin-coder · pinned opus \(.*\) · effort \w+ \(applied by the hook\) \(complexity/,
+      );
+      expect(lines[1]).toMatch(
+        /^#\d+ → free-coder · model (haiku|sonnet|opus|fable) · effort \w+ \(applied by the hook\) \(/,
+      );
+      expect(lines[2]).toMatch(/ · effort \w+ \(applied by the hook\) \(/);
+      const block = planAdviceBlock(a, {});
+      expect(block).toMatch(/the hook sets `effort` on the Agent call in apply mode/);
+      expect(block).not.toMatch(/pass the effort as `effort`|the effort as `effort`/);
+      expect(planPassing(a, {})).toMatchObject({ applied: true, effort: false });
+
+      const advise = await plan({ mode: "advise" });
+      expect(advise.every((x) => x.effortApplied === undefined)).toBe(true);
+      expect(planLines(advise).join("\n")).not.toMatch(/applied by the hook/);
+      expect(planPassing(advise, {})).toMatchObject({ applied: false, effort: true });
+    });
+
+    it("apply mode under CLAUDE_CODE_EFFORT_LEVEL does not claim the hook sets the effort", async () => {
+      const env = { CLAUDE_CODE_EFFORT_LEVEL: "high" };
+      const a = await plan({ mode: "apply" }, env);
+      expect(a.every((x) => x.effortApplied === undefined)).toBe(true);
+      expect(planLines(a).join("\n")).not.toMatch(/applied by the hook/);
+      expect(planAdviceBlock(a, env)).not.toMatch(/the hook sets/);
+      expect(planPassing(a, env).applied).toBe(false);
+    });
+
+    it("apply mode with surfaces.agent off does not claim the hook sets the effort (#245)", async () => {
+      // onPreAgent returns early when surfaces.agent is off, so the hook sets nothing
+      const surfaces = { prompt: true, agent: false, plan: true, tools: false };
+      const a = await plan({ mode: "apply", surfaces });
+      expect(a).toHaveLength(3);
+      expect(a.every((x) => !x.effortApplied)).toBe(true);
+      expect(planPassing(a, {})).toMatchObject({ applied: false, effort: true });
+      const text = [planAdviceHead(a, {}), planNextHint(a, {}), ...planLines(a)].join("\n");
+      expect(text).not.toMatch(/applied by the hook|the hook sets/);
+      // the coordinator passes the effort itself, as in advise mode
+      expect(planAdviceHead(a, {})).toMatch(/the effort as `effort`/);
+      expect(planNextHint(a, {})).toMatch(
+        /passing `[^`]+`( and `effort`)? as each suggestion below says/,
+      );
+      expect(planNextHint(a, {})).toContain("`effort`");
+      expect(planLines(a).join("\n")).toMatch(/ · effort \w+ \(/);
+      // the full block agrees with advise mode on the effort wording
+      const advise = await plan({ mode: "advise" });
+      const ids = (s: string) => s.replace(/#\d+/g, "#N");
+      expect(ids(planAdviceBlock(a, {}))).toBe(ids(planAdviceBlock(advise, {})));
+
+      // surfaces.agent on (and the unset default) still applies the effort
+      for (const on of [
+        { ...surfaces, agent: true },
+        { prompt: true, plan: true },
+      ]) {
+        const applied = await plan({ mode: "apply", surfaces: on });
+        expect(applied.map((x) => x.effortApplied)).toEqual([true, true, true]);
+        expect(planAdviceBlock(applied, {})).toMatch(/the hook sets `effort`/);
+        expect(planLines(applied).join("\n")).toMatch(/applied by the hook/);
+      }
+    });
 
     it("pinned and unknown pins are kept; an unpinned agent gets a model", async () => {
       const a = await plan({});
@@ -1067,6 +1229,48 @@ swarms:
       "the suggestions below are informational: leave `model` unset for pinned agents and pass no `effort`",
     );
     expect(nextOf(out)).not.toMatch(/passing `/);
+  });
+
+  it("in apply mode the head and Next say the hook sets the effort: pass no `effort`", async () => {
+    const advise = ctx.config.adjudicator;
+    ctx.config = {
+      ...ctx.config,
+      adjudicator: configWith({ enabled: true, provider: "heuristic", mode: "apply" }).adjudicator,
+    };
+    try {
+      const out = await plan({});
+      expect(headOf(out)).toContain("the hook sets `effort` on the Agent call in apply mode");
+      expect(headOf(out)).not.toMatch(/pass the effort as `effort`/);
+      expect(nextOf(out)).toContain("the hook sets `effort` (apply mode): pass no `effort`");
+      expect(nextOf(out)).not.toMatch(/passing `effort`|passing `model` and `effort`/);
+      expect(out).toMatch(/ · pinned opus \(.*\) · effort \w+ \(applied by the hook\) \(/);
+      // CLAUDE_CODE_EFFORT_LEVEL outranks the hook: back to the informational wording
+      const env = await plan({ CLAUDE_CODE_EFFORT_LEVEL: "high" });
+      expect(headOf(env)).toMatch(/^Adjudicator suggestions: informational only/);
+      expect(env).not.toMatch(/applied by the hook/);
+      expect(nextOf(env)).not.toMatch(/the hook sets/);
+    } finally {
+      ctx.config = { ...ctx.config, adjudicator: advise };
+    }
+  });
+
+  it("in apply mode with surfaces.agent off the head and Next tell the coordinator to pass the effort (#245)", async () => {
+    const advise = ctx.config.adjudicator;
+    const apply = configWith({ enabled: true, provider: "heuristic", mode: "apply" }).adjudicator;
+    ctx.config = {
+      ...ctx.config,
+      adjudicator: { ...apply, surfaces: { ...apply.surfaces, agent: false } },
+    };
+    try {
+      const out = await plan({});
+      expect(headOf(out)).not.toMatch(/the hook sets/);
+      expect(nextOf(out)).not.toMatch(/the hook sets/);
+      expect(out).not.toMatch(/applied by the hook/);
+      expect(nextOf(out)).toContain("`effort`");
+      expect(nextOf(out)).not.toMatch(/pass no `effort`/);
+    } finally {
+      ctx.config = { ...ctx.config, adjudicator: advise };
+    }
   });
 
   it("under FORCE names no pin and calls the model informational everywhere", async () => {

@@ -6,6 +6,7 @@ import { chunk, hashText, type Kind, kindToContentType } from "../chunker/index.
 import { finalize, type RawChunk } from "../chunker/types.js";
 import { within } from "../docs/manifest.js";
 import type { StorageAdapter } from "../storage/adapter.js";
+import { RECALL_BACKFILL_KEY } from "../storage/sqlite/schema.js";
 import type { ContentType, Source } from "../storage/types.js";
 
 export interface IndexInput {
@@ -143,6 +144,82 @@ export async function remaskCapturedOutput(db: StorageAdapter): Promise<number> 
     }
     if (slice.done) return changed;
     await sleep(slice.wrote ? REMASK_GAP_MS : 0);
+  }
+}
+
+/**
+ * Fill the recall index with the memories, docs pages and captured errors stored before it
+ * existed (a database upgraded to it, or one whose index was made again). Opening the database
+ * only creates the empty index and its triggers, which keep new rows in step from then on; until
+ * this finishes, recall finds nothing. The server starts it in the background and `eminiar
+ * reindex` runs it; hooks that do not hold up a prompt run a few slices of it with
+ * fillRecallIndexBriefly. Short slices (up to 500 rows, a few tens of ms of the write lock each)
+ * with REMASK_GAP_MS between them so hooks get the lock, waiting out a busy database; the cursor
+ * is saved in each slice, so a process stopped halfway resumes there. Returns the rows copied.
+ */
+export async function backfillRecallIndex(db: StorageAdapter): Promise<number> {
+  let rows = 0;
+  for (;;) {
+    const step = await whenFree(() => db.recallBackfillStep());
+    rows += step.rows;
+    if (step.done) return rows;
+    await sleep(REMASK_GAP_MS);
+  }
+}
+
+/**
+ * Where the recall index fill stands: undefined when the index is complete (or the database
+ * cannot say), else the id of the last document the fill has copied (0: not started). A read of
+ * one meta row, no lock taken.
+ */
+export function recallIndexFilling(db: StorageAdapter): { after: number } | undefined {
+  try {
+    const v = db.metaGet(RECALL_BACKFILL_KEY);
+    return v === undefined ? undefined : { after: Number(v) || 0 };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The time a hook's fill assumes for its next slice: the longest so far, at least this. */
+const FILL_SLICE_FLOOR_MS = 50;
+
+/**
+ * A few slices of the recall index fill, for a hook that does not hold up the user's prompt
+ * (Stop, SessionEnd, PreCompact, SubagentStop). Without it a database that no new-version MCP
+ * server opens (hooks-only or Cursor use, or a session whose server is still the build from before
+ * an in-place `eminiar upgrade`) would never recall again. Nothing to do (one meta read) once the
+ * index is complete. Otherwise slices of backfillRecallIndex's kind, REMASK_GAP_MS apart, while
+ * the next one still fits in `budgetMs` and `stop` says go on; a busy database ends it at once,
+ * with no retry (the next hook carries on from the saved cursor). Other errors are thrown.
+ */
+export async function fillRecallIndexBriefly(
+  db: StorageAdapter,
+  opts: { budgetMs: number; stop?: () => boolean },
+): Promise<{ rows: number; slices: number; done: boolean }> {
+  if (!recallIndexFilling(db)) return { rows: 0, slices: 0, done: true };
+  const started = performance.now();
+  let rows = 0;
+  let slices = 0;
+  let longest = FILL_SLICE_FLOOR_MS;
+  for (;;) {
+    if (opts.stop?.()) return { rows, slices, done: false };
+    const t0 = performance.now();
+    let step: { done: boolean; rows: number };
+    try {
+      step = db.recallBackfillStep();
+    } catch (err) {
+      if (isBusy(err)) return { rows, slices, done: false };
+      throw err;
+    }
+    const now = performance.now();
+    longest = Math.max(longest, now - t0);
+    rows += step.rows;
+    slices++;
+    if (step.done) return { rows, slices, done: true };
+    if (now - started + REMASK_GAP_MS + longest > opts.budgetMs)
+      return { rows, slices, done: false };
+    await sleep(REMASK_GAP_MS);
   }
 }
 

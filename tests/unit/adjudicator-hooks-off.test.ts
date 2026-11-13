@@ -565,7 +565,7 @@ describe("security only (the adjudicator off)", () => {
   /** What security's light module may load: itself and the shared helpers agent-pin.ts needs. */
   const allowedOther = (f: string): boolean =>
     f.startsWith("security/") ||
-    ["agent-pin.ts", "task-lookup.ts", "savings.ts", "env.ts"].includes(f);
+    ["agent-pin.ts", "task-lookup.ts", "savings.ts", "env.ts", "effort.ts"].includes(f);
   const importedAt = (): string[] => probe.others.map((o) => o.split(" @ ")[1] ?? "");
   const importedFiles = (): string[] => probe.others.map((o) => o.split(" @ ")[0] ?? "");
 

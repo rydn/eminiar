@@ -17,7 +17,7 @@ export function renderProjectBrief(
   ctx: ProjectContext,
   db: StorageAdapter,
   budget = 1500,
-  opts: { freshnessOnly?: boolean | undefined } = {},
+  opts: { freshnessOnly?: boolean | undefined; memoryTool?: boolean | undefined } = {},
 ): string {
   const lines: string[] = [];
   const freshness = freshnessLine(db);
@@ -31,7 +31,9 @@ export function renderProjectBrief(
     .filter((m) => m.name)
     .map((m) => `${m.name!.replace(/^decision\//, "")}: ${firstLine(m.content, 90)}`);
   if (decisions.length)
-    lines.push(`Accepted decisions (em_memory {action:"read", name}): ${decisions.join(" · ")}`);
+    lines.push(
+      `Accepted decisions${opts.memoryTool === false ? "" : ' (em_memory {action:"read", name})'}: ${decisions.join(" · ")}`,
+    );
 
   // Constraints and preferences are the "never do X" knowledge: they lead the brief's rules.
   const rules = (["constraint", "preference"] as const).flatMap((kind) =>

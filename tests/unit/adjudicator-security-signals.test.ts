@@ -82,6 +82,22 @@ describe("roleToolGrant and the generated agent file", () => {
       ],
       // listing Agent opts out of the leaf rule
       [{ tools: ["Agent"], disallowedTools: ["Write"] }, ["disallowedTools: Write"]],
+      // tools_profile readonly: its built-ins and read-only em tools, the edit tools denied
+      [
+        { toolsProfile: "readonly" },
+        [
+          `tools: Read, Grep, Glob, WebFetch, WebSearch, ToolSearch, ${EM}em_swarm, `,
+          "disallowedTools: Agent, Edit, Write, NotebookEdit",
+        ],
+      ],
+      // a readonly role's own `tools` narrow the built-ins; Agent listed stays allowed
+      [
+        { toolsProfile: "readonly", tools: ["Read", "Agent"] },
+        [
+          `tools: Read, Agent, ToolSearch, ${EM}em_swarm, `,
+          "disallowedTools: Edit, Write, NotebookEdit",
+        ],
+      ],
     ];
     for (const [over, lines] of cases) {
       const fm = frontmatterOf(renderAgentFile(CONFIG, SWARM, role(over)));
@@ -123,6 +139,16 @@ describe("roleToolGrant and the generated agent file", () => {
   it("an Agent listed in tools stays unless disallowed", () => {
     const ids = grantFromRole(role({ tools: ["Agent", "Read"] })).tools.map((t) => t.id);
     expect(ids).toContain("Agent");
+  });
+
+  it("a readonly profile's grant is its allowlist: no shell or edits, the web tools kept", () => {
+    const g = grantFromRole(role({ toolsProfile: "readonly" }));
+    expect(g.status).toBe("known");
+    const ids = g.tools.map((t) => t.id);
+    for (const t of ["Read", "Grep", "WebFetch", "WebSearch", "em_swarm", "em_recall"])
+      expect(ids).toContain(t);
+    for (const t of ["Bash", "Edit", "Write", "NotebookEdit", "Agent", "em_execute", "em_remember"])
+      expect(ids).not.toContain(t);
   });
 });
 
