@@ -481,7 +481,8 @@ describe("project layer trust boundary (#32)", () => {
     expect(droppedProjectAdjudicatorKeys({ adjudicator: { privacy: {} } })).toEqual(["privacy"]);
     expect(droppedProjectAdjudicatorKeys({ adjudicator: "on" })).toEqual([]);
     writeFileSync(join(root, "eminiar.config.json"), "{not json");
-    expect(projectAdjudicatorWarning(root)).toBeUndefined();
+    // a file that is not JSON is left out whole, and the line says so
+    expect(projectAdjudicatorWarning(root)).toMatch(/^eminiar\.config\.json is not a JSON object/);
   });
 
   it("keyEnv is honoured from the personal config for a remote provider", () => {

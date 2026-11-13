@@ -124,6 +124,8 @@ interface Setup {
   env?: Record<string, string>;
   /** Importing hooks.ts throws instead of returning the stand-in. */
   hooksBroken?: boolean;
+  /** hooks.ts is the real module (the engine, the prompt builders and the providers load with it). */
+  realHooks?: boolean;
 }
 
 interface World {
@@ -169,7 +171,8 @@ async function boot(setup: Setup = {}): Promise<World> {
   probe.others = [];
   probe.step = "boot";
   vi.resetModules();
-  vi.doMock(HOOKS, setup.hooksBroken ? hooksThatFailToLoad : hooksStandIn);
+  if (setup.realHooks) vi.doUnmock(HOOKS);
+  else vi.doMock(HOOKS, setup.hooksBroken ? hooksThatFailToLoad : hooksStandIn);
   for (const file of OTHER_MODULES)
     vi.doMock(join(ADJUDICATOR_DIR, file), async (importOriginal) => {
       probe.others.push(`${file} @ ${probe.step}`);
@@ -667,5 +670,78 @@ describe("security only (the adjudicator off)", () => {
     expect(probe.calls).toEqual(["afterRouting"]);
     expect(probe.others).toEqual([]);
     expect(securityRows(w)).toBe(0);
+  });
+});
+
+/**
+ * The routing adjudicator on, security off: hooks.ts, the engine, the prompt builders and the
+ * providers are the real ones, and nothing of src/adjudicator/security/ is imported on the hook
+ * path (they would parse for nothing: security/prompt.ts alone pulls grant.ts and types.ts).
+ */
+describe("adjudicator on, security off", () => {
+  const routingOnly: Setup = {
+    realHooks: true,
+    personal: {
+      adjudicator: {
+        enabled: true,
+        mode: "advise",
+        provider: "heuristic",
+        promptMode: "blocking",
+        surfaces: { prompt: true, agent: true, plan: true, tools: true },
+        security: { enabled: false },
+      },
+    },
+  };
+  /** The registry engine.ts imports: a leaf with no import, the one security/ file allowed. */
+  const LEAF = "security/load.ts";
+  const securityFiles = (): string[] =>
+    probe.others
+      .map((o) => o.split(" @ ")[0] ?? "")
+      .filter((f) => f.startsWith("security/") && f !== LEAF);
+  const routingFiles = (): string[] =>
+    probe.others.map((o) => o.split(" @ ")[0] ?? "").filter((f) => !f.startsWith("security/"));
+
+  it("a whole session loads the engine and no security module", async () => {
+    const w = await boot(routingOnly);
+    expect(w.context().config.adjudicator).toMatchObject({
+      enabled: true,
+      security: { enabled: false },
+    });
+    const out = await runSession(w);
+    // The probe is not blind: the real routing modules loaded...
+    expect(routingFiles()).toEqual(expect.arrayContaining(["engine.ts", "prompt.ts"]));
+    // ...and with them not one file of security/ but the leaf registry (load.ts imports nothing).
+    expect(securityFiles()).toEqual([]);
+    expect(JSON.stringify(out)).not.toMatch(/eminiar security/i);
+    expect(footprint(w).rows.adjudicator_security ?? 0).toBe(0);
+  });
+
+  it("the typesafe provider (security model off) loads none either", async () => {
+    const w = await boot({
+      ...routingOnly,
+      personal: {
+        adjudicator: {
+          ...(routingOnly.personal?.adjudicator as Record<string, unknown>),
+          provider: "typesafe",
+          typesafe: { baseUrl: "http://127.0.0.1:9", model: "m" },
+        },
+      },
+    });
+    await runSession(w);
+    expect(securityFiles()).toEqual([]);
+  });
+
+  it("security on: only then are the security modules loaded", async () => {
+    const w = await boot({
+      ...routingOnly,
+      personal: {
+        adjudicator: {
+          ...(routingOnly.personal?.adjudicator as Record<string, unknown>),
+          security: { enabled: true },
+        },
+      },
+    });
+    await fire(w, step("UserPromptSubmit"));
+    expect(securityFiles()).toEqual(expect.arrayContaining(["security/hook.ts"]));
   });
 });

@@ -512,6 +512,7 @@ async function runSecurity(
                 tools: r.tools,
                 disallowedTools: r.disallowedTools,
                 description: r.description,
+                toolsProfile: r.toolsProfile,
               },
             }
           : {}),

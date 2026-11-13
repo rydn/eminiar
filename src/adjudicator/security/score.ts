@@ -17,6 +17,7 @@ import {
   C6_INTENTS,
   CAN_EGRESS_MIN,
   CAN_EXEC_MIN,
+  CAN_FETCH_MIN,
   CAN_READ_MIN,
   CUE_EXPOSURE,
   FLOOR_NOTES,
@@ -128,7 +129,7 @@ function evaluate(ctx: Ctx): Eval {
   }
   const canWrite = profiles.some(([, p]) => p.canWrite === true);
 
-  // text cues (a review, audit or test-for context halves them)
+  // text cues (a review, audit or test-for context halves them in the score, not in the floors)
   const damp = ctx.cues.has("review-context") ? REVIEW_DAMPEN : 1;
   let wstar = 0;
   for (const id of CUE_IDS) {
@@ -183,15 +184,50 @@ function evaluate(ctx: Ctx): Eval {
 
   const secret = secretExposure(ctx.cues, damp);
   const rules = findRules(eff, wstar, secret);
-  const floors = findFloors(
-    ctx,
-    caps,
-    rules,
-    profiles.map(([, p]) => p),
-    secret,
-    damp,
-  );
+  // Review wording is text anyone can write, so it may lower the score but never a floor: with it,
+  // the floors are those of the same input without it (one more pass, no recursion beyond that).
+  const floors =
+    damp === 1
+      ? findFloors(
+          ctx,
+          caps,
+          shellOnlyUrl(ctx, caps)
+            ? findRules({ ...eff, U: uWithoutUrl(exposures, caps) }, wstar, secret)
+            : rules,
+          profiles.map(([, p]) => p),
+          secret,
+        )
+      : evaluate({ ...ctx, cues: withoutReview(ctx.cues) }).floors;
   return { exposures, caps, eff, effBase, wstar, flat, rules, floors };
+}
+
+/**
+ * User decision (T19): a shell plus a URL in the task is not by itself a floor. When no granted
+ * tool can fetch outside content (U grant below CAN_FETCH_MIN) and the session has read none, the
+ * URL reaches the agent only through the shell's latent untrusted-input leg, and that leg counts
+ * toward a floor only when the task also cues another leg: a secret, an egress, a destructive or
+ * privileged step, a persistence path, a package or tool to install, or an intent. Otherwise the
+ * floors see U without the URL cue; the score still counts it.
+ */
+function shellOnlyUrl(ctx: Ctx, caps: Record<Cap, CapExposure>): boolean {
+  if (!ctx.cues.has("url") || caps.U.latent <= 0) return false;
+  if (caps.U.grant >= CAN_FETCH_MIN || caps.U.taint > 0 || ctx.intent.length > 0) return false;
+  for (const c of CAPS) if (c !== "U" && caps[c].task > 0) return false;
+  return true;
+}
+
+/** The U leg without the URL cue: every other task cue, the grant, the taint and the latent leg. */
+function uWithoutUrl(exposures: readonly Exposure[], caps: Record<Cap, CapExposure>): number {
+  let u = Math.max(caps.U.grant, caps.U.taint, caps.U.latent);
+  for (const x of exposures)
+    if (x.cap === "U" && x.kind === "task" && x.from !== "text:url" && x.e > u) u = x.e;
+  return u;
+}
+
+function withoutReview(cues: ReadonlySet<CueId>): Set<CueId> {
+  const out = new Set(cues);
+  out.delete("review-context");
+  return out;
 }
 
 /** How strongly the text names a secret (a secret-file or credential cue), after dampening. */
@@ -243,7 +279,6 @@ function findFloors(
   rules: RuleHit[],
   profiles: ToolProfile[],
   secret: number,
-  damp: number,
 ): FloorId[] {
   const floors: FloorId[] = [];
   const hit = (id: RuleId): RuleHit | undefined => rules.find((r) => r.id === id);
@@ -256,7 +291,8 @@ function findFloors(
   const hasX = profiles.some((p) => (p.grant?.X ?? 0) >= CAN_EXEC_MIN);
   const canRead = hasX || profiles.some((p) => (p.grant?.S ?? 0) >= CAN_READ_MIN);
   const canEgress = hasX || profiles.some((p) => (p.grant?.E ?? 0) >= CAN_EGRESS_MIN);
-  const fetchExec = ctx.cues.has("fetch-exec") ? damp : 0;
+  // Only ever called without review dampening (evaluate), so a cue counts in full here.
+  const fetchExec = ctx.cues.has("fetch-exec") ? 1 : 0;
 
   const r1 = hit("R1");
   const r6 = hit("R6");
@@ -305,9 +341,13 @@ function strongest(
 const describe = (x: Exposure): string =>
   x.kind === "latent" ? `latent ${x.from}` : `${x.kind} ${x.from}`;
 
+/**
+ * How many MCP servers this machine has configured, as a count: reasons reach the badge, the
+ * dashboard payloads and the tooltips, which never hold a raw server name (report.ts).
+ */
 function localServers(grant: HeuristicInput["grant"]): string {
-  const names = grant.local?.servers ?? [];
-  return names.length > 0 ? ` (MCP: ${names.slice(0, 4).join(", ")})` : "";
+  const n = grant.local?.servers?.length ?? 0;
+  return n > 0 ? ` (${n} local MCP server${n === 1 ? "" : "s"})` : "";
 }
 
 function buildReasons(
@@ -361,7 +401,11 @@ function buildReasons(
       });
   }
   if (review)
-    out.push({ feature: "review-context", weight: 0, note: "review wording halves the text cues" });
+    out.push({
+      feature: "review-context",
+      weight: 0,
+      note: "review wording halves the text cues in the score; floors still apply",
+    });
   if (status !== "known") {
     out.push({
       feature: "grant",

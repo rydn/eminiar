@@ -85,8 +85,16 @@ const hasWebTool = (g: ToolGrant): boolean =>
 
 export interface ScoreInput {
   grant: ToolGrant;
-  /** What the cues are read from: the task, the call's text, the agent's or role's description. */
-  texts: ReadonlyArray<string | undefined>;
+  /**
+   * The task's own text (title and detail, the call's description and prompt, the typed prompt):
+   * every cue counts, review wording too.
+   */
+  task?: ReadonlyArray<string | undefined>;
+  /**
+   * Other text the cues are read from: the agent's or role's description. It is committed to the
+   * repository, so review wording there never counts (signals.ts extractAll).
+   */
+  texts?: ReadonlyArray<string | undefined>;
   autonomy: Autonomy;
   taint?: Taint | undefined;
 }
@@ -114,7 +122,11 @@ export function securityHint(h: HeuristicAssessment, grant: ToolGrant): Security
 
 /** Signals, then the heuristic engine. Deterministic and pure; tens of microseconds. */
 export function scoreInput(sec: SecurityConfig, i: ScoreInput): Scored {
-  const s = extractAll(i.texts, { webTool: hasWebTool(i.grant), secretPaths: sec.secretPaths });
+  const s = extractAll(
+    i.task ?? [],
+    { webTool: hasWebTool(i.grant), secretPaths: sec.secretPaths },
+    i.texts ?? [],
+  );
   const taint: Taint = i.taint ?? { tools: [], status: "off" };
   const heuristic = assessHeuristic({
     grant: i.grant,
@@ -345,9 +357,8 @@ export function assessDispatch(
 
   const scored = scoreInput(sec, {
     grant,
-    texts: task
-      ? [task.title, task.detail ?? undefined, grant.description]
-      : [str(ti.description), str(ti.prompt), grant.description],
+    task: task ? [task.title, task.detail ?? undefined] : [str(ti.description), str(ti.prompt)],
+    texts: [grant.description],
     autonomy: autonomyOf(input.permission_mode, grant.permissionMode),
     taint,
   });
@@ -414,7 +425,7 @@ export function assessPrompt(
   const grant = grantForSession();
   const scored = scoreInput(sec, {
     grant,
-    texts: [text],
+    task: [text],
     autonomy: autonomyOf(input.permission_mode, grant.permissionMode),
     taint: taintOf(sec, db, sessionId, (o.now ?? Date.now)()),
   });
@@ -437,6 +448,8 @@ export interface TextInput {
         tools?: string[] | undefined;
         disallowedTools?: string[] | undefined;
         description?: string | undefined;
+        /** `tools_profile: readonly` narrows the grant, as the generated agent file has it. */
+        toolsProfile?: "readonly" | undefined;
       }
     | undefined;
   /** Default "default". */
@@ -475,6 +488,7 @@ export function assessText(sec: SecurityConfig, i: TextInput, o: TextOptions = {
           tools: i.role.tools,
           disallowedTools: i.role.disallowedTools,
           description: i.role.description ?? "",
+          toolsProfile: i.role.toolsProfile,
         },
         sec.trustedMcpServers,
       );
@@ -497,7 +511,8 @@ export function assessText(sec: SecurityConfig, i: TextInput, o: TextOptions = {
   }
   const scored = scoreInput(sec, {
     grant,
-    texts: [i.text, grant.description],
+    task: [i.text],
+    texts: [grant.description],
     autonomy: i.autonomy ?? autonomyOf(undefined, grant.permissionMode),
     taint,
   });
@@ -560,7 +575,8 @@ export function planSecurity(
       : grantFromCaller(undefined, sec.trustedMcpServers);
     const scored = scoreInput(sec, {
       grant,
-      texts: [t.title, t.detail ?? undefined, grant.description],
+      task: [t.title, t.detail ?? undefined],
+      texts: [grant.description],
       autonomy: autonomyOf(undefined, grant.permissionMode),
     });
     const item: PlanItem = {

@@ -1,4 +1,14 @@
-import { CAP_TAG, type CapTag, SECURITY_VERSION, type SecurityHint, type Threat } from "./types.js";
+import { redactSecrets } from "../redact.js";
+import { BUILTIN_TOOLS, EM_TOOL_NAMES } from "./grant.js";
+import {
+  CAP_TAG,
+  type CapTag,
+  MCP_CLASSES,
+  MCP_VERBS,
+  SECURITY_VERSION,
+  type SecurityHint,
+  type Threat,
+} from "./types.js";
 
 /**
  * The security questions Jev answers next to the routing ones (docs/design/adjudicator-security.md
@@ -57,13 +67,27 @@ export function securityQuestionId(item: string, q: SecurityQuestionName): strin
   return `${item}.${q}`;
 }
 
-/** A provider-safe tool id: a plain tool name, or an MCP tool as mcp:<class>:<verb>. */
+/** The shape of a provider-safe tool id: a plain tool name, or an MCP tool as mcp:<class>:<verb>. */
 const SAFE_TOOL = /^(?:mcp:[a-z][a-z-]{0,23}:[a-z][a-z-]{0,23}|[A-Za-z][A-Za-z0-9_]{0,63})$/;
 const CAP_TAGS: ReadonlySet<string> = new Set(Object.values(CAP_TAG));
 
-/** A tool id that may leave the machine; a raw MCP name (mcp__server__tool) never does. */
+/**
+ * A tool id that may leave the machine: a Claude Code tool, an eminiar tool (each from a closed
+ * list; `em_<anything>` is not one) or mcp:<class>:<verb> with a known class and verb. A raw MCP
+ * name (mcp__server__tool) never is. The shape and the redactor are checked as well, so an id
+ * that looks like a secret can never pass whatever the lists say.
+ */
 export function isSafeToolId(id: unknown): id is string {
-  return typeof id === "string" && !id.startsWith("mcp__") && SAFE_TOOL.test(id);
+  if (typeof id !== "string" || id.startsWith("mcp__") || !SAFE_TOOL.test(id)) return false;
+  if (redactSecrets(id) !== id) return false;
+  if (id.startsWith("mcp:")) {
+    const [, cls, verb] = id.split(":");
+    return (
+      (MCP_CLASSES as readonly string[]).includes(cls ?? "") &&
+      (MCP_VERBS as readonly string[]).includes(verb ?? "")
+    );
+  }
+  return BUILTIN_TOOLS.has(id) || EM_TOOL_NAMES.has(id);
 }
 
 /**

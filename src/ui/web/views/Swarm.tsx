@@ -376,7 +376,7 @@ function RunItem({ r, selected }: { r: SwarmRunSummary; selected: boolean }): JS
             {GLYPH.failed} {bad}
           </span>
         ) : null}
-        {r.risk ? <RunRiskMark risk={r.risk} compact /> : null}
+        {r.risk ? <RunRiskMark risk={r.risk} compact quiet /> : null}
         {t.total ? <span class="spacer" /> : null}
         {t.total ? <span class="ds-num">{Math.round(p * 100)}%</span> : null}
       </div>
@@ -667,7 +667,14 @@ function RunView({
       if (d.tasksPartial) {
         for (const t of d.tasks) {
           const had = tasks.current.get(t.id);
-          if (!had || had.updated_at !== t.updated_at || had.status !== t.status) changed = true;
+          if (
+            !had ||
+            had.updated_at !== t.updated_at ||
+            had.status !== t.status ||
+            // A new assessment can arrive with no change to the task row itself.
+            had.risk?.id !== t.risk?.id
+          )
+            changed = true;
           tasks.current.set(t.id, t);
         }
         // A task missed by the delta (should not happen): take them all again.
@@ -675,7 +682,12 @@ function RunView({
       } else tasks.current = new Map(d.tasks.map((t) => [t.id, t]));
       if (changed) {
         tasksList.current = [...tasks.current.values()].sort((a, b) => a.id - b.id);
-        tasksMax.current = tasksList.current.reduce((m, t) => Math.max(m, t.updated_at), 0);
+        // The delta cursor covers the assessments too: the server re-sends a task whose latest
+        // security row is newer than the cursor.
+        tasksMax.current = tasksList.current.reduce(
+          (m, t) => Math.max(m, t.updated_at, t.risk?.ts ?? 0),
+          0,
+        );
       }
       if (!sameList(roles.current, d.roles)) roles.current = d.roles;
       const s = d.now - Date.now();

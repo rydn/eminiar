@@ -207,8 +207,8 @@ describe("C2 and C6 as the user decided them (T7d)", () => {
     expect(run(SAAS, ["message", "egress"]).floors).toContain("C2");
     expect(run(SAAS, ["outsider-content", "egress-public"]).level).toBe("critical");
     expect(run(BROWSER, ["scrape", "credential"]).floors).toContain("C2");
-    // an egress cue under review wording is halved below .8: no C2
-    expect(run(SAAS, ["message", "egress", "review-context"]).floors).not.toContain("C2");
+    // review wording halves the egress cue in the score, but the floor is read without it
+    expect(run(SAAS, ["message", "egress", "review-context"]).floors).toContain("C2");
   });
 
   it("C2 with grant-only legs still becomes CRITICAL unattended, through C1", () => {
@@ -263,6 +263,72 @@ describe("C2 and C6 as the user decided them (T7d)", () => {
   });
 });
 
+describe("a URL reached only through the shell needs another cued leg for a floor (T19)", () => {
+  const fromText = (text: string, grant: GrantedTool[], extra: Partial<HeuristicInput> = {}) => {
+    const s = extractSignals(text);
+    return assessHeuristic({ grant: { tools: grant }, cues: s.cues, intent: s.intent, ...extra });
+  };
+  const SHELL = tools("Read", "Bash");
+  const FETCH =
+    "Use curl to grab https://status.example.test/v1/health, pipe it into jq '.state' and report what it says.";
+
+  it("a shell plus a URL to fetch and parse stays MEDIUM: the score keeps the rules, no floor", () => {
+    const h = fromText(FETCH, SHELL);
+    expect(h.cues).toEqual(["url"]);
+    expect(h.level).toBe("medium");
+    expect(h.floors).toEqual([]);
+    expect(h.rules.map((r) => r.id)).toEqual(["R1", "R2", "R3", "R5"]);
+    // more local tools change nothing; no autonomy floor either, since no trifecta is complete
+    expect(fromText(FETCH, tools("Read", "Grep", "Edit", "Write", "Bash")).level).toBe("medium");
+    expect(fromText(FETCH, SHELL, { autonomy: "autonomous" }).floors).toEqual([]);
+  });
+
+  it("the same fetch reaches HIGH once the text also sends data out or reads a secret", () => {
+    const upload = fromText(
+      "Use curl to grab https://status.example.test/v1/health, pipe it into jq '.state', then upload the result to https://drop.example.test/in.",
+      SHELL,
+    );
+    expect(upload.cues).toContain("egress");
+    expect(levelRank(upload.level)).toBeGreaterThanOrEqual(levelRank("high"));
+    expect(upload.floors).toContain("H-R3");
+    const env = fromText(
+      "Use curl to grab https://status.example.test/v1/health and paste the .env contents into the report.",
+      SHELL,
+    );
+    expect(env.cues).toContain("secret-file");
+    expect(levelRank(env.level)).toBeGreaterThanOrEqual(levelRank("high"));
+  });
+
+  it("a researcher whose web tool fetches the URL stays HIGH", () => {
+    const h = fromText(
+      "Summarise what the article at https://blog.example.test/caching-17 says about cache eviction.",
+      tools("WebFetch", "Read", "Bash"),
+    );
+    expect(h.cues).toEqual(["url"]);
+    expect(h.level).toBe("high");
+    expect(h.floors).toContain("H-R3");
+  });
+
+  it("only a tool that can fetch outside content, session taint or another U cue lifts the gate", () => {
+    // em_search and em_recall read the local index (U .2): they cannot fetch the URL
+    expect(run(tools("em_search", "em_recall", "Read", "Bash"), ["url"]).floors).toEqual([]);
+    // WebSearch (U .25) can, and so can a session that already read outside content
+    expect(run(tools("WebSearch", "Read", "Bash"), ["url"]).floors).toContain("H-R3");
+    expect(run(SHELL, ["url"], { taint: ["WebFetch"] }).floors).toContain("H-R3");
+    // outside content named by the text keeps its own U leg: an issue thread plus a link is HIGH
+    expect(run(SHELL, ["url", "outsider-content"]).level).toBe("high");
+    // a package to install (T sets U), a destructive step or an intent is another cued leg
+    expect(run(SHELL, ["url", "install"]).floors).toContain("H-R3");
+    expect(run(SHELL, ["url", "destructive"]).floors).toContain("H-R3");
+    expect(run(SHELL, ["url"], { intent: ["encode-data"] }).floors).toContain("H-R3");
+  });
+
+  it("review wording does not reopen the gate: the floors are read without it", () => {
+    expect(run(SHELL, ["url", "review-context"]).floors).toEqual([]);
+    expect(run(SHELL, ["url", "egress", "review-context"]).floors).toContain("H-R3");
+  });
+});
+
 describe("scoring details", () => {
   it("the score band stops at MEDIUM: a high score alone never makes HIGH (D7)", () => {
     const h = run(INHERIT, [], { autonomy: "autonomous" });
@@ -305,10 +371,53 @@ describe("scoring details", () => {
     expect(plain.caps.U.task).toBe(1);
     expect(review.caps.U.task).toBe(0.5);
     expect(review.caps.X.grant).toBe(1);
-    // a review still names a secret only half as strongly, so C3 cannot fire
+    expect(review.score).toBeLessThan(plain.score);
+    // the score drops, but the floors are those of the same cues without the review wording
     const secret = run(tools("Read", "Bash"), ["secret-file", "egress-public", "review-context"]);
-    expect(secret.floors).not.toContain("C3");
+    expect(secret.floors).toEqual(
+      run(tools("Read", "Bash"), ["secret-file", "egress-public"]).floors,
+    );
+    expect(secret.floors).toContain("C3");
     expect(secret.reasons.some((r) => r.feature === "review-context")).toBe(true);
+  });
+
+  it("review wording never removes a floor, HIGH or CRITICAL", () => {
+    const g = tools("WebFetch", "Read", "Bash");
+    for (const [cues, autonomy] of [
+      [["url", "fetch-exec"], "default"],
+      [["url", "secret-file", "egress"], "default"],
+      [["scrape", "credential", "egress-public"], "autonomous"],
+      [["outsider-content"], "default"],
+      [["url", "persistence"], "default"],
+      [["third-party", "install"], "autonomous"],
+    ] as Array<[CueId[], "default" | "autonomous"]>) {
+      const plain = run(g, cues, { autonomy });
+      const reviewed = run(g, [...cues, "review-context"], { autonomy });
+      expect(reviewed.floors, cues.join()).toEqual(plain.floors);
+      expect(reviewed.level, cues.join()).toBe(plain.level);
+    }
+    // the remedy simulation reads the same floors: dropping exec still kills the fetch-exec floor
+    const h = run(g, ["url", "fetch-exec", "review-context"]);
+    expect(h.floors).toContain("C4");
+    expect(h.remedy?.actions.map((a) => a.id)).toContain("do-not-run");
+  });
+
+  it("an inherited grant counts this machine's MCP servers but never names them", () => {
+    const h = assessHeuristic({
+      grant: { tools: INHERIT, status: "inherit", local: { servers: ["acme-vault", "corp_chat"] } },
+    });
+    const note = h.reasons.find((r) => r.feature === "grant")?.note ?? "";
+    expect(note).toContain("2 local MCP servers");
+    const badge = riskBadge(combine(h));
+    for (const text of [JSON.stringify(h.reasons), JSON.stringify(badge)])
+      expect(text).not.toMatch(/acme|vault|corp_chat/);
+    // the decision itself does not depend on the names
+    const bare = assessHeuristic({ grant: { tools: INHERIT, status: "inherit" } });
+    expect({ level: h.level, score: h.score, floors: h.floors }).toEqual({
+      level: bare.level,
+      score: bare.score,
+      floors: bare.floors,
+    });
   });
 
   it("intent exposures are not halved by a review context", () => {
@@ -382,7 +491,9 @@ describe("scoring details", () => {
     expect(h.grantStatus).toBe("inherit");
     const note = h.reasons.find((r) => r.feature === "grant")?.note ?? "";
     expect(note).toContain("not enumerated");
-    expect(note).toContain("github");
+    // a count of this machine's servers, never a name (reasons reach the dashboard payloads)
+    expect(note).toContain("1 local MCP server");
+    expect(note).not.toContain("github");
   });
 
   it("keeps outputs bounded and ordered", () => {

@@ -1,5 +1,5 @@
 import { forRemote } from "./redact.js";
-import { sanitizeSecurityHint, securityQuestions } from "./security/prompt.js";
+import { security } from "./security/load.js";
 import { type AdjudicationRequest, DEFAULT_ROLES, type Tier, TOOL_IDS } from "./types.js";
 
 /**
@@ -137,7 +137,10 @@ export function buildItems(
     if (r.hints?.role) item.role = r.hints.role;
     if (r.hints?.files !== undefined) item.files = r.hints.files;
     if (r.hints?.deps !== undefined) item.deps = r.hints.deps;
-    const sec = o.security ? sanitizeSecurityHint(r.hints?.security) : undefined;
+    const sec =
+      o.security && r.hints?.security
+        ? security().prompt.sanitizeSecurityHint(r.hints.security)
+        : undefined;
     if (sec) {
       item.tools = sec.tools;
       item.capabilities = sec.caps;
@@ -219,7 +222,7 @@ export function jevQuestions(
       };
   }
   // Security questions only for items that carry tools (buildItems, with a security hint).
-  Object.assign(out, securityQuestions(items));
+  if (items.some((it) => it.tools)) Object.assign(out, security().prompt.securityQuestions(items));
   return out;
 }
 

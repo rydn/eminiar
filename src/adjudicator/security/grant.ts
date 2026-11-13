@@ -55,7 +55,7 @@ export const BUILTIN_GRANTS: Readonly<
 };
 
 /** Claude Code's own tools, the only bare names that become ids. */
-const BUILTIN_TOOLS: ReadonlySet<string> = new Set([
+export const BUILTIN_TOOLS: ReadonlySet<string> = new Set([
   ...INHERIT_TOOLS,
   "Task",
   "MultiEdit",
@@ -82,7 +82,39 @@ const BUILTIN_TOOLS: ReadonlySet<string> = new Set([
   "ReadMcpResourceTool",
 ]);
 
-const EM_TOOL = /^em_[a-z0-9_]{1,40}$/;
+/**
+ * Every em_* tool the server registers, a closed list: only these names become ids, so a name
+ * such as `em_ghp_<token>` (an agent file, em_adjudicate's `tools`) cannot ride along to a
+ * provider. tests/unit/adjudicator-security-jev.test.ts fails when src/tools registers a tool
+ * missing here (or this lists one that is gone).
+ */
+export const EM_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "em_adjudicate",
+  "em_architecture",
+  "em_batch_execute",
+  "em_docs",
+  "em_doctor",
+  "em_execute",
+  "em_execute_file",
+  "em_fetch_and_index",
+  "em_graph_add",
+  "em_graph_changes",
+  "em_graph_impact",
+  "em_graph_query",
+  "em_history",
+  "em_index",
+  "em_index_status",
+  "em_memory",
+  "em_purge",
+  "em_recall",
+  "em_reindex",
+  "em_remember",
+  "em_search",
+  "em_stats",
+  "em_swarm",
+  "em_symbols",
+  "em_usage",
+]);
 const MAX_GRANT_TOOLS = 256;
 
 // --- MCP classification ------------------------------------------------------------------------
@@ -279,7 +311,7 @@ export function normalizeTool(
   for (const prefix of EM_MCP_PREFIXES) {
     if (name.startsWith(prefix)) {
       const bare = name.slice(prefix.length);
-      return EM_TOOL.test(bare) ? { tool: { id: bare, kind: "em" } } : undefined;
+      return EM_TOOL_NAMES.has(bare) ? { tool: { id: bare, kind: "em" } } : undefined;
     }
   }
   if (name.startsWith("mcp__")) {
@@ -298,7 +330,7 @@ export function normalizeTool(
       server: m.server,
     };
   }
-  if (EM_TOOL.test(name)) return { tool: { id: name, kind: "em" } };
+  if (EM_TOOL_NAMES.has(name)) return { tool: { id: name, kind: "em" } };
   if (name === "Task") name = "Agent";
   return BUILTIN_TOOLS.has(name) ? { tool: { id: name, kind: "builtin" } } : undefined;
 }
@@ -381,7 +413,8 @@ export function inheritGrant(
  * the file is rendered from). `tools` unset: the worker inherits everything not disallowed.
  */
 export function grantFromRole(
-  role: Pick<RoleSpec, "tools" | "disallowedTools" | "description">,
+  role: Pick<RoleSpec, "tools" | "disallowedTools" | "description"> &
+    Partial<Pick<RoleSpec, "toolsProfile">>,
   trusted: readonly string[] = [],
 ): ToolGrant {
   const { allow, deny } = roleToolGrant(role);

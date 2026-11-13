@@ -889,7 +889,30 @@ export function projectAdjudicatorWarning(projectRoot: string): string | undefin
     lines.push(
       `eminiar.config.json sets adjudicator.${dropped.join(", adjudicator.")}: ignored, only ~/.eminiar/config.json may set ${dropped.length === 1 ? "it" : "them"}`,
     );
+  const invalid = projectFileProblem(projectRoot, raw);
+  if (invalid) lines.push(invalid);
   return lines.length ? lines.join(" · ") : undefined;
+}
+
+/**
+ * Why loadConfig leaves <root>/eminiar.config.json out whole (it is not JSON, or one value fails the
+ * schema), as a line for doctor/status/dashboard; undefined when the file is absent or usable.
+ * Only that file goes: the personal config and env keep applying, security.enabled included.
+ * `raw` is the parsed file (undefined when missing or malformed).
+ */
+function projectFileProblem(
+  projectRoot: string,
+  raw: Record<string, unknown> | undefined,
+): string | undefined {
+  const file = join(projectRoot, "eminiar.config.json");
+  if (!raw) {
+    return existsSync(file)
+      ? "eminiar.config.json is not a JSON object: ignored whole, the personal config and environment still apply"
+      : undefined;
+  }
+  const parsed = parseLayers([projectLayer(raw)]);
+  if (parsed.success) return undefined;
+  return `eminiar.config.json is invalid (${issueText(parsed.error, [raw], raw)}): ignored whole, the personal config and environment still apply`;
 }
 
 /**

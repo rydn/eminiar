@@ -11,8 +11,8 @@ import {
   jevState,
   type StateItem,
 } from "../prompt.js";
-import { securityQuestionId, THREAT_QUESTION } from "../security/prompt.js";
-import { type SecurityModelAnswer, THREATS } from "../security/types.js";
+import { security } from "../security/load.js";
+import type { SecurityModelAnswer } from "../security/types.js";
 import type {
   AdjudicationRequest,
   AdjudicatorProvider,
@@ -298,7 +298,8 @@ function securityOf(
   item: string,
 ): SecurityModelAnswer | undefined {
   const out: SecurityModelAnswer = { threats: {} };
-  const sev = get(securityQuestionId(item, "sec_severity"));
+  const { prompt, types } = security();
+  const sev = get(prompt.securityQuestionId(item, "sec_severity"));
   if (sev?.type === "score") {
     const levels = Object.keys(sev.legend ?? {})
       .map(Number)
@@ -307,8 +308,8 @@ function securityOf(
     if (top > 0 && sev.score <= top)
       out.severity = { value: (sev.score * 4) / top, confidence: sev.confidence ?? 0.5 };
   }
-  for (const t of THREATS) {
-    const n = get(securityQuestionId(item, THREAT_QUESTION[t]));
+  for (const t of types.THREATS) {
+    const n = get(prompt.securityQuestionId(item, prompt.THREAT_QUESTION[t]));
     if (n?.type === "noul") out.threats[t] = n.noul;
   }
   return out.severity || Object.keys(out.threats).length > 0 ? out : undefined;

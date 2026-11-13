@@ -25,7 +25,7 @@ import { resolveEvalCandidates } from "../eval.js";
 import type { ProviderDeps } from "../providers/http.js";
 import type { AdjudicationRequest, AdjudicatorProvider, ProviderStatus } from "../types.js";
 import { explain, viewOfRow } from "./advice.js";
-import { assessText, type SecurityConfig } from "./assess.js";
+import { assessText, type SecurityConfig, type TextInput } from "./assess.js";
 import { SECURITY_EVAL_SET } from "./data/evalset.js";
 import {
   formatSecurityEval,
@@ -470,7 +470,7 @@ export async function securityCommand(args: string[], c: SecurityCliContext): Pr
         .map((s) => s.trim())
         .filter(Boolean);
       const roleName = str(values.role);
-      let role: { tools?: string[]; disallowedTools?: string[]; description?: string } | undefined;
+      let role: TextInput["role"];
       if (roleName) {
         const swarms = activeSwarmConfig(c.root)?.swarms ?? [];
         const found = swarms
@@ -484,6 +484,7 @@ export async function securityCommand(args: string[], c: SecurityCliContext): Pr
           ...(found.tools ? { tools: found.tools } : {}),
           ...(found.disallowedTools ? { disallowedTools: found.disallowedTools } : {}),
           description: found.description,
+          ...(found.toolsProfile ? { toolsProfile: found.toolsProfile } : {}),
         };
       }
       const input = {

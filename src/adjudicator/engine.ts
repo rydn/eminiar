@@ -61,7 +61,7 @@ import { extractFeatures } from "./features.js";
 import { type Catalogue, DEFAULT_TIERS, scoreHeuristic } from "./heuristic.js";
 import { createProvider, type ProviderDeps, ProviderError } from "./providers/index.js";
 import { head, inputHash, normalize } from "./redact.js";
-import { securityKeyPart } from "./security/prompt.js";
+import { security } from "./security/load.js";
 import {
   type AdjudicationRequest,
   type AdjudicatorProvider,
@@ -256,7 +256,7 @@ export function cacheKeyFor(
     // A brief scored per statement blends onto another heuristic than the same text scored whole.
     units: byUnits(req.surface, ctx.units) ? UNITS_VERSION : undefined,
     // The security questions change the answer: only a request with a hint is keyed on it.
-    security: securityKeyPart(h?.security),
+    security: h?.security ? security().prompt.securityKeyPart(h.security) : undefined,
   });
   return createHash("sha256")
     .update([SCORER_VERSION, r.configured, r.model ?? "", req.surface, inputs, text].join("|"))

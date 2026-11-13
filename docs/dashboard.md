@@ -222,7 +222,9 @@ each run in the list and its header show the worst level of its tasks with count
 task card shows its latest assessment, and the task's decision section lists the legs, rules,
 reasons and the leg to drop; the worker drawer shows the role's badge and reasons. Risk is a glyph
 and a word, never colour alone (○ low, ◐ medium, ▲ high, ⬢ critical). Task rows are polled
-incrementally, so a task's risk arrives with its next row change or a reload.
+incrementally, and a task's risk is re-sent when its security row is newer than its task row, so
+it does not wait for a task change. A run nobody assessed shows nothing in the run list. The
+assessment drawer traps keyboard focus.
 
 With no runs yet, the page says so and shows the command to start one
 (`/eminiar:em-swarm <swarm> <goal>`) with a preview of each swarm. Without a swarm file, the

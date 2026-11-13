@@ -181,7 +181,7 @@ eminiar adjudicator security eval [--provider typesafe] [--fixture f.json] [--re
 - `explain <id>` prints the full reasoning of a stored assessment: every exposure by kind, each
   rule's contribution, the floors, the autonomy, the grant, the model's answer and the reasons.
 - `list` shows stored assessments, newest first.
-- `eval` runs the 60 labelled items through the heuristic (and Jev, when consented and keyed),
+- `eval` runs the labelled items (70 on 2026-11-13) through the heuristic (and Jev, when consented and keyed),
   prints per-level precision and recall, the confusion matrix and the HIGH+ miss and false-warn
   rates, and lists mismatches by item id. `--save` keeps the report for the dashboard and
   `eminiar doctor`. Its numbers show consistency with the design, not independent accuracy.

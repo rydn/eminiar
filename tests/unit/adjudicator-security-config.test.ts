@@ -630,3 +630,81 @@ describe("security/types.ts (the web-safe leaf)", () => {
     expect(SECURITY_VERSION).toBe("1");
   });
 });
+
+describe("an invalid project file costs only that file (security review T17a-2)", () => {
+  const PERSONAL = { security: { enabled: true, minLevel: "medium" } };
+  const writeProject = (raw: unknown) =>
+    writeFileSync(join(root, "eminiar.config.json"), JSON.stringify(raw));
+
+  const cases: [string, unknown][] = [
+    ["a key-like adjudicator field", { adjudicator: { token: "x" } }],
+    ["a key-like field inside security", { adjudicator: { security: { apiKey: "x" } } }],
+    ["an invalid value in another section", { routing: { mode: "bogus" } }],
+    [
+      "an invalid value next to security.enabled: false",
+      { routing: { mode: "bogus" }, adjudicator: { security: { enabled: false } } },
+    ],
+  ];
+
+  for (const [name, raw] of cases) {
+    it(`keeps the personal security section under ${name}`, () => {
+      const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      personal(PERSONAL);
+      writeProject(raw);
+      const c = loadConfig(root);
+      expect(c.adjudicator.security).toEqual({ ...DEFAULT_SECURITY, ...PERSONAL.security });
+      // the project's own valid-looking keys do not leak in either
+      expect(c.routing.mode).not.toBe("bogus");
+      expect(String(err.mock.calls.map((a) => a[0]))).toMatch(
+        /invalid config in eminiar\.config\.json, ignoring it/,
+      );
+    });
+  }
+
+  it("keeps the personal security section under a project file that is not JSON", () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    personal(PERSONAL);
+    writeFileSync(join(root, "eminiar.config.json"), '{"adjudicator": {oops');
+    expect(loadConfig(root).adjudicator.security).toEqual({
+      ...DEFAULT_SECURITY,
+      ...PERSONAL.security,
+    });
+    // a file that parses but is not an object is left out the same way
+    writeFileSync(join(root, "eminiar.config.json"), "[1,2]");
+    expect(loadConfig(root).adjudicator.security.enabled).toBe(true);
+  });
+
+  it("an invalid project file does not hide the project's own switch-on either way round", () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    // nothing personal: an invalid project file cannot switch security on, a valid one can
+    writeProject({ routing: { mode: "bogus" }, adjudicator: { security: { enabled: true } } });
+    expect(loadConfig(root).adjudicator.security.enabled).toBe(false);
+    writeProject({ adjudicator: { security: { enabled: true } } });
+    expect(loadConfig(root).adjudicator.security.enabled).toBe(true);
+  });
+
+  it("the one-line warning says the file is ignored whole and that personal config still applies", () => {
+    personal(PERSONAL);
+    writeProject({ routing: { mode: "bogus" } });
+    const w = projectAdjudicatorWarning(root) ?? "";
+    expect(w).toMatch(/^eminiar\.config\.json is invalid \(routing\.mode: .*\): ignored whole/);
+    expect(w).toMatch(/personal config and environment still apply/);
+    expect(w).not.toMatch(/\n/);
+
+    writeProject({ adjudicator: { token: "x" } });
+    expect(projectAdjudicatorWarning(root)).toMatch(
+      /adjudicator\.token: ignored, only .*eminiar\.config\.json is invalid \(adjudicator\.token: /,
+    );
+
+    writeFileSync(join(root, "eminiar.config.json"), "{nope");
+    expect(projectAdjudicatorWarning(root)).toBe(
+      "eminiar.config.json is not a JSON object: ignored whole, the personal config and environment still apply",
+    );
+  });
+
+  it("a valid or absent project file adds no invalid-file warning", () => {
+    expect(projectAdjudicatorWarning(root)).toBeUndefined();
+    writeProject({ routing: { mode: "annotate" } });
+    expect(projectAdjudicatorWarning(root)).toBeUndefined();
+  });
+});

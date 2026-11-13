@@ -14,6 +14,8 @@
 import type { SecurityRow } from "../../storage/types.js";
 import type { NotifyLevel, Reason } from "../types.js";
 import { levelRank, meetsMinLevel, riskBadge, securityAction } from "./combine.js";
+// Effect only: hands the prompt helpers to the engine, which must not import security/ itself.
+import "./register.js";
 import { FLOOR_NOTES, REMEDY_TEXT } from "./taxonomy.js";
 import {
   AUTONOMIES,

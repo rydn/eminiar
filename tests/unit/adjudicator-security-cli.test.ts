@@ -380,7 +380,7 @@ describe("eval", () => {
   it("runs the heuristic over the labelled set and prints the metrics, saving only with --save", async () => {
     const t = fakeIo();
     expect(await sec(["eval"], t.io)).toBe(0);
-    expect(t.text()).toContain("60 items");
+    expect(t.text()).toContain(`${SECURITY_EVAL_SET.length} items`);
     expect(t.text()).toContain("confusion matrix");
     expect(t.text()).toContain("false negatives");
     expect(db.metaGet(SECURITY_EVAL_META_KEY)).toBeFalsy();
@@ -388,7 +388,7 @@ describe("eval", () => {
     expect(await sec(["eval", "--save"], s.io)).toBe(0);
     expect(s.text()).toContain("saved as the last security eval");
     const saved = JSON.parse(db.metaGet(SECURITY_EVAL_META_KEY) as string);
-    expect(saved.heuristic.all.n).toBe(60);
+    expect(saved.heuristic.all.n).toBe(SECURITY_EVAL_SET.length);
     expect(JSON.stringify(saved)).not.toContain(SECURITY_EVAL_SET[0]?.text);
     // status and the doctor now show the last eval
     const st = fakeIo();
@@ -401,7 +401,7 @@ describe("eval", () => {
     const t = fakeIo();
     expect(await sec(["eval", "--json"], t.io)).toBe(0);
     const r = JSON.parse(t.lines.join("\n"));
-    expect(r.set.items).toBe(60);
+    expect(r.set.items).toBe(SECURITY_EVAL_SET.length);
     expect(r.heuristic.core.perLevel.low).toBeDefined();
     expect(r.jev).toBeUndefined();
     for (const i of SECURITY_EVAL_SET) expect(t.text()).not.toContain(i.text);
@@ -467,9 +467,12 @@ describe("eval", () => {
     const t = fakeIo();
     expect(await sec(["eval", "--json"], t.io, { provider: provider as never })).toBe(0);
     const r = JSON.parse(t.lines.join("\n"));
-    expect(calls.reduce((a, b) => a + b, 0)).toBe(60);
+    expect(calls.reduce((a, b) => a + b, 0)).toBe(SECURITY_EVAL_SET.length);
     expect(Math.max(...calls)).toBeLessThanOrEqual(10);
-    expect(r.jev.model).toMatchObject({ asked: 60, answered: 60 });
+    expect(r.jev.model).toMatchObject({
+      asked: SECURITY_EVAL_SET.length,
+      answered: SECURITY_EVAL_SET.length,
+    });
     expect(r.jev.all.under).toBeLessThanOrEqual(r.heuristic.all.under);
     const text = fakeIo();
     await sec(["eval"], text.io, { provider: provider as never });
@@ -484,7 +487,7 @@ describe("eval", () => {
     );
     const m = fakeIo();
     await sec(["eval", "--fixture", f, "--json"], m.io);
-    expect(JSON.parse(m.lines.join("\n")).set.items).toBe(61);
+    expect(JSON.parse(m.lines.join("\n")).set.items).toBe(SECURITY_EVAL_SET.length + 1);
     const r = fakeIo();
     await sec(["eval", "--fixture", f, "--replace", "--json"], r.io);
     expect(JSON.parse(r.lines.join("\n")).set.items).toBe(1);
@@ -516,7 +519,7 @@ describe("doctor and help", () => {
     expect(s?.detail).toContain("advice only");
     expect(s?.detail).toContain("7 d: 0 assessed");
     const e = checks.find((c) => c.name === "adjudicator security eval");
-    expect(e?.detail).toContain("60 items");
+    expect(e?.detail).toContain(`${SECURITY_EVAL_SET.length} items`);
     expect(checks.find((c) => c.name === "adjudicator")?.detail).toContain("off");
   });
 

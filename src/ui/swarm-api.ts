@@ -13,6 +13,7 @@ import { roleRisk, runRiskOf, runRows, taskRisksOf } from "../adjudicator/securi
 import type { TaskRisk } from "../adjudicator/security/types.js";
 import { decisionOf, swarmDecisions } from "../adjudicator/swarm-decisions.js";
 import { TIERS } from "../adjudicator/types.js";
+import { loadConfig } from "../config.js";
 import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
@@ -128,10 +129,15 @@ function runCounts(db: StorageAdapter, run: RunRow, now: number): RunCounts {
   return { tasks, workers };
 }
 
-/** adjudicator.security when it is on (the swarm risk fields exist only then), else undefined. */
+/**
+ * adjudicator.security when it is on (the swarm risk fields exist only then), else undefined.
+ * Read per request like the security and adjudicator routes (never ctx.config, which is memoised
+ * per process), so `eminiar adjudicator security on|off` shows with the dashboard open. Off
+ * costs no database read: the callers skip the rows when this is undefined.
+ */
 function securityOf(ctx: ProjectContext): SecurityConfig | undefined {
-  const sec = ctx.config?.adjudicator?.security;
-  return sec?.enabled ? sec : undefined;
+  const sec = loadConfig(ctx.root).adjudicator.security;
+  return sec.enabled ? sec : undefined;
 }
 
 function swarmView(
@@ -449,14 +455,16 @@ export function runDetail(ctx: ProjectContext, run: RunRow, opts: RunDetailOpts 
     ]),
   ];
   const since = opts.tasksSince;
-  const tasks = (
-    since === undefined
-      ? snap.tasks
-      : snap.tasks.filter((t) => t.updated_at >= since - TASKS_SINCE_OVERLAP_MS)
-  ).map(clipTask);
   const sec = securityOf(ctx);
   const rows = sec ? runRows(db, run.id) : [];
   const taskRisk = sec ? taskRisksOf(rows) : undefined;
+  // A task changed for a delta client when its row did, or when its latest assessment was written
+  // since: the plan rows land after a slow model call, an agent row after a re-dispatch.
+  const changedSince = (t: TaskRow): boolean =>
+    since === undefined ||
+    t.updated_at >= since - TASKS_SINCE_OVERLAP_MS ||
+    (taskRisk?.get(t.id)?.ts ?? 0) >= since - TASKS_SINCE_OVERLAP_MS;
+  const tasks = snap.tasks.filter(changedSince).map(clipTask);
   const decisions = Object.fromEntries(swarmDecisions(db, run.id).map((d) => [d.taskId, d]));
   const decisionsHash = hashDecisions(decisions);
   const decisionsUnchanged = opts.decisionsHash === decisionsHash;

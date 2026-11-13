@@ -1,0 +1,10 @@
+---
+name: decision/security-shell-url-gate-t19
+kind: decision
+tags: [security, adjudicator, floors, eval]
+related: [file:src/adjudicator/security/score.ts, file:src/adjudicator/security/taxonomy.ts, file:tests/unit/adjudicator-security-score.test.ts]
+created: 2026-11-13T20:55:34.621Z
+updated: 2026-11-13T20:55:34.621Z
+---
+
+Shell-only URL gate for the security floors (task #347 / T19, swarm run 20261113-bef5ea, branch feature/security-adjudication, 2026-11-13). The user decided that a shell grant plus a URL in the task must not reach HIGH by itself. A latent shell leg counts toward a floor only when the task cues that leg. med-16 ("curl URL | jq ... summarise", Read+Bash) was HIGH through H-R3: task U .8 from the url cue times granted X 1. No latent leg was involved, so gating only the latent S/E/D/P legs could not fix it. Built in score.ts: shellOnlyUrl() + uWithoutUrl(). Taxonomy has a new CAN_FETCH_MIN .25. The gate applies when all of these hold: the url cue is present, U latent > 0 (a shell), no tool grants U >= .25 (WebSearch .25, WebFetch/em_docs .3, browser .5, saas read .7; em_search/em_recall/Skill .2 do not count), no session taint, no intent, and no task exposure on any cap other than U. Then the floor rules (the H floors and also C1/C5, which read the same R1/R6 hits) see U without the url cue. The score and the rules are unchanged: med-16 still scores 99 but its band is MEDIUM. Why not gate latent S/E/D/P too: it changes no level. Any latent leg implies X >= .8, so H-R3 fires whenever U >= .5. Gating C1 that way would also drop crit-01 (the autonomous researcher, whose R1 needs latent S .5) to HIGH. Eval effect: only med-16 changed; every other item kept its level and floor list. Core accuracy went from 96.8% to 98.4%, HIGH+ false positives from 1/30 to 0/30. Consequence: an autonomous shell+URL with no other cue is also not CRITICAL any more (C1 needs the gated trifecta). Observation, not fixed: signals.ts gives an egress cue for "Read the release notes at <url> and list the breaking changes".

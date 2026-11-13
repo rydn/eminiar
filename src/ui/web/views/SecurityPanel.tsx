@@ -11,6 +11,7 @@ import {
 } from "../api.js";
 import { ErrorBox, Spinner, Tag, useAsync } from "../components.js";
 import { Card, EmptyState, Skeleton, Stat, StatRow } from "../ds.js";
+import { FOCUSABLE, type FocusAt, tabTarget } from "../focus-trap.js";
 import {
   LegsRow,
   ModelNote,
@@ -429,6 +430,25 @@ function AssessmentBody({ a }: { a: AdjSecurityAssessment }): JSX.Element {
   );
 }
 
+/** Keep Tab inside the drawer (it is aria-modal): wrap at both ends, pull focus back in from outside. */
+function trapTab(e: KeyboardEvent, root: HTMLElement | null): void {
+  if (!root) return;
+  const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (el) => !el.closest("[hidden],[inert]"),
+  );
+  const active = document.activeElement;
+  let at: FocusAt = "outside";
+  if (active === root) at = "dialog";
+  else if (active instanceof HTMLElement && root.contains(active)) {
+    at = items.indexOf(active);
+    if (at < 0) return;
+  }
+  const to = tabTarget(items.length, at, e.shiftKey);
+  if (to === null) return;
+  e.preventDefault();
+  (to === "dialog" ? root : items[to])?.focus();
+}
+
 function AssessmentDrawer({ id, onClose }: { id: number; onClose: () => void }): JSX.Element {
   const d = useAsync(() => fetchSecurityAssessment(id), [id]);
   const panel = useRef<HTMLDivElement>(null);
@@ -437,6 +457,7 @@ function AssessmentDrawer({ id, onClose }: { id: number; onClose: () => void }):
     panel.current?.focus();
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
+      else if (e.key === "Tab") trapTab(e, panel.current);
     };
     window.addEventListener("keydown", key);
     return () => {

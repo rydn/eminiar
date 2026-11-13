@@ -30,6 +30,7 @@ import {
   formatRunStatus,
   formatSwarmList,
   formatSync,
+  OUTPUT_MAX,
   type RunListItem,
   runListItem,
   runRef,
@@ -297,8 +298,8 @@ function planned(
   advice = "",
   /** planNextHint: what to pass on the Agent call, worded like the advice block's head. */
   adviceHint = "",
-  /** The security block (head + a line per risky task); "" when security advice is off. */
-  security = "",
+  /** The security result (head + a line per risky task); undefined when security advice is off. */
+  security?: PlanSecurityResult,
 ): string {
   const all = db.swarm.tasks(run.id);
   const byId = new Map(all.map((t) => [t.id, t]));
@@ -320,15 +321,50 @@ function planned(
         advice ? adviceHint : ""
       }; run_in_background: true runs them in parallel. Watch with em_swarm {action:"status"}.`
     : "Next: the coordinator spawns workers for these; name the new task ids in your final message.";
-  return capOutput(
-    [
-      head,
-      next,
-      ...rows.map((t) => `#${t.id} ${clip(t.title, 120)}${t.role ? ` (${t.role})` : ""}`),
-      ...(advice ? [advice] : []),
-      ...(security ? [security] : []),
-    ].join("\n"),
+  const body = [
+    head,
+    next,
+    ...rows.map((t) => `#${t.id} ${clip(t.title, 120)}${t.role ? ` (${t.role})` : ""}`),
+    ...(advice ? [advice] : []),
+  ].join("\n");
+  if (!security) return capOutput(body);
+  // The security block has its own budget and is never the part that gets cut: the task list
+  // and routing advice are capped to what is left of OUTPUT_MAX once the block is in.
+  const block = securityBlock(security);
+  return `${capOutput(body, OUTPUT_MAX - block.length - 1, "em_swarm status lists every task")}\n${block}`;
+}
+
+/** Characters the security block may take in a plan answer (head + lines). */
+const SECURITY_BLOCK_MAX = 1500;
+const LEVEL_ORDER = { low: 0, medium: 1, high: 2, critical: 3 } as const;
+
+/**
+ * The plan's security block within SECURITY_BLOCK_MAX: the head always, then the task lines in
+ * plan order, keeping the highest (level, score) ones when they do not all fit. Lines left out
+ * are counted in the head, so a short answer never hides that tasks carry risk.
+ */
+function securityBlock(sec: PlanSecurityResult, max = SECURITY_BLOCK_MAX): string {
+  const risky = sec.items.flatMap((x) => (x.line ? [x] : []));
+  const byRisk = [...risky].sort(
+    (a, b) =>
+      LEVEL_ORDER[b.level] - LEVEL_ORDER[a.level] ||
+      b.view.score - a.view.score ||
+      a.taskId - b.taskId,
   );
+  // Worst case head: the note below adds at most ~70 characters to it.
+  let room = max - sec.head.length - 80;
+  const keep = new Set<number>();
+  for (const x of byRisk) {
+    const line = x.line as string;
+    if (line.length + 1 > room) continue;
+    room -= line.length + 1;
+    keep.add(x.taskId);
+  }
+  const dropped = risky.length - keep.size;
+  const head = dropped
+    ? `${sec.head} · ${dropped} more line${dropped === 1 ? "" : "s"} left out; see em_adjudicate security / dashboard`
+    : sec.head;
+  return [head, ...risky.filter((x) => keep.has(x.taskId)).map((x) => x.line as string)].join("\n");
 }
 
 // --- dispatch ------------------------------------------------------------------------------
@@ -530,7 +566,7 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
           );
         }
       }
-      const out = planned(db, rows, swarm, run, caller, advice, adviceHint, secResult?.block);
+      const out = planned(db, rows, swarm, run, caller, advice, adviceHint, secResult);
       return adviceNote ? `${out}\n${adviceNote}` : out;
     }
 

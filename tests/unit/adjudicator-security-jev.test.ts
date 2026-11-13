@@ -10,6 +10,11 @@ import { resetProviders } from "../../src/adjudicator/providers/index.js";
 import { createTypesafeProvider, JEV_PINNED } from "../../src/adjudicator/providers/typesafe.js";
 import { resetSecrets } from "../../src/adjudicator/secrets.js";
 import {
+  BUILTIN_TOOLS,
+  EM_TOOL_NAMES,
+  normalizeTool,
+} from "../../src/adjudicator/security/grant.js";
+import {
   isSafeToolId,
   sanitizeSecurityHint,
   securityQuestions,
@@ -22,6 +27,7 @@ import type {
 } from "../../src/adjudicator/types.js";
 import { type AdjudicatorConfig, ConfigSchema } from "../../src/config.js";
 import { SqliteAdapter } from "../../src/storage/sqlite/adapter.js";
+import { tools as registeredTools } from "../../src/tools/index.js";
 
 const KEY = "sk-SENTINEL-1234567890abcdefXYZ";
 
@@ -181,6 +187,36 @@ describe("security questions in the Jev request", () => {
     ]);
   });
 
+  it("an em_* name that is not a registered tool never reaches the body, bare or prefixed", async () => {
+    const TOKEN = "ghp_0123456789abcdef0123456789abcdef";
+    const dirty = {
+      tools: [
+        "em_execute",
+        `em_${TOKEN}`,
+        `mcp__plugin_eminiar_eminiar__em_${TOKEN}`,
+        `mcp__eminiar__em_${TOKEN}`,
+        "mcp__plugin_eminiar_eminiar__em_sk_live_secret_value_1234567890",
+        "em_sk_live_secret_value_1234567890",
+        "em_notatool",
+        `Bash_${TOKEN}`,
+        "mcp:ghp-0123:read",
+        "mcp:saas:sk-live",
+      ],
+      caps: [],
+    } as unknown as SecurityHint;
+    const { p, calls } = setup(cfgOf({ enabled: true, model: "provider" }), answers());
+    await run(p, reqs(1, dirty));
+    const raw = calls[0]!.raw;
+    for (const bad of ["ghp_", "0123456789abcdef", "sk_live", "sk-live", "notatool", "ghp-"])
+      expect(raw).not.toContain(bad);
+    expect(calls[0]!.body.state.items[0]).toMatchObject({ tools: ["em_execute"] });
+    // the same token in the item text is still redacted, as before
+    const withText = reqs(1, dirty).map((r) => ({ ...r, text: `use ${TOKEN} to push` }));
+    const again = setup(cfgOf({ enabled: true, model: "provider" }), answers());
+    await run(again.p, withText);
+    expect(again.calls[0]!.raw).not.toContain(TOKEN);
+  });
+
   it("parses severity onto 0..4 and the threats into ProviderAnswer.security", async () => {
     const { p } = setup(cfgOf({ enabled: true, model: "provider" }), answers(3.6, 0.9));
     const res = await run(p, reqs(1, HINT));
@@ -212,7 +248,7 @@ describe("security questions in the Jev request", () => {
 });
 
 describe("hint sanitising", () => {
-  it("accepts tool names and mcp:<class>:<verb> only", () => {
+  it("accepts known tool names and mcp:<class>:<verb> only", () => {
     expect(isSafeToolId("WebFetch")).toBe(true);
     expect(isSafeToolId("em_execute")).toBe(true);
     expect(isSafeToolId("mcp:cloud:delete")).toBe(true);
@@ -221,10 +257,41 @@ describe("hint sanitising", () => {
     expect(isSafeToolId("a/b")).toBe(false);
     expect(isSafeToolId("")).toBe(false);
     expect(isSafeToolId(7)).toBe(false);
+    // well-shaped but unknown: a bare name, an em_ name, an MCP class or verb
+    expect(isSafeToolId("Foo")).toBe(false);
+    expect(isSafeToolId("em_ghp_0123456789abcdef0123456789abcdef")).toBe(false);
+    expect(isSafeToolId("em_notatool")).toBe(false);
+    expect(isSafeToolId("mcp:myserver:read")).toBe(false);
+    expect(isSafeToolId("mcp:saas:frobnicate")).toBe(false);
+  });
+
+  it("normalizeTool admits only registered em_* names, bare or under either MCP prefix", () => {
+    const TOKEN = "ghp_0123456789abcdef0123456789abcdef";
+    expect(normalizeTool("em_search")?.tool.id).toBe("em_search");
+    expect(normalizeTool("mcp__plugin_eminiar_eminiar__em_search")?.tool.id).toBe("em_search");
+    expect(normalizeTool("mcp__eminiar__em_search")?.tool.id).toBe("em_search");
+    for (const bad of [
+      `em_${TOKEN}`,
+      `mcp__plugin_eminiar_eminiar__em_${TOKEN}`,
+      `mcp__eminiar__em_${TOKEN}`,
+      "mcp__plugin_eminiar_eminiar__em_sk_live_secret_value_1234567890",
+      "em_notatool",
+    ])
+      expect(normalizeTool(bad)).toBeUndefined();
+  });
+
+  it("the closed em_* list is exactly the tool registry", () => {
+    // Fails when a tool is registered without being added to EM_TOOL_NAMES, or one is removed.
+    expect([...EM_TOOL_NAMES].sort()).toEqual(registeredTools.map((t) => t.name).sort());
+  });
+
+  it("every known id passes the shape and redaction checks", () => {
+    for (const id of [...BUILTIN_TOOLS, ...EM_TOOL_NAMES]) expect(isSafeToolId(id)).toBe(true);
   });
 
   it("dedupes, sorts and caps the tools at 40", () => {
-    const tools = Array.from({ length: 60 }, (_, i) => `Tool${String(i).padStart(2, "0")}`);
+    const tools = [...BUILTIN_TOOLS, ...EM_TOOL_NAMES];
+    expect(tools.length).toBeGreaterThan(40);
     const s = sanitizeSecurityHint({ tools: [...tools, ...tools], caps: [] });
     expect(s?.tools).toHaveLength(40);
     expect(s?.tools).toEqual([...(s?.tools ?? [])].sort());

