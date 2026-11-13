@@ -37,6 +37,9 @@ import {
   tierRank,
   withKeptModel,
 } from "./savings.js";
+// Types only: this file is loaded by the hooks, which never load security/* while it is off.
+import type { PlanAnswer, PlanSecurityResult } from "./security/assess.js";
+import type { SecurityHint } from "./security/types.js";
 import {
   type AdjudicationRequest,
   type AdjudicatorProvider,
@@ -230,12 +233,27 @@ export interface PlanAdvice {
   roleConfidence?: number | undefined;
   /** The brief sums past the 0..4 clamp (units.ts): its effort is informational. */
   saturated?: boolean | undefined;
+  /** The security floor raised `model` (a HIGH or CRITICAL task never names a smaller tier). */
+  floored?: boolean | undefined;
   /**
    * Every role of the swarm pins a model without a range (pins respected, FORCE off), so the
    * adjudicator cannot change any worker: the same on every suggestion of one plan.
    */
   allRolesPinned?: boolean | undefined;
 }
+
+/**
+ * The security half of a plan (em_swarm builds it from planSecurity/finishPlan; this file only
+ * loads their types): `hints[i]` rides on task i's engine request as hints.security, and `finish`
+ * turns the engine's answers into the assessed plan, whose tierFor floors the advised model.
+ */
+export interface PlanSecurityHook {
+  hints: ReadonlyArray<SecurityHint | undefined>;
+  finish(answers: ReadonlyArray<PlanAnswer | undefined>): PlanSecurityResult;
+}
+
+/** What a plan line says about a model the security floor raised (advice.ts FLOOR_LABEL). */
+export const SECURITY_FLOOR_LABEL = "security floor";
 
 export interface PlanOptions {
   /** Test seam / long-lived instance; null forces the heuristic. */
@@ -246,10 +264,19 @@ export interface PlanOptions {
   log?: ((line: string) => void) | undefined;
   /** Called when the advice fails (after `log`): the caller can say the advice is unavailable. */
   onError?: ((err: unknown) => void) | undefined;
+  /** Security advice is on: ask its questions and floor the advised model on HIGH and CRITICAL. */
+  security?: PlanSecurityHook | undefined;
 }
 
-/** The request for one planned task. */
-export function taskRequest(task: TaskRow, swarm: SwarmSpec): AdjudicationRequest {
+/**
+ * The request for one planned task. `security` (the task's hint, set only while security.model is
+ * "provider") adds the security questions; without it the request is what it always was.
+ */
+export function taskRequest(
+  task: TaskRow,
+  swarm: SwarmSpec,
+  security?: SecurityHint,
+): AdjudicationRequest {
   const text = [task.title, task.detail ?? ""].join("\n").trim().slice(0, TASK_TEXT_MAX);
   const hints: NonNullable<AdjudicationRequest["hints"]> = {
     roles: swarm.roles.map((r) => ({ name: r.role, description: r.description })),
@@ -257,6 +284,7 @@ export function taskRequest(task: TaskRow, swarm: SwarmSpec): AdjudicationReques
     deps: task.deps.length,
   };
   if (task.role) hints.role = task.role;
+  if (security) hints.security = security;
   return { key: `#${task.id}`, surface: "plan", text, hints };
 }
 
@@ -365,7 +393,7 @@ export async function adjudicatePlan(
   if (!tasks.length || !planAdviceEnabled(ctx.config)) return [];
   try {
     const cfg = ctx.config.adjudicator;
-    const reqs = tasks.map((t) => taskRequest(t, swarm));
+    const reqs = tasks.map((t, i) => taskRequest(t, swarm, opts.security?.hints[i]));
     const engine: EngineOptions = {
       config: cfg,
       store: db.adjudicator,
@@ -387,6 +415,23 @@ export async function adjudicatePlan(
     if (opts.now) engine.now = opts.now;
     if (opts.log) engine.log = opts.log;
     const out = await adjudicate(reqs, engine);
+    // Security: blend the model's answers, store the plan rows, and get the floor (a failure
+    // here costs the security block, never the routing advice).
+    let secured: PlanSecurityResult | undefined;
+    if (opts.security) {
+      try {
+        secured = opts.security.finish(
+          out.map((a) => ({
+            security: a.verdict.security,
+            provider: a.verdict.provider,
+            providerStatus: a.verdict.providerStatus,
+            rowId: a.rowId,
+          })),
+        );
+      } catch (err) {
+        opts.log?.(`adjudicator: plan security skipped: ${(err as Error)?.message ?? String(err)}`);
+      }
+    }
     // One pin lookup per agent type (the swarm's generated agents, usually a handful).
     const env = opts.env ?? process.env;
     const pins = new Map<string, AgentPin>();
@@ -422,6 +467,13 @@ export async function adjudicatePlan(
           const pin = respectedPin(advice.agentType, respect, lookup);
           if (pin) advice.pin = pin;
         }
+      }
+      // The security floor goes before the row is marked: the row's advised pick and the line
+      // both name the floored tier.
+      const floor = secured?.tierFor(i, advice.model);
+      if (floor?.floored) {
+        advice.model = floor.tier;
+        advice.floored = true;
       }
       if (allRolesPinned) advice.allRolesPinned = true;
       markPlanRow(db, advice);
@@ -499,14 +551,15 @@ export function pinnedPart(pin: PlanPin, model: Tier | undefined, fix = pinHome(
  */
 export function planLines(advice: readonly PlanAdvice[]): string[] {
   return advice.map((a) => {
+    const floor = a.floored ? ` (${SECURITY_FLOOR_LABEL})` : "";
     const parts = [
       a.agentType ?? "any role",
       ...(a.range
-        ? [rangedPart(a.range, a.model)]
+        ? [`${rangedPart(a.range, a.model)}${floor}`]
         : a.pin
-          ? [pinnedPart(a.pin, a.model)]
+          ? [`${pinnedPart(a.pin, a.model)}${floor}`]
           : a.model
-            ? [a.forced ? `model ${a.model} (informational)` : `model ${a.model}`]
+            ? [a.forced ? `model ${a.model} (informational)${floor}` : `model ${a.model}${floor}`]
             : []),
       a.saturated ? `effort ${a.effort}: informational` : `effort ${a.effort}`,
     ];

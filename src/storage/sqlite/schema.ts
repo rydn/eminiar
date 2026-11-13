@@ -21,6 +21,42 @@ export function hasColumn(db: Database.Database, table: string, column: string):
   return cols.some((c) => c.name === column);
 }
 
+/** The adjudicator_security table and its indexes (migration v13); every statement is idempotent. */
+export const SECURITY_SQL = `
+CREATE TABLE IF NOT EXISTS adjudicator_security (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  surface TEXT NOT NULL,
+  session_id TEXT,
+  tool_use_id TEXT,
+  agent_type TEXT,
+  run_id TEXT,
+  task_id INTEGER,
+  adjudication_id INTEGER,
+  input_hash TEXT,
+  input_head TEXT,
+  level TEXT NOT NULL,
+  score INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  heuristic_level TEXT NOT NULL,
+  heuristic_score INTEGER NOT NULL,
+  model_level TEXT,
+  model_score INTEGER,
+  model_status TEXT NOT NULL DEFAULT 'off',
+  source TEXT NOT NULL,
+  autonomy TEXT,
+  grant_status TEXT,
+  rules TEXT NOT NULL DEFAULT '[]',
+  detail TEXT,
+  noted INTEGER NOT NULL DEFAULT 0,
+  version TEXT NOT NULL DEFAULT '1'
+);
+CREATE INDEX IF NOT EXISTS adjudicator_security_ts ON adjudicator_security(ts);
+CREATE INDEX IF NOT EXISTS adjudicator_security_level_ts ON adjudicator_security(level, ts);
+CREATE INDEX IF NOT EXISTS adjudicator_security_task ON adjudicator_security(run_id, task_id);
+CREATE INDEX IF NOT EXISTS adjudicator_security_adjudication ON adjudicator_security(adjudication_id);
+`;
+
 export const migrations: Migration[] = [
   {
     version: 1,
@@ -628,6 +664,18 @@ CREATE TABLE IF NOT EXISTS adjudicator_exchanges (
 );
 CREATE INDEX IF NOT EXISTS adjudicator_exchanges_ts ON adjudicator_exchanges(ts);
 `,
+  },
+  {
+    // Security assessments (docs/design/adjudicator-security.md, swarm run 20261113-bef5ea): one
+    // row per assessed agent spawn, swarm task, prompt or em_adjudicate item. A separate table,
+    // not columns on `adjudications`, so the adjudicator store, its try-it wrapper and the routing
+    // stats stay untouched. Numbered 13 because 10 (jev-integrations, reserved), 11 (playbooks)
+    // and 12 (recall index) are taken on other lines; recheck at merge. Idempotent, and also run
+    // lazily by SqliteSecurityStore for a database that claims 13 or later without the table.
+    // Never stores a secret or a tool argument: input_head is the 80-char redacted head and
+    // detail holds ids, numbers and tags only (see security.ts).
+    version: 13,
+    sql: SECURITY_SQL,
   },
 ];
 

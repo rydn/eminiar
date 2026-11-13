@@ -11,6 +11,8 @@ import {
   jevState,
   type StateItem,
 } from "../prompt.js";
+import { securityQuestionId, THREAT_QUESTION } from "../security/prompt.js";
+import { type SecurityModelAnswer, THREATS } from "../security/types.js";
 import type {
   AdjudicationRequest,
   AdjudicatorProvider,
@@ -88,6 +90,9 @@ export function createTypesafeProvider(
   const baseUrl = r.baseUrl ?? JEV_DEFAULT_BASE_URL;
   const model = pinJevModel(r.model);
   const askTool = (cfg.weights.features.toolProvider ?? 0) > 0;
+  // The security questions: only while security.model is "provider", and per request only with
+  // hints.security. Otherwise the request body is byte-identical to one without security.
+  const askSecurity = cfg.security?.enabled === true && cfg.security.model === "provider";
   const key = (): string => {
     // A loopback baseUrl gets only a key stored in the key file, never an env secret.
     const k = keyFor({ ...r, keyId: r.keyId ?? "typesafe" }, deps.env)?.key;
@@ -101,7 +106,7 @@ export function createTypesafeProvider(
     cat: Catalogue,
     o: { signal: AbortSignal; deadlineMs: number; capture?: ProviderExchange[] | undefined },
   ) {
-    const items = buildItems(reqs, cfg.privacy.maxChars, offset);
+    const items = buildItems(reqs, cfg.privacy.maxChars, offset, { security: askSecurity });
     const k = key();
     // Jev request capture (opt-in, per call): the sink gets one live record per HTTP call.
     // Without o.capture nothing is built. probe() is never captured.
@@ -259,7 +264,11 @@ function mapAnswers(
     if (risky?.type === "noul") a.risky = risky.noul;
     const plan = get(jevQuestionId(item.id, "needs_plan"));
     if (plan?.type === "noul") a.needsPlan = plan.noul;
-    if (a.complexity || a.tier || a.role) out.push(a);
+    if (item.tools) {
+      const sec = securityOf(get, item.id);
+      if (sec) a.security = sec;
+    }
+    if (a.complexity || a.tier || a.role || a.security) out.push(a);
   });
   return out;
 }
@@ -277,6 +286,32 @@ function complexityOf(a: Answer | undefined): ProviderAnswer["complexity"] {
   const top = levels.length > 1 ? Math.max(...levels) : COMPLEXITY_CRITERIA.length - 1;
   if (top <= 0 || a.score > top) return undefined;
   return { value: (a.score * 4) / top, confidence: a.confidence ?? 0.5 };
+}
+
+/**
+ * The security answer of one item: severity on the rubric's levels (0..4, rescaled like the
+ * complexity score, a malformed one skipped) and the six threat probabilities. Undefined when
+ * nothing usable came back.
+ */
+function securityOf(
+  get: (id: string) => Answer | undefined,
+  item: string,
+): SecurityModelAnswer | undefined {
+  const out: SecurityModelAnswer = { threats: {} };
+  const sev = get(securityQuestionId(item, "sec_severity"));
+  if (sev?.type === "score") {
+    const levels = Object.keys(sev.legend ?? {})
+      .map(Number)
+      .filter(Number.isInteger);
+    const top = levels.length > 1 ? Math.max(...levels) : 4;
+    if (top > 0 && sev.score <= top)
+      out.severity = { value: (sev.score * 4) / top, confidence: sev.confidence ?? 0.5 };
+  }
+  for (const t of THREATS) {
+    const n = get(securityQuestionId(item, THREAT_QUESTION[t]));
+    if (n?.type === "noul") out.threats[t] = n.noul;
+  }
+  return out.severity || Object.keys(out.threats).length > 0 ? out : undefined;
 }
 
 /** A calibrated Dist over the catalogue's options; probabilities for unknown options are dropped. */

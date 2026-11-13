@@ -174,6 +174,13 @@ Ollama, LM Studio, llama.cpp) or the local embedding model. Remote providers nee
 and a key, and only redacted text leaves the machine. Off by default, and it costs nothing while
 off: `eminiar adjudicator enable` ([details](docs/adjudicator.md)).
 
+A second opt-in, **security advice**, ranks how risky it is to let an agent with these tools do
+this task: the lethal trifecta of untrusted input, secrets and a way out, fetch-and-run, and
+persistence, with a level, the reasons and the one tool to take away. It is advice only: nothing
+is ever blocked. It runs offline by default; an optional Jev check sends tool ids and capability
+tags next to the redacted task text, and nothing else
+([details](docs/adjudicator.md#security-advice)): `eminiar adjudicator security on`.
+
 ### 📊 Local dashboard
 
 `eminiar ui` opens a local web app with token savings, usage and cost, a source explorer with
@@ -277,7 +284,7 @@ Read more in [How it works](docs/how-it-works.md).
 | [Documentation knowledge base](docs/documentation-kb.md) | Discover, index and look up docs |
 | [Usage insights](docs/usage.md) | Tokens, cache, cost, billing blocks, insights and savings per session |
 | [Agent swarms](docs/swarms.md) | Opt-in worker swarms: the swarm file, topologies, the tool and CLI |
-| [Adjudicator](docs/adjudicator.md) | Opt-in tool, model and agent-role suggestions: providers, privacy, savings, accuracy |
+| [Adjudicator](docs/adjudicator.md) | Opt-in tool, model and agent-role suggestions, and security risk advice: providers, privacy, savings, accuracy |
 | [Dashboard](docs/dashboard.md) | The `eminiar ui` web app |
 | [Configuration](docs/configuration.md) | Every config key with its default |
 | [CLI](docs/cli.md) | The `eminiar` command |
@@ -292,7 +299,9 @@ Your code, tool output and memories stay on your machine. eminiar uses the netwo
 - fetch web pages and documentation that you or Claude ask it to index;
 - look up package metadata in the npm, PyPI and Go registries when it adds documentation;
 - only if you turn on the adjudicator with a remote provider and agree to it: send redacted
-  prompt and task text to that provider ([what is sent](docs/adjudicator.md#providers-and-privacy)).
+  prompt and task text to that provider ([what is sent](docs/adjudicator.md#providers-and-privacy)); with
+  the security advice's model option, also the tool ids the agent holds and capability tags
+  ([what is sent](docs/adjudicator.md#what-jev-receives)).
 
 The dashboard listens on `127.0.0.1` only. On disk, `~/.eminiar` is readable by your user alone
 (macOS and Linux), and secrets with a known shape or name are masked in stored command and page

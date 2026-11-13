@@ -49,7 +49,7 @@ const VERDICT = {
 describe("schema migration v8: adjudicator tables", () => {
   it("applies on top of a v7 database and is the latest version", () => {
     expect(migrations.find((m) => m.version === 8)).toBeTruthy();
-    expect(migrations[migrations.length - 1]?.version).toBe(9);
+    expect(migrations[migrations.length - 1]?.version).toBe(13);
     const path = tmpDb("em-v7-");
     const raw = new Database(path);
     for (const m of migrations) {
@@ -65,7 +65,7 @@ describe("schema migration v8: adjudicator tables", () => {
 
     const a = new SqliteAdapter(path, { vectors: false });
     try {
-      expect(a.metaGet("schema_version")).toBe("9");
+      expect(a.metaGet("schema_version")).toBe("13");
       const names = (
         a.db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index')").all() as {
           name: string;
@@ -94,7 +94,7 @@ describe("schema migration v8: adjudicator tables", () => {
     // Reopening is a no-op.
     const again = new SqliteAdapter(path, { vectors: false });
     try {
-      expect(again.metaGet("schema_version")).toBe("9");
+      expect(again.metaGet("schema_version")).toBe("13");
       expect(count(again, "adjudications")).toBe(1);
     } finally {
       again.close();
@@ -151,7 +151,7 @@ describe("pre-release v8 databases (task #26)", () => {
     const path = oldV8Db();
     const a = new SqliteAdapter(path, { vectors: false });
     try {
-      expect(a.metaGet("schema_version")).toBe("9");
+      expect(a.metaGet("schema_version")).toBe("13");
       // Opening alone leaves the tables alone (a disabled adjudicator never touches them).
       expect(colsOf(a.db, "adjudications")).not.toContain("feedback_note");
       expect(a.adjudicator.providerState("openai")).toMatchObject({

@@ -54,6 +54,7 @@ import { createProvider, hasProvider, registerProvider } from "./providers/index
 import { isSecretName } from "./redact.js";
 import { SAVINGS_ASSUMPTIONS, savingsReport } from "./savings.js";
 import { clearKey, type KeyId, keyFileStatus, mask, setKey, storedKeyIds } from "./secrets.js";
+import { securityCommand, securityDoctorChecks } from "./security/cli.js";
 import {
   type AdjudicationRequest,
   type AdjudicatorProvider,
@@ -1147,6 +1148,8 @@ export function adjudicatorDoctorChecks(
   const a = config.adjudicator;
   if (invalid.length)
     checks.push({ name: "adjudicator config", ok: false, detail: invalid.join(" · ") });
+  // Security advice works with the adjudicator off, so its lines come before that early return.
+  checks.push(...securityDoctorChecks(config, { root: o.root, db: o.db, env }));
   // Information, not a failure: the keys are dropped, so nothing unsafe happens. Shown while the
   // adjudicator is off too, since a later `enable` would otherwise look like it uses them.
   const ignored = safe(() => projectAdjudicatorWarning(o.root));
@@ -1358,6 +1361,8 @@ export const ADJUDICATOR_USAGE = `eminiar adjudicator <command>   (opt-in; off b
                                       answer in this project's database; asks y/N, personal setting only
   exchanges off                       Turn it off and delete this project's captured requests
   exchanges purge [--yes]             Delete this project's captured requests, leave the setting
+  security <status|on|off|test|explain|list|eval>   Opt-in security advice (nothing is ever
+                                      blocked); \`security help\` lists its options
 Providers: heuristic (offline) · embedding (local model) · typesafe = Jev (api.typesafe.ai)
   · openai-compatible presets ${PRESET_IDS.join(", ")}`;
 
@@ -1367,6 +1372,18 @@ export async function adjudicatorCommand(
   deps: CliDeps = {},
 ): Promise<number> {
   const io: Io = { ...defaultIo(), ...deps.io };
+  // `security` has its own flags (docs/design/adjudicator-security.md §12).
+  if (args[0] === "security")
+    return securityCommand(args.slice(1), {
+      root: ctx.root,
+      io,
+      load: () => loadConfig(ctx.root),
+      db: () => storage(ctx, deps),
+      writePersonal: (patch) => writeAdjudicatorPatch(paths().configFile, patch),
+      personalUntrusted: () => personalFileUntrusted(io, ctx.root),
+      provider: deps.provider,
+      providerDeps: deps.providerDeps,
+    });
   const { values, positionals } = parseArgs({
     args,
     options: {

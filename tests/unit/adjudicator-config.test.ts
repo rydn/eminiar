@@ -50,6 +50,7 @@ const ENV_KEYS = [
   "EMINIAR_ADJUDICATOR_PROVIDER",
   "EMINIAR_ADJUDICATOR_MODE",
   "EMINIAR_ADJUDICATOR_REMOTE",
+  "EMINIAR_ADJUDICATOR_SECURITY",
 ];
 
 let home: string;
@@ -82,6 +83,19 @@ describe("adjudicator config schema", () => {
     expect(d.adjudicator.timeouts.promptMs).toBe(1200);
     expect(d.adjudicator.budget.dailyUsd).toBe(0.5);
     expect(d.adjudicator.openai.preset).toBe("groq");
+    // security advice is opt-in: off, and the model part off too
+    expect(d.adjudicator.security).toEqual({
+      enabled: false,
+      model: "off",
+      surfaces: { agent: true, plan: true, prompt: true },
+      minLevel: "high",
+      notifyUser: "critical",
+      modelFloor: "sonnet",
+      trustedMcpServers: [],
+      secretPaths: [],
+      taintLookbackMin: 240,
+      store: true,
+    });
     // optional fields stay undefined, so freezing the defaults writes no URL, model or key name
     expect(d.adjudicator.keyEnv).toBeUndefined();
     expect(d.adjudicator.openai.baseUrl).toBeUndefined();
@@ -193,16 +207,22 @@ describe("loadConfig fast path for an untouched adjudicator section", () => {
       [{ enabled: true }, undefined],
       [undefined, "1"],
       [{ provider: "typesafe", timeouts: { promptMs: 900 } }, "0"],
+      [{ security: { enabled: false } }, undefined],
+      [{ enabled: false, security: { enabled: false } }, "0"],
+      [{ security: { enabled: true } }, undefined],
     ];
     for (const [section, env] of cases) {
       for (const k of ENV_KEYS.slice(1)) delete process.env[k];
       if (env) process.env.EMINIAR_ADJUDICATOR = env;
       const file = { search: { defaultLimit: 7 }, ...(section ? { adjudicator: section } : {}) };
       writeFileSync(join(root, "eminiar.config.json"), JSON.stringify(file));
-      // The project layer keeps only PROJECT_ADJUDICATOR_KEYS (provider and timeouts drop).
-      const kept = Object.fromEntries(
+      // The project layer keeps only PROJECT_ADJUDICATOR_KEYS (provider and timeouts drop), and of
+      // `security` only `enabled: true`.
+      const kept: Record<string, unknown> = Object.fromEntries(
         Object.entries(section ?? {}).filter(([k]) => PROJECT_ADJUDICATOR_KEYS.includes(k)),
       );
+      if ((section?.security as { enabled?: boolean } | undefined)?.enabled === true)
+        kept.security = { enabled: true };
       const expected = ConfigSchema.parse({
         ...file,
         adjudicator: { ...kept, ...(env ? { enabled: env === "1" } : {}) },
@@ -441,6 +461,9 @@ describe("project layer trust boundary (#32)", () => {
       "mode",
       "apply",
       "tiers",
+      // ...or hide a security warning, or send tool ids to a provider (only `security.enabled: true`
+      // survives, through projectSecurityKeeps)
+      "security",
     ])
       expect(PROJECT_ADJUDICATOR_KEYS).not.toContain(k);
     // Every allowed key is a real field of the section.

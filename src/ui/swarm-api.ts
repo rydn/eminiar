@@ -7,6 +7,9 @@
  * Spec: docs/design/agent-swarms.md ("Dashboard: Swarms tab").
  */
 import { z } from "zod";
+import type { SecurityConfig } from "../adjudicator/security/assess.js";
+import { roleRisk, runRiskOf, runRows, taskRisksOf } from "../adjudicator/security/swarm-risk.js";
+import type { TaskRisk } from "../adjudicator/security/types.js";
 import { TIERS } from "../adjudicator/types.js";
 import type { ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
@@ -123,9 +126,16 @@ function runCounts(db: StorageAdapter, run: RunRow, now: number): RunCounts {
   return { tasks, workers };
 }
 
+/** adjudicator.security when it is on (the swarm risk fields exist only then), else undefined. */
+function securityOf(ctx: ProjectContext): SecurityConfig | undefined {
+  const sec = ctx.config?.adjudicator?.security;
+  return sec?.enabled ? sec : undefined;
+}
+
 function swarmView(
   spec: SwarmSpec,
   files: Map<string, { path: string; action: RoleFileAction; reason?: string | undefined }>,
+  sec?: SecurityConfig,
 ) {
   return {
     name: spec.name,
@@ -149,6 +159,8 @@ function swarmView(
       scope: r.scope,
       memoryTags: r.memoryTags,
       isolation: r.isolation ?? null,
+      // Present only with security on: the role's heuristic risk at default autonomy.
+      ...(sec ? { risk: roleRisk(sec, r) } : {}),
       hasHooks: !!r.hooks && Object.values(r.hooks).some((v) => Array.isArray(v) && v.length > 0),
       file: files.get(r.agentType) ?? {
         path: `.claude/agents/${r.agentType}.md`,
@@ -179,6 +191,7 @@ export function swarmOverview(ctx: ProjectContext, limit = RUNS_LIMIT) {
   const runsLimit = Math.max(1, Math.min(Math.floor(limit) || RUNS_LIMIT, RUNS_LIMIT_MAX));
   // Runs are listed whatever the file's state: the ledger outlives a deleted or broken file.
   const listed = listRuns(db, runsLimit);
+  const sec = securityOf(ctx);
   const runs = listed.runs.map((r) => ({
     id: r.id,
     swarm: r.swarm,
@@ -189,6 +202,8 @@ export function swarmOverview(ctx: ProjectContext, limit = RUNS_LIMIT) {
     updated_at: r.updated_at,
     ended_at: r.ended_at,
     counts: runCounts(db, r, now),
+    // Security on only: the worst latest per-task level and the counts per level.
+    ...(sec ? { risk: runRiskOf(runRows(db, r.id)) } : {}),
   }));
   const runsMore = listed.more;
   if (loaded.state === "absent")
@@ -237,7 +252,7 @@ export function swarmOverview(ctx: ProjectContext, limit = RUNS_LIMIT) {
     sync: config.sync,
     file: config.rel,
     issues: [] as ConfigIssue[],
-    swarms: config.swarms.map((s) => swarmView(s, files)),
+    swarms: config.swarms.map((s) => swarmView(s, files, sec)),
     // Generated files the YAML no longer produces (or every one, when disabled).
     orphans: plan
       .filter((a) => !roleTypes.has(a.agentType))
@@ -372,6 +387,8 @@ export function newestEvents(
 }
 
 export type TaskView = TaskRow & {
+  /** Security on only: the task's latest assessment (its agent row, else its plan row). */
+  risk?: TaskRisk;
   /** `detail` / `result` were cut to TASK_TEXT_MAX; GET /api/swarm/task has the whole task. */
   clipped?: true;
 };
@@ -425,13 +442,22 @@ export function runDetail(ctx: ProjectContext, run: RunRow, opts: RunDetailOpts 
       ? snap.tasks
       : snap.tasks.filter((t) => t.updated_at >= since - TASKS_SINCE_OVERLAP_MS)
   ).map(clipTask);
+  const sec = securityOf(ctx);
+  const rows = sec ? runRows(db, run.id) : [];
+  const taskRisk = sec ? taskRisksOf(rows) : undefined;
   return {
     ...snap,
-    tasks,
+    tasks: taskRisk
+      ? tasks.map((t) => {
+          const risk = taskRisk.get(t.id);
+          return risk ? { ...t, risk } : t;
+        })
+      : tasks,
     /** Every task of the run, whether or not `tasks` holds them all. */
     taskCount: snap.tasks.length,
     /** `tasks` holds only the tasks updated since `tasksSince`. */
     tasksPartial: since !== undefined,
+    ...(sec ? { risk: runRiskOf(rows) } : {}),
     roles,
     stages: spec?.stages ?? [],
     maxAgents: spec?.maxAgents ?? null,

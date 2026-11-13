@@ -2,7 +2,14 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { MODES, PROVIDER_IDS, TIERS } from "./adjudicator/types.js";
+import {
+  MIN_LEVELS,
+  MODES,
+  NOTIFY_LEVELS,
+  PROVIDER_IDS,
+  SECURITY_MODEL_SETTINGS,
+  TIERS,
+} from "./adjudicator/types.js";
 import { paths } from "./paths.js";
 
 export const RoutingMode = z.enum(["off", "annotate", "enforce", "auto"]);
@@ -28,7 +35,11 @@ function findSecretFields(v: unknown, path: (string | number)[] = []): (string |
   if (typeof v !== "object" || v === null) return [];
   const out: (string | number)[][] = [];
   for (const [k, x] of Object.entries(v)) {
-    if (k !== "keyEnv" && SECRET_FIELD.test(k)) out.push([...path, k]);
+    // keyEnv names an env var; adjudicator.security.secretPaths lists file patterns to treat as
+    // secret (a list of strings: anything key-like nested inside it is still refused).
+    const allowed =
+      k === "keyEnv" || (k === "secretPaths" && path.length === 1 && path[0] === "security");
+    if (!allowed && SECRET_FIELD.test(k)) out.push([...path, k]);
     out.push(...findSecretFields(x, [...path, k]));
   }
   return out;
@@ -200,6 +211,56 @@ const buildAdjudicatorObject = () =>
         captureExchanges: z.boolean().default(false),
       })
       .prefault({}),
+    /**
+     * Security-aware advice (docs/design/adjudicator-security.md): ranks the risk of letting an
+     * agent with these tools do this task. Opt-in, advice only (nothing is ever denied), and it
+     * works with or without `adjudicator.enabled`. A committed eminiar.config.json may only set
+     * `security.enabled: true`; every other key here is personal-only (projectLayer).
+     * EMINIAR_ADJUDICATOR_SECURITY=0|1 turns it off or on.
+     */
+    security: z
+      .object({
+        enabled: z.boolean().default(false),
+        /**
+         * "provider" also asks the adjudicator's provider the security questions (Jev only, with
+         * adjudicator.enabled, its consent and key). It is the opt-in to sending tool ids and
+         * capability tags alongside the task text that already goes.
+         */
+        model: z.enum(SECURITY_MODEL_SETTINGS).default("off"),
+        surfaces: z
+          .object({
+            agent: z.boolean().default(true),
+            plan: z.boolean().default(true),
+            prompt: z.boolean().default(true),
+          })
+          .prefault({}),
+        /** The lowest level that gets a line; lower levels are only recorded. */
+        minLevel: z.enum(MIN_LEVELS).default("high"),
+        /** Also tell the user (a systemMessage) at this level and above. */
+        notifyUser: z.enum(NOTIFY_LEVELS).default("critical"),
+        /** On HIGH and CRITICAL, model advice never names a smaller tier than this. */
+        modelFloor: z.enum(TIERS).default("sonnet"),
+        /** MCP server names treated as first-party: no tool-supply leg. */
+        trustedMcpServers: z.array(z.string().min(1).max(128)).max(64).default([]),
+        /** Extra secret path patterns (`*` is the only wildcard), on top of the built-in ones. */
+        secretPaths: z
+          .array(
+            z
+              .string()
+              .max(200)
+              .regex(
+                /^[^\p{Cc}]+$/u,
+                "a secret path pattern is a non-empty line without control characters",
+              ),
+          )
+          .max(64)
+          .default([]),
+        /** How far back session history counts as taint, in minutes; 0 = no session taint. */
+        taintLookbackMin: z.number().int().min(0).max(1440).default(240),
+        /** Keep assessments in adjudicator_security; false = advice only. */
+        store: z.boolean().default(true),
+      })
+      .prefault({}),
   });
 
 /**
@@ -266,7 +327,44 @@ export function adjudicatorDefaults(): AdjudicatorConfig {
     breaker: { failures: 2, cooldownSec: 120 },
     budget: { dailyUsd: 0.5, dailyCalls: 2000 },
     privacy: { maxChars: 2000, storeHead: true, captureExchanges: false },
+    security: {
+      enabled: false,
+      model: "off",
+      surfaces: { agent: true, plan: true, prompt: true },
+      minLevel: "high",
+      notifyUser: "critical",
+      modelFloor: "sonnet",
+      trustedMcpServers: [],
+      secretPaths: [],
+      taintLookbackMin: 240,
+      store: true,
+    },
   };
+}
+
+/** The part of the adjudicator section adjudicatorWanted reads. */
+type WantedConfig = Pick<AdjudicatorConfig, "enabled"> & {
+  security: Pick<AdjudicatorConfig["security"], "enabled" | "surfaces">;
+};
+
+/**
+ * Whether the adjudicator module must run at all at `point`: the routing adjudicator is on, or
+ * security advice is on for that surface (and, for a PreToolUse, the tool starts a subagent).
+ * Pure and cheap: the hooks call it before importing anything adjudicator-related, so with both
+ * switches off they never load it. `plan` is the em_swarm plan surface.
+ */
+export function adjudicatorWanted(a: WantedConfig, point: "prompt" | "plan"): boolean;
+export function adjudicatorWanted(a: WantedConfig, point: "preTool", tool: string): boolean;
+export function adjudicatorWanted(
+  a: WantedConfig,
+  point: "prompt" | "plan" | "preTool",
+  tool?: string,
+): boolean {
+  if (a.enabled) return true;
+  if (!a.security.enabled) return false;
+  if (point === "preTool")
+    return a.security.surfaces.agent && (tool === "Agent" || tool === "Task");
+  return a.security.surfaces[point];
 }
 
 /** Everything but the adjudicator section; loadConfig parses this alone while it is untouched. */
@@ -639,6 +737,11 @@ function envOverrides(): Record<string, unknown> {
   if (process.env.EMINIAR_ADJUDICATOR_REMOTE === "0") adj.remoteConsent = false;
   // The same rule for the Jev exchange log: =0 turns capture off, =1 grants nothing.
   if (process.env.EMINIAR_ADJUDICATOR_CAPTURE === "0") adj.privacy = { captureExchanges: false };
+  // Security advice: =0 is the kill switch (it leaves routing alone), =1 turns the local, advice
+  // only heuristic on. It never sets security.model: that opt-in (it sends tool ids and tags to
+  // the provider) stays in ~/.eminiar/config.json.
+  const sec = process.env.EMINIAR_ADJUDICATOR_SECURITY;
+  if (sec === "0" || sec === "1") adj.security = { enabled: sec === "1" };
   if (Object.keys(adj).length) o.adjudicator = adj;
   return o;
 }
@@ -654,7 +757,8 @@ function envOverrides(): Record<string, unknown> {
  * privacy also holds captureExchanges (storing Jev requests with prompt text), one more reason
  * it stays out. mode, apply and tiers decide which model every subagent runs on (apply mode
  * could put each dispatch on haiku, or floor them at fable), so they are personal too: a project
- * file may only keep the adjudicator advise-only (projectKeeps).
+ * file may only keep the adjudicator advise-only (projectKeeps). `security` is not listed: a
+ * project file may set `security.enabled: true` and nothing else in it (projectSecurityKeeps).
  */
 export const PROJECT_ADJUDICATOR_KEYS: readonly string[] = [
   "enabled",
@@ -676,13 +780,37 @@ function projectKeeps(adj: Record<string, unknown>, k: string): boolean {
   return PROJECT_ADJUDICATOR_KEYS.includes(k) || (k === "mode" && adj.mode === "advise");
 }
 
-/** The adjudicator keys of a raw project file that projectLayer drops, sorted. */
+/**
+ * Whether projectLayer keeps adjudicator.security.<k> of a project section: only `enabled: true`,
+ * which can only switch the advice on. Every other key stays personal: `enabled: false`,
+ * minLevel, notifyUser and surfaces would let a repo hide a warning; model sends tool ids to a
+ * provider; trustedMcpServers would let a repo vouch for its own server; modelFloor, secretPaths,
+ * store and taintLookbackMin change what is judged or kept.
+ */
+function projectSecurityKeeps(sec: Record<string, unknown>, k: string): boolean {
+  return k === "enabled" && Object.hasOwn(sec, k) && sec[k] === true;
+}
+
+/**
+ * The adjudicator keys of a raw project file that projectLayer drops, sorted. A dropped key of
+ * the security section is named by its path: `security.minLevel`.
+ */
 export function droppedProjectAdjudicatorKeys(raw: Record<string, unknown>): string[] {
   const adj = raw.adjudicator;
   if (!isPlainObject(adj)) return [];
-  return Object.keys(adj)
-    .filter((k) => !projectKeeps(adj, k))
-    .sort();
+  const dropped: string[] = [];
+  for (const k of Object.keys(adj)) {
+    if (k !== "security") {
+      if (!projectKeeps(adj, k)) dropped.push(k);
+      continue;
+    }
+    const sec = adj[k];
+    if (!isPlainObject(sec)) dropped.push(k);
+    else
+      for (const s of Object.keys(sec))
+        if (!projectSecurityKeeps(sec, s)) dropped.push(`security.${s}`);
+  }
+  return dropped.sort();
 }
 
 /**
@@ -913,6 +1041,8 @@ function projectLayer(raw: Record<string, unknown>): Record<string, unknown> {
   if (findSecretFields(adj).length) return raw;
   const kept: Record<string, unknown> = {};
   for (const k of Object.keys(adj)) if (projectKeeps(adj, k)) kept[k] = adj[k];
+  const sec = Object.hasOwn(adj, "security") ? adj.security : undefined;
+  if (isPlainObject(sec) && projectSecurityKeeps(sec, "enabled")) kept.security = { enabled: true };
   return { ...(ownJson(raw) as Record<string, unknown>), adjudicator: kept };
 }
 
@@ -984,20 +1114,39 @@ export function loadConfig(projectRoot: string): Config {
 }
 
 /**
+ * The security switch of a security section that holds nothing else: absent (false), or only
+ * `enabled: true|false` (the switch a project may set, EMINIAR_ADJUDICATOR_SECURITY=0|1).
+ * undefined for anything else, which the full schema parses.
+ */
+function securitySwitchOnly(sec: unknown): boolean | undefined {
+  if (sec === undefined) return false;
+  if (!isPlainObject(sec) || !Object.keys(sec).every((k) => k === "enabled")) return undefined;
+  if (sec.enabled === undefined) return false;
+  return typeof sec.enabled === "boolean" ? sec.enabled : undefined;
+}
+
+/**
  * ConfigSchema.safeParse, except that an untouched adjudicator section (absent, or only
- * `enabled: false`, e.g. the EMINIAR_ADJUDICATOR=0 kill switch) takes its defaults without
- * building or parsing the adjudicator schema. Anything else in it, including keys the secret
- * check must refuse, goes through the full schema.
+ * `enabled: false` and/or `security: {enabled: true|false}`, e.g. the EMINIAR_ADJUDICATOR=0 and
+ * EMINIAR_ADJUDICATOR_SECURITY=0|1 switches) takes its defaults, with that security switch,
+ * without building or parsing the adjudicator schema: security-only mode pays no zod pass on
+ * every hook. Anything else in it, including keys the secret check must refuse, goes through
+ * the full schema.
  */
 function parseConfig(merged: Record<string, unknown>) {
   const { adjudicator: adj, ...rest } = merged;
-  const untouched =
-    adj === undefined ||
-    (isPlainObject(adj) &&
-      Object.keys(adj).every((k) => k === "enabled") &&
-      (adj.enabled === undefined || adj.enabled === false));
-  if (!untouched) return ConfigSchema.safeParse(merged);
+  const security =
+    adj === undefined
+      ? false
+      : isPlainObject(adj) &&
+          Object.keys(adj).every((k) => k === "enabled" || k === "security") &&
+          (adj.enabled === undefined || adj.enabled === false)
+        ? securitySwitchOnly(adj.security)
+        : undefined;
+  if (security === undefined) return ConfigSchema.safeParse(merged);
   const base = BaseConfigSchema.safeParse(rest);
   if (!base.success) return base;
-  return { success: true as const, data: { ...base.data, adjudicator: adjudicatorDefaults() } };
+  const adjudicator = adjudicatorDefaults();
+  adjudicator.security.enabled = security;
+  return { success: true as const, data: { ...base.data, adjudicator } };
 }

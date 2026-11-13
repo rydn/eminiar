@@ -2,6 +2,9 @@
 
 Status: proposed · swarm run `20261104-483f39` · branch `feature/adjudicator` · target v0.13.0 · 2026-11-04
 
+See also [adjudicator-security.md](adjudicator-security.md): the opt-in security-aware advice built
+on this adjudicator (v0.15.0).
+
 ## Constraints from Claude Code
 
 The coordinator checked these against the Claude Code docs (sub-agents "Choose a model", hooks

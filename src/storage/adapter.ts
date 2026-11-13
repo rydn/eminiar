@@ -28,6 +28,7 @@ import type {
   MemoryRow,
   PurgeScope,
   SearchFilters,
+  SecurityStore,
   SessionRow,
   SnapshotRow,
   SourceStatRow,
@@ -55,6 +56,8 @@ export interface StorageAdapter {
   readonly swarm: SwarmStore;
   /** Adjudicator decisions, verdict cache, provider breakers and learned bias; see src/adjudicator. */
   readonly adjudicator: AdjudicatorStore;
+  /** Security assessments (opt-in adjudicator.security); a separate store from `adjudicator`. */
+  readonly security: SecurityStore;
 
   // --- documents & chunks -------------------------------------------------
   /** Insert a document with its chunks. Same uri+hash → returns the existing id with created=false. */
@@ -127,6 +130,12 @@ export interface StorageAdapter {
   eventInsert(e: EventInput): number;
   eventsBySession(sessionId: string, opts?: { categories?: string[]; limit?: number }): EventRow[];
   eventsRecent(limit: number, categories?: string[]): EventRow[];
+  /**
+   * The distinct tool names of a session's `tool_call` events at or after `sinceTs` (epoch ms),
+   * earliest first, at most `limit` (default 64, at most 256). One indexed read that never
+   * touches a payload: the security adjudication's session taint asks it on every dispatch.
+   */
+  eventToolsSince(sessionId: string, sinceTs: number, limit?: number): string[];
   snapshotInsert(s: { sessionId: string; trigger: string; body: string }): number;
   snapshotLatestUnconsumed(sessionId?: string): SnapshotRow | undefined;
   snapshotMarkConsumed(id: number): void;

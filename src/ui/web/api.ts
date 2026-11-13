@@ -1,4 +1,24 @@
 /** Fetch wrapper for the dashboard API: every call carries the selected project root. */
+
+import type {
+  CapTag,
+  CueId,
+  Exposure,
+  FloorId,
+  GrantSource,
+  GrantStatus,
+  IntentCueId,
+  Level,
+  RemedyAction,
+  RiskBadge,
+  RoleRisk,
+  RuleHit,
+  RunRisk,
+  SecurityAction,
+  SecurityModelAnswer,
+  SecuritySurface,
+  TaskRisk,
+} from "../../adjudicator/security/types.js";
 import type { DocCategory } from "../../docs/category.js";
 import type {
   SwarmDoc,
@@ -19,7 +39,7 @@ import type {
   WorkerStatus,
 } from "../../swarm/types.js";
 
-export type { DocCategory };
+export type { CapTag, DocCategory, Level, RiskBadge, RoleRisk, RunRisk };
 
 let root = new URLSearchParams(location.search).get("root") ?? "";
 
@@ -680,6 +700,8 @@ export type {
 export type SwarmTask = TaskRow & {
   /** In a run snapshot: `detail` / `result` were cut; GET /api/swarm/task has them whole. */
   clipped?: true;
+  /** The task's latest assessment; absent unless adjudicator.security is on. */
+  risk?: TaskRisk;
 };
 export type SwarmNote = NoteRow;
 export type SwarmEvent = SwarmEventRow;
@@ -716,6 +738,8 @@ export interface SwarmRoleUi {
   isolation: string | null;
   hasHooks: boolean;
   file: { path: string; action: SwarmFileAction; reason?: string };
+  /** The role's risk at default autonomy; absent unless adjudicator.security is on. */
+  risk?: RoleRisk;
 }
 export interface SwarmDefUi {
   name: string;
@@ -740,6 +764,8 @@ export interface SwarmRunSummary {
   updated_at: number;
   ended_at: number | null;
   counts: SwarmRunCounts;
+  /** Worst level and counts over the run's latest per-task assessments; absent when security is off. */
+  risk?: RunRisk;
 }
 export interface SwarmOverview {
   state: "absent" | "invalid" | "ok";
@@ -813,6 +839,8 @@ export interface SwarmRunDetail {
   maxAgents: number | null;
   /** The run's swarm is still in the swarm file. */
   configured: boolean;
+  /** Absent when security is off. */
+  risk?: RunRisk;
   timeline: {
     start: number;
     end: number;
@@ -934,9 +962,16 @@ export interface AdjDayBucket {
 export type AdjReconcile =
   | { scanned: number; updated: number; finalized: number; linked: number; learned: number }
   | { error: string };
+/** The gate of the security panel (GET /api/adjudicator `security`); absent on older servers. */
+export interface AdjSecurityFlag {
+  enabled: boolean;
+  model: "off" | "provider";
+}
 export interface AdjOverview {
   enabled: boolean;
   mode: "advise" | "apply";
+  /** Mount the security panel only when `security?.enabled` (securityActive in the views). */
+  security?: AdjSecurityFlag;
   config: Record<string, unknown> & { provider?: string; mode?: string };
   provider: AdjProviderView;
   keySource: "env" | "file" | "none";
@@ -1111,6 +1146,163 @@ export const fetchJevExchanges = (limit?: number, row?: number): Promise<AdjExch
 /** GET /api/adjudicator/jev/exchange: one stored request with its request and response bodies. */
 export const fetchJevExchange = (id: number): Promise<AdjExchangeResponse> =>
   api<AdjExchangeResponse>("/api/adjudicator/jev/exchange", { id });
+
+// --- security panel (mirror src/ui/security-api.ts and src/adjudicator/security/report.ts) -----
+
+export type AdjSecurityLevel = Level;
+/** GET /api/adjudicator/security* when adjudicator.security.enabled is off: nothing was read. */
+export interface AdjSecurityInactive {
+  active: false;
+  reason: "disabled";
+  now: number;
+}
+export type AdjSecurityLegs = RiskBadge["legs"];
+/** One HIGH or CRITICAL assessment of the recent and worst lists. */
+export interface AdjSecurityItem {
+  id: number;
+  ts: number;
+  surface: SecuritySurface;
+  level: Level;
+  score: number;
+  agentType: string | null;
+  runId: string | null;
+  taskId: number | null;
+  /** Redacted head of the assessed text (at most 80 characters). */
+  head: string | null;
+  legs: AdjSecurityLegs;
+  /** Rule and floor ids that fired. */
+  rules: string[];
+  remedy: string | null;
+  reasons: string[];
+  raised: boolean;
+  modelStatus: string;
+}
+export type AdjSecurityModelState = "off" | "ready" | "adjudicator-off" | "unsupported";
+export interface AdjSecurityReport {
+  active: true;
+  model: {
+    setting: "off" | "provider";
+    status: AdjSecurityModelState;
+    provider: string;
+    answered: number;
+  };
+  totals: {
+    n: number;
+    byLevel: Record<Level, number>;
+    bySurface: Record<string, number>;
+  };
+  /** Oldest day first (UTC). */
+  perDay: Array<{ day: string } & Record<Level, number>>;
+  rules: Array<{ id: string; n: number }>;
+  contribution: {
+    heuristicOnly: number;
+    modelRaised: number;
+    modelLower: number;
+    modelAgreed: number;
+    raisedRate: number | null;
+    /** matrix[heuristic level][final level] */
+    matrix: Record<Level, Record<Level, number>>;
+    byStatus: Record<string, number>;
+  };
+  /** Newest first. */
+  recent: AdjSecurityItem[];
+  /** Worst first, by level then score (a CRITICAL can score below a HIGH). */
+  worst: AdjSecurityItem[];
+  /** The last `security eval` report without item text; its shape is owned by security/eval.ts. */
+  lastEval: Record<string, unknown> | null;
+  since: number | null;
+  now: number;
+}
+export type AdjSecurityResponse = AdjSecurityReport | AdjSecurityInactive;
+export interface AdjSecurityDetail {
+  v: 1;
+  exposures: Exposure[];
+  rules: RuleHit[];
+  floors: FloorId[];
+  /** The autonomy multiplier the score was scaled by. */
+  a: number;
+  cues: CueId[];
+  intent: IntentCueId[];
+  grant: {
+    status: GrantStatus;
+    source?: GrantSource;
+    /** Provider-safe ids ("Bash", "mcp:saas:write"); never a raw MCP server name. */
+    tools: string[];
+    mcpServers?: boolean;
+    permissionMode?: string;
+  };
+  taint?: { tools: string[]; status: "ok" | "off" | "unavailable" };
+  model?: { level: Level; score: number; answer: SecurityModelAnswer; raised: boolean };
+  remedy?: { actions: RemedyAction[]; line: string };
+  reasons: Array<{ feature: string; weight: number; note: string }>;
+  badge: RiskBadge;
+}
+export interface AdjSecurityView {
+  level: Level;
+  score: number;
+  action: SecurityAction;
+  heuristicLevel: Level;
+  heuristicScore: number;
+  autonomy: "manual" | "default" | "autonomous";
+  /** ok, off, unsupported, none or a provider status. */
+  modelStatus: string;
+  /** heuristic, blend or plan. */
+  source: string;
+  id?: number;
+  detail: AdjSecurityDetail;
+}
+export interface AdjSecurityAssessment {
+  active: true;
+  assessment: {
+    id: number;
+    ts: number;
+    surface: SecuritySurface;
+    agentType: string | null;
+    runId: string | null;
+    taskId: number | null;
+    adjudicationId: number | null;
+    head: string | null;
+    noted: boolean;
+    version: string;
+  };
+  view: AdjSecurityView;
+  /** The long text form of the assessment. */
+  text: string;
+  now: number;
+}
+export type AdjSecurityAssessmentResponse = AdjSecurityAssessment | AdjSecurityInactive;
+/** The body of POST /api/adjudicator/security/test; heuristic only, nothing is stored. */
+export interface AdjSecurityTryItInput {
+  text: string;
+  tools?: string[];
+  taint?: string[];
+  agentType?: string;
+  role?: { tools?: string[]; disallowedTools?: string[]; description?: string };
+  autonomy?: "manual" | "default" | "autonomous";
+}
+export interface AdjSecurityTryIt {
+  active: true;
+  view: AdjSecurityView;
+  badge: RiskBadge;
+  text: string;
+  persisted: false;
+  chars: number;
+  now: number;
+}
+export type AdjSecurityTryItResponse = AdjSecurityTryIt | AdjSecurityInactive;
+
+/**
+ * GET /api/adjudicator/security. Call it only when the overview says security is on
+ * (`securityActive`): the panel is not mounted otherwise, so no request is made.
+ */
+export const fetchSecurity = (since: string): Promise<AdjSecurityResponse> =>
+  api<AdjSecurityResponse>("/api/adjudicator/security", { since });
+/** GET /api/adjudicator/security/assessment: one stored assessment in full. */
+export const fetchSecurityAssessment = (id: number): Promise<AdjSecurityAssessmentResponse> =>
+  api<AdjSecurityAssessmentResponse>("/api/adjudicator/security/assessment", { id });
+/** POST /api/adjudicator/security/test: the heuristic assessment of a text; never stored. */
+export const runSecurityTryIt = (input: AdjSecurityTryItInput): Promise<AdjSecurityTryItResponse> =>
+  post<AdjSecurityTryItResponse>("/api/adjudicator/security/test", input);
 
 // --- swarm config studio (GET /api/swarm/config, POST /api/swarm/config/{validate,save}) ----
 

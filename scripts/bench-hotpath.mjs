@@ -16,6 +16,12 @@
 // the adjudicator, built with `npx tsup`, node_modules linked in), interleaved run by run; and an
 // enabled heuristic UserPromptSubmit / Agent call. Budgets (--assert exits 1 when one is broken):
 // disabled <= 1 ms p50 over the baseline; enabled heuristic UserPromptSubmit <= 150 ms p95.
+//
+// The security advice (adjudicator.security, off by default) is measured the same way: its own
+// variants "security" (the routing adjudicator off) and "both", interleaved with the variant they
+// extend, for UserPromptSubmit and PreToolUse(Agent). Budget: <= 10 ms p50 over that variant (the
+// design's 10 ms p95 hook budget, measured as the added cost in the same run). With security off,
+// the "off" check above already covers it: the default build has the switch off.
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -269,6 +275,9 @@ if (DO_HOOKS) {
   const cur = variant("current", pkgRoot, {});
   const base = BASE ? variant("base", resolve(BASE), {}) : null;
   const on = variant("enabled", pkgRoot, enabledHeuristic);
+  const securityOn = { adjudicator: { security: { enabled: true } } };
+  const sec = variant("security", pkgRoot, {}, securityOn);
+  const both = variant("both", pkgRoot, enabledHeuristic, securityOn);
   try {
     for (const kind of ["prompt", "bash"]) {
       const r = await race(base ? [base, cur] : [cur], kind, HOOK_RUNS);
@@ -280,14 +289,23 @@ if (DO_HOOKS) {
       }
     }
     for (const kind of ["prompt", "agent"]) {
-      const r = await race([on], kind, HOOK_RUNS);
+      const r = await race([cur, on, sec, both], kind, HOOK_RUNS);
       results[`hook.${kind}.enabledHeuristic`] = r.enabled;
+      results[`hook.${kind}.securityOnly`] = r.security;
+      results[`hook.${kind}.adjudicatorAndSecurity`] = r.both;
       if (kind === "prompt") checks.push({ name: "hook prompt: enabled heuristic, p95 incl. process", value: r.enabled.p95, budget: 150, unit: "ms", ok: r.enabled.p95 <= 150 });
+      // What the security advice adds to the hook it rides on (same run, interleaved).
+      const d1 = r.security.p50 - r.current.p50;
+      const d2 = r.both.p50 - r.enabled.p50;
+      checks.push({ name: `hook ${kind}: security on (adjudicator off), p50 over off`, value: d1, budget: 10, unit: "ms", ok: d1 <= 10 });
+      checks.push({ name: `hook ${kind}: security on (adjudicator on), p50 over adjudicator alone`, value: d2, budget: 10, unit: "ms", ok: d2 <= 10 });
     }
   } finally {
     cur.cleanup();
     base?.cleanup();
     on.cleanup();
+    sec.cleanup();
+    both.cleanup();
   }
 }
 

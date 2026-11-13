@@ -940,6 +940,100 @@
               "type": "boolean"
             }
           }
+        },
+        "security": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "model": {
+              "default": "off",
+              "type": "string",
+              "enum": [
+                "off",
+                "provider"
+              ]
+            },
+            "surfaces": {
+              "default": {},
+              "type": "object",
+              "properties": {
+                "agent": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "plan": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "prompt": {
+                  "default": true,
+                  "type": "boolean"
+                }
+              }
+            },
+            "minLevel": {
+              "default": "high",
+              "type": "string",
+              "enum": [
+                "medium",
+                "high",
+                "critical"
+              ]
+            },
+            "notifyUser": {
+              "default": "critical",
+              "type": "string",
+              "enum": [
+                "off",
+                "critical",
+                "high"
+              ]
+            },
+            "modelFloor": {
+              "default": "sonnet",
+              "type": "string",
+              "enum": [
+                "haiku",
+                "sonnet",
+                "opus",
+                "fable"
+              ]
+            },
+            "trustedMcpServers": {
+              "default": [],
+              "maxItems": 64,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "secretPaths": {
+              "default": [],
+              "maxItems": 64,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 200,
+                "pattern": "^[^\\p{Cc}]+$"
+              }
+            },
+            "taintLookbackMin": {
+              "default": 240,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1440
+            },
+            "store": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
         }
       }
     }

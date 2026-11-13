@@ -22,7 +22,8 @@
 - **[Agent swarms](swarms.md)**: opt-in worker swarms declared in `.eminiar/swarm.yaml`, led by
   the main session, with every worker briefed from the project's memories and history
 - **[Adjudicator](adjudicator.md)**: opt-in scoring of each prompt, subagent dispatch and swarm
-  task that suggests the eminiar tool, Claude model size and agent role, to save tokens
+  task that suggests the eminiar tool, Claude model size and agent role, to save tokens; its
+  [security advice](adjudicator.md#security-advice) ranks the risk of an agent's tools and task
 - **[Dashboard](dashboard.md)**: the `eminiar ui` web app
 
 ## Reference

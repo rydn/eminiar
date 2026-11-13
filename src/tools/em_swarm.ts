@@ -1,5 +1,16 @@
 import { z } from "zod";
-import { adjudicatePlan, planAdviceBlock, planNextHint } from "../adjudicator/swarm.js";
+import {
+  finishPlan,
+  type PlanSecurity,
+  type PlanSecurityResult,
+  planSecurity,
+} from "../adjudicator/security/assess.js";
+import {
+  adjudicatePlan,
+  planAdviceBlock,
+  planAdviceEnabled,
+  planNextHint,
+} from "../adjudicator/swarm.js";
 import { getContext, type ProjectContext } from "../context.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { getStorage } from "../storage/index.js";
@@ -283,6 +294,8 @@ function planned(
   advice = "",
   /** planNextHint: what to pass on the Agent call, worded like the advice block's head. */
   adviceHint = "",
+  /** The security block (head + a line per risky task); "" when security advice is off. */
+  security = "",
 ): string {
   const all = db.swarm.tasks(run.id);
   const byId = new Map(all.map((t) => [t.id, t]));
@@ -310,6 +323,7 @@ function planned(
       next,
       ...rows.map((t) => `#${t.id} ${clip(t.title, 120)}${t.role ? ` (${t.role})` : ""}`),
       ...(advice ? [advice] : []),
+      ...(security ? [security] : []),
     ].join("\n"),
   );
 }
@@ -461,6 +475,27 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
       let advice = "";
       let adviceHint = "";
       let adviceNote = "";
+      // Security advice (opt-in, advice only): every task against its role's grant, heuristic
+      // first; the adjudicator's plan call asks the model too and floors the advised model.
+      // Nothing here runs, or is read, while adjudicator.security.enabled is off.
+      let secPlan: PlanSecurity | undefined;
+      let secResult: PlanSecurityResult | undefined;
+      if (ctx.config.adjudicator?.security?.enabled) {
+        try {
+          secPlan = planSecurity(ctx, db, run, swarm, rows, {
+            engine: planAdviceEnabled(ctx.config),
+          });
+        } catch (err) {
+          process.stderr.write(
+            `eminiar: security plan advice skipped: ${(err as Error)?.message ?? String(err)}\n`,
+          );
+        }
+      }
+      const secHook = secPlan && {
+        hints: secPlan.hints,
+        finish: (answers: Parameters<typeof finishPlan>[1]) =>
+          (secResult ??= finishPlan(secPlan as PlanSecurity, answers)),
+      };
       if (ctx.config.adjudicator?.enabled && ctx.config.adjudicator.surfaces.plan) {
         const unavailable = "Adjudicator advice unavailable for this plan (the tasks are planned).";
         try {
@@ -471,6 +506,7 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
             onError: () => {
               adviceNote = unavailable;
             },
+            ...(secHook ? { security: secHook } : {}),
           });
           advice = planAdviceBlock(list);
           adviceHint = planNextHint(list);
@@ -481,7 +517,17 @@ async function dispatch(args: Args, callerCtx: ProjectContext): Promise<string> 
           adviceNote = unavailable;
         }
       }
-      const out = planned(db, rows, swarm, run, caller, advice, adviceHint);
+      // The routing advice failed or is off: the security block is the heuristic's alone.
+      if (secPlan && !secResult) {
+        try {
+          secResult = finishPlan(secPlan);
+        } catch (err) {
+          process.stderr.write(
+            `eminiar: security plan advice skipped: ${(err as Error)?.message ?? String(err)}\n`,
+          );
+        }
+      }
+      const out = planned(db, rows, swarm, run, caller, advice, adviceHint, secResult?.block);
       return adviceNote ? `${out}\n${adviceNote}` : out;
     }
 

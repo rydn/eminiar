@@ -77,6 +77,8 @@ import {
 } from "./adjudicator-helpers.js";
 import { JevImpact } from "./JevImpact.js";
 import { jevActive } from "./jev-helpers.js";
+import { SecurityPanel } from "./SecurityPanel.js";
+import { securityActive } from "./security-helpers.js";
 import { shortModel } from "./usage-helpers.js";
 
 // --- small bits --------------------------------------------------------------------------
@@ -1799,6 +1801,8 @@ export function Adjudicator({ params }: { params: Record<string, string> }): JSX
       />
 
       {!o.enabled ? <DisabledIntro /> : null}
+
+      {securityActive(o) ? <SecurityPanel range={range} tick={tick} /> : null}
 
       {o.enabled || hasData ? (
         <>

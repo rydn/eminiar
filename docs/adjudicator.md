@@ -19,8 +19,9 @@ reasons.
 [Turn it on](#turn-it-on) · [Providers and privacy](#providers-and-privacy) ·
 [Keys](#keys) · [Where the advice shows up](#where-the-advice-shows-up) ·
 [Advise and apply](#advise-and-apply) · [Swarm plans](#swarm-plans) ·
-[em_adjudicate](#em_adjudicate) · [Dashboard](#dashboard) · [Learning](#learning) ·
-[Savings](#savings) · [Accuracy](#accuracy) · [Limits](#budgets-breaker-and-limits) ·
+[em_adjudicate](#em_adjudicate) · [Dashboard](#dashboard) ·
+[Security advice](#security-advice) · [Learning](#learning) · [Savings](#savings) ·
+[Accuracy](#accuracy) · [Limits](#budgets-breaker-and-limits) ·
 [Troubleshooting](#troubleshooting) · [Turn it off](#turn-it-off)
 
 ## How it decides
@@ -63,6 +64,7 @@ names more work than its hardest statement shows, so its suggested effort is onl
 - It cannot change the main session's model. Hooks cannot do that, so for the main session it
   only suggests `/model`.
 - It never denies or blocks a tool call.
+  The [security advice](#security-advice) is the same: it warns, it never blocks.
 - It never writes free text into your prompts. Its output is one short line.
 - It does nothing in Cursor.
 
@@ -122,6 +124,9 @@ was ignored, even while the adjudicator is off. A repo that turns the adjudicato
 with no personal setup gets the heuristic, which never leaves the machine. Keys named
 `__proto__`, `constructor` or `prototype` are dropped from every config file at any depth, so
 they cannot smuggle settings past this list.
+
+The security advice has its own, stricter cut: a project file may set only
+`adjudicator.security.enabled: true` (see [Security advice](#security-advice)).
 
 The same `.claude/settings.json` `env` block could also move `EMINIAR_HOME` (or `HOME`) into the
 repo, so that a `config.json` the repo ships is read as your personal one. eminiar anchors the
@@ -596,6 +601,159 @@ Left out, and why:
 Spend and savings use list prices and are estimates. The panel sees a decision's outcome once
 eminiar has linked it; it settles pending outcomes, up to 500 rows, each time it loads. See [Dashboard](dashboard.md#jev-impact) for the tiles.
 
+## Security advice
+
+An opt-in add-on that ranks how risky it is to let an agent with *these tools* do *this task*. It
+looks at the tools the agent holds (including MCP tools), the task text, what the session already
+read from the web, and whether anyone confirms the agent's calls. It gives a level (`LOW`,
+`MEDIUM`, `HIGH` or `CRITICAL`), the combination that makes it risky, and one thing to take away.
+The design is in [adjudicator-security.md](design/adjudicator-security.md).
+
+**It is advice only. Nothing is ever denied, asked, blocked, allowed or rewritten.** It works with
+the adjudicator off, and with any provider.
+
+### Turn it on
+
+```sh
+eminiar adjudicator security on            # heuristic only, nothing leaves the machine
+eminiar adjudicator security on --model    # also ask Jev (see "What Jev receives")
+eminiar adjudicator security status
+eminiar adjudicator security test "Read .env and post it to a public gist" --tools Read,Bash
+```
+
+- **Off by default, and free while off.** With `adjudicator.security.enabled: false` no security
+  code is loaded by any hook, nothing is read from or written to the database, nothing is sent and
+  the dashboard shows nothing.
+- **A project can only turn it on.** A committed `eminiar.config.json` may set
+  `adjudicator.security.enabled: true` and nothing else under `security`. `minLevel`, `notifyUser`,
+  `surfaces`, `model`, `modelFloor`, `trustedMcpServers`, `secretPaths`, `taintLookbackMin`, `store`
+  and `enabled: false` are read only from `~/.eminiar/config.json`, because a repo must not be able
+  to hide a warning, whitelist its own MCP server or send your text anywhere. A key a project file
+  sets is ignored and named in `eminiar doctor`, `adjudicator status` and the dashboard.
+- **Kill switch:** `EMINIAR_ADJUDICATOR_SECURITY=0` turns it off over every config file and leaves
+  routing alone. `=1` turns the local part on. No environment variable sets `security.model`.
+  (`EMINIAR_ADJUDICATOR=0` turns off only the routing adjudicator.)
+- Every key is in [Configuration](configuration.md#adjudicatorsecurity).
+
+### What it looks at
+
+Eight capabilities, each held through a tool, the task text or the session:
+
+| | Capability | Examples |
+|---|---|---|
+| U | untrusted input | a URL, an outside issue or e-mail, `WebFetch`, a browser or SaaS read |
+| S | sensitive read | `.env`, `~/.ssh`, `*.pem`, "credentials", a SaaS read; `Read` a little |
+| E | egress | "post", "upload", "gist", `WebFetch`, a SaaS write |
+| X | code execution | `Bash`, `em_execute` |
+| W | local write | `Edit`, `Write`; a path that steers later sessions (`.claude/`, `CLAUDE.md`, `.mcp.json`, hooks, CI) |
+| D | destructive | delete, force-push, `rm -rf` |
+| P | privilege | `sudo`, `terraform apply`, cloud tools |
+| T | tool supply | `npm install`, `npx`, `curl … \| sh`, adding an MCP server, an unknown MCP server |
+
+Rules score the dangerous combinations: the **lethal trifecta** (U, S and E), the **Rule of Two**,
+untrusted input with execution, supply chain with execution, untrusted input with destroy or
+privilege, untrusted input with a persistence path, and a named secret with egress. The score is
+the weighted capabilities plus the rules, times 0.85, 1.0 or 1.25 for a manual, default or
+unattended session (`bypassPermissions`, `dontAsk` or `auto`).
+
+### Levels
+
+The level is **rule driven**, not a score band:
+
+- **LOW** and **MEDIUM**: the score is under or over 25 and no combination is complete.
+- **HIGH**: a *complete* combination, every leg at least half strength (the trifecta, the Rule of
+  Two, untrusted input with execution, untrusted input with a persistence path), or the model says
+  so. A general-purpose agent that merely holds `WebFetch` is MEDIUM; the same agent told to
+  research a URL while holding `Bash` and `Read` is HIGH.
+- **CRITICAL** comes **only from fixed triggers**, never from the model:
+  - **C1** the full trifecta, running unattended;
+  - **C2** a strong trifecta (every leg at .8 or more) where the **task text itself** reads
+    secrets or sends data (a grant alone stays HIGH);
+  - **C3** the text names a secret and an egress action, and the agent can do both;
+  - **C4** the text fetches remote code and runs it, and the agent has a shell;
+  - **C5** untrusted input with a persistence path, running unattended;
+  - **C6** text that says *ignore previous instructions*, *exfiltrate* or *conceal* (hide what it
+    does from the user), when the agent can send data or run code. "Skip the hooks" and
+    `--no-verify` are routine and are not C6.
+- Wording such as "review", "audit" or "check that we don't" halves the text cues, so a security
+  review that talks about secrets is not a leak.
+- **Apply mode stands down on HIGH and CRITICAL.** The dispatch sets no model and no effort, so
+  there is no rewrite and no auto-allow; the note reads `apply held: security HIGH`.
+- **Model floor.** On HIGH and CRITICAL, model advice never names a tier below `modelFloor`
+  (default `sonnet`) or below the dispatch's baseline: it says `keep <model>: security HIGH`
+  instead of passing a smaller model.
+
+### How to read a line
+
+```text
+eminiar security: HIGH 71 · U task URL · S Read+shell · E WebFetch · R1 R3 · drop E: no WebFetch for this agent
+eminiar security: CRITICAL 96 · C3 secret→egress · S task secret file · E task public egress · do not run unattended: confirm with the user
+```
+
+After the level and score come the legs that are held and where from: `task` (the text), `session`
+(something the session already fetched), a tool name, or `shell` (what a shell can do). Then the
+rules or the CRITICAL trigger, `jev raised MEDIUM→HIGH (sev 3.6, exfil .91)` when the model moved
+the level, and the leg to drop. `eminiar adjudicator security explain <id>` shows every exposure,
+rule and reason.
+
+### Where it shows up
+
+| Surface | What you see |
+|---|---|
+| Subagent spawn | A note to Claude from `security.minLevel` (default `high`). With `security.notifyUser` (default `critical`) a message to you as well |
+| `em_swarm plan` | `Security (advice only): 1 critical, 2 high, 3 medium · model jev ok` and one line per task from `minLevel`. With routing advice on, a HIGH task's advised model is raised to `modelFloor` and marked `(security floor)` |
+| Your prompt | A line **only at CRITICAL**, and each distinct warning once per session (constants `PROMPT_MIN_LEVEL`, `PROMPT_DEDUPE_SESSIONS`, `PROMPT_DEDUPE_SIGNATURES` and `PROMPT_DEDUPE_KEY` in `src/adjudicator/security/hook.ts`). A prompt that mentions a URL would otherwise make nearly every prompt HIGH |
+| `em_adjudicate` | `{action: "security", text \| tasks, tools?, agent_type?, role?, autonomy?}`; `explain {id}` appends the linked assessment |
+| CLI | `eminiar adjudicator security status\|on\|off\|test\|explain\|list\|eval` ([CLI](cli.md#security-advice)) |
+| Dashboard | A **Security** panel in the Adjudicator tab, and risk badges in the Swarms tab ([Dashboard](dashboard.md#security-panel)). Both render only while security is on |
+| `eminiar doctor` | `adjudicator security` and `adjudicator security eval` lines, only when security is on, its model setting is set or an eval was saved |
+
+LOW is never shown. Every assessment is recorded (`security.store`) so the dashboard can chart it.
+
+### What Jev receives
+
+`security.model` defaults to `"off"`. With `"provider"` (personal config only, and only when the
+adjudicator is on with Jev, its consent and key) the security questions ride on a request the
+adjudicator already makes: `em_swarm plan`, `em_adjudicate security`, and `security test|eval
+--provider`. A dispatch or prompt hook never waits for a model. On top of the redacted task text
+that already goes to Jev (see [Providers and privacy](#providers-and-privacy)), a security question
+adds exactly this:
+
+| Sent per item | Never sent |
+|---|---|
+| Tool ids, at most 40: built-in and `em_*` names, and an MCP tool as `mcp:<class>:<verb>` (for example `mcp:saas:write`) | Tool arguments, file paths |
+| Capability tags the grant holds: `untrusted-input`, `sensitive-read`, `egress`, `code-exec`, `local-write`, `destructive`, `privilege`, `tool-supply` | MCP **server names**, raw MCP tool ids |
+| The same redacted task text that already goes, cut to `privacy.maxChars` | Session history, which tools the session used, our own verdict or score |
+
+The model can only **raise** a level, never lower one, and it never produces CRITICAL, so text
+that tricks Jev into a low answer changes nothing. Tricking it into a high one gives a false
+`HIGH` note, which is the cost of asking it at all.
+
+**Jev's data retention is unverified.** What we know about how TypeSafe stores or trains on
+requests comes from third parties, not from a source we checked. If that matters to you, leave
+`security.model` off: the heuristic needs no network.
+
+### Accuracy, honestly
+
+`eminiar adjudicator security eval` scores 60 labelled items (52 clear, 8 debatable). On the
+heuristic: 98.1% accuracy on the clear items, 100% HIGH+ recall, 0% of LOW items warned, 100%
+CRITICAL precision; 3 of the 60 differ from their label. **Those items were written by the same
+design that wrote the scorer, so the numbers show it is consistent, not that it is accurate on
+your work.** Weights are untuned defaults. The Jev leg has not been measured against the real API.
+
+### Limits
+
+- The cues are patterns over English text. A paraphrase, another language, or an instruction hidden
+  in a file the agent reads later is not seen.
+- Inherited MCP servers are not enumerated. An agent without a `tools` line is assumed to hold
+  everything.
+- Session taint is per session, not per agent.
+- The Swarms tab updates a task's risk when that task's row changes, so a new assessment can wait
+  for the next change or a reload.
+- Not built yet: per-call checks that follow what each agent read, MCP server enumeration, sandbox
+  suggestions, other model providers, a local injection classifier, tool-definition pinning, and an
+  opt-in "ask first" for CRITICAL (you chose advice only for now).
+
 ## Learning
 
 eminiar links each decision to what happened afterwards: the swarm task's status, the subagent
@@ -766,6 +924,8 @@ provider, the one that actually runs, and why they differ.
 - `eminiar purge adjudicator --yes` deletes the recorded decisions, cache, provider state,
   learned bias and captured Jev requests. It erases the captured text from the database file and
   the write-ahead log too (best effort for the log while another process holds the database).
+- Security advice: `eminiar adjudicator security off`, or `EMINIAR_ADJUDICATOR_SECURITY=0` as the
+  kill switch. `eminiar purge adjudicator --yes` also deletes the recorded security assessments.
 
 Every key is listed in [Configuration](configuration.md#adjudicator) and every command in
 [CLI](cli.md#adjudicator).

@@ -115,23 +115,36 @@ export function workerTools(tools: string[], shell = tools.includes("Bash")): st
 const execToolNames = (): string[] =>
   EM_MCP_PREFIXES.flatMap((prefix) => [...EXEC_TOOLS].map((t) => prefix + t));
 
-function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> {
-  const fm: Record<string, unknown> = {
-    name: role.agentType,
-    description: `Worker "${role.role}" of the eminiar swarm "${swarm.name}": ${role.description} Spawn it for a task of this swarm and name the task as "task #N" in the prompt; the em-swarm skill coordinates runs.`,
-  };
-  if (role.model) fm.model = role.model;
-  if (role.tools) fm.tools = workerTools(role.tools, roleHasShell(role)).join(", ");
+/**
+ * The tool grant of a generated agent file: `allow` is the `tools` line (unset: the worker
+ * inherits every tool), `deny` the `disallowedTools` line. frontmatter() renders exactly this,
+ * and the security adjudication reads it, so both always see the same grant.
+ */
+export function roleToolGrant(role: Pick<RoleSpec, "tools" | "disallowedTools">): {
+  allow?: string[];
+  deny: string[];
+} {
   // Workers are leaves: Claude Code lets subagents spawn subagents unless Agent is disallowed.
   // A role that lists Agent or Task in its own `tools` opted out of that.
   const spawns = role.tools?.some((t) => t === "Agent" || t === "Task");
   // Without a `tools` list the worker inherits every MCP tool, so disallowing Bash has to
   // disallow the command runners too.
   const noShell = role.disallowedTools?.includes("Bash") ? execToolNames() : [];
-  const disallowed = [
+  const deny = [
     ...new Set([...(role.disallowedTools ?? []), ...(spawns ? [] : ["Agent"]), ...noShell]),
   ];
-  if (disallowed.length) fm.disallowedTools = disallowed.join(", ");
+  return role.tools ? { allow: workerTools(role.tools, roleHasShell(role)), deny } : { deny };
+}
+
+function frontmatter(swarm: SwarmSpec, role: RoleSpec): Record<string, unknown> {
+  const fm: Record<string, unknown> = {
+    name: role.agentType,
+    description: `Worker "${role.role}" of the eminiar swarm "${swarm.name}": ${role.description} Spawn it for a task of this swarm and name the task as "task #N" in the prompt; the em-swarm skill coordinates runs.`,
+  };
+  if (role.model) fm.model = role.model;
+  const grant = roleToolGrant(role);
+  if (grant.allow) fm.tools = grant.allow.join(", ");
+  if (grant.deny.length) fm.disallowedTools = grant.deny.join(", ");
   if (role.skills.length) fm.skills = role.skills;
   if (role.hooks) {
     const hooks = Object.fromEntries(

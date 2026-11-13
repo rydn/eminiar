@@ -199,7 +199,8 @@ only:
   environment variable named by `keyEnv`.
 - Only `enabled`, `surfaces`, `promptMode`, `minPromptChars`, `weights`, `advice`, `embedding`,
   `learning` and `cache` may be set in the committed `eminiar.config.json`, plus `mode: "advise"`
-  (a project can keep the adjudicator advise-only). Everything that decides where text and keys
+  (a project can keep the adjudicator advise-only), and inside `security` only
+  `enabled: true` (see [`adjudicator.security`](#adjudicatorsecurity)). Everything that decides where text and keys
   go or how much is spent, plus apply mode, its settings and the tier ladder (`provider`,
   `typesafe`, `openai`, `keyEnv`, `remoteConsent`, `remoteConsentOrigins`, `privacy`, `budget`,
   `timeouts`, `breaker`, `mode: "apply"`, `apply`, `tiers`) comes from `~/.eminiar/config.json`
@@ -262,13 +263,37 @@ only:
 | `privacy.storeHead` | `true` | Keep the first 80 redacted characters of each input in the database |
 | `privacy.captureExchanges` | `false` | Keep the newest 100 requests sent to TypeSafe Jev and its answers, with timing, for the dashboard. They contain redacted prompt text, at most 65,536 characters per request or answer. Personal `~/.eminiar/config.json` only: `eminiar.config.json` cannot set it. See [Jev request capture](adjudicator.md#jev-request-capture) |
 
+#### `adjudicator.security`
+
+The opt-in [security advice](adjudicator.md#security-advice): it ranks the risk of letting an agent
+with these tools do this task. Off by default, advice only (nothing is ever denied), and it works
+with or without `adjudicator.enabled`. A committed `eminiar.config.json` may set only
+`security.enabled: true`; every other key below, and `enabled: false`, is read only from
+`~/.eminiar/config.json` (an ignored key is named in `eminiar doctor` as
+`adjudicator.security.<key>`).
+
+| Key | Default | Description |
+|---|---|---|
+| `security.enabled` | `false` | Turn the security advice on. `EMINIAR_ADJUDICATOR_SECURITY=0` is the kill switch, `=1` turns it on |
+| `security.model` | `"off"` | `off`, or `provider` to also ask the adjudicator's provider the security questions. Jev (`typesafe`) only, and it needs `adjudicator.enabled` with consent and a key. It sends tool ids and capability tags next to the redacted task text; see [what Jev receives](adjudicator.md#what-jev-receives). Personal file only |
+| `security.surfaces.agent` | `true` | Assess subagent dispatches (PreToolUse on `Agent`) |
+| `security.surfaces.plan` | `true` | Assess the tasks of `em_swarm plan` |
+| `security.surfaces.prompt` | `true` | Assess prompts (UserPromptSubmit). The line speaks only at CRITICAL, once per session per warning |
+| `security.minLevel` | `"high"` | Lowest level that gets a line in a spawn note or a plan: `medium`, `high` or `critical`. Lower levels are only recorded |
+| `security.notifyUser` | `"critical"` | Also send a message to you from this level: `off`, `critical` or `high` |
+| `security.modelFloor` | `"sonnet"` | On HIGH and CRITICAL, model advice never names a smaller tier: `haiku`, `sonnet`, `opus` or `fable` |
+| `security.trustedMcpServers` | `[]` | MCP server names (at most 64, 1 to 128 characters each) treated as first-party: they add no tool-supply risk |
+| `security.secretPaths` | `[]` | Extra secret path patterns (at most 64, each at most 200 characters, `*` the only wildcard) on top of the built-in ones (`.env*`, `id_rsa*`, `*.pem`, `.ssh/*`, `.aws/*` and so on) |
+| `security.taintLookbackMin` | `240` | Minutes of session history in which a web or SaaS-read tool call counts as untrusted input (0 to 1440; `0` = ignore the session) |
+| `security.store` | `true` | Keep assessments in this project's database for the dashboard and `security explain`. `false` shows advice and records nothing |
+
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
 | `EMINIAR_ROUTING_MODE` | Overrides `routing.mode` |
 | `EMINIAR_EMBEDDINGS=0` | Turns off embeddings |
-| `EMINIAR_HOME` | Moves the data directory (default `~/.eminiar`). A `config.json` there that lies inside or above the project (or any git work tree around it, a submodule's superproject included), or a relative `EMINIAR_HOME`, cannot set the adjudicator's provider, consent, endpoints, `keyEnv`, privacy, budget, timeouts, apply mode, `apply` or `tiers`, since a repo's `.claude/settings.json` could set this variable. The same applies when `HOME` is moved into the project |
+| `EMINIAR_HOME` | Moves the data directory (default `~/.eminiar`). A `config.json` there that lies inside or above the project (or any git work tree around it, a submodule's superproject included), or a relative `EMINIAR_HOME`, cannot set the adjudicator's provider, consent, endpoints, `keyEnv`, privacy, budget, timeouts, apply mode, `apply` or `tiers`, or any `security` key beyond `enabled: true`, since a repo's `.claude/settings.json` could set this variable. The same applies when `HOME` is moved into the project |
 | `CURSOR_CONFIG_DIR` | Where `install --cursor` writes Cursor's `hooks.json`, `mcp.json` and `skills/` (default `~/.cursor`) |
 | `EMINIAR_PROJECT_ROOT` | Sets the project root of the MCP server and the CLI. Otherwise `CLAUDE_PROJECT_DIR`, then the current directory. Under Claude Code and Cursor the hooks always use `CLAUDE_PROJECT_DIR`, so setting this for a session puts the hooks and the server in different projects. `SessionStart` exports it to Bash commands through `CLAUDE_ENV_FILE`, so `eminiar` run from Bash uses the session's project; a `claude` started from Bash inherits it too, and its server then uses the outer session's project |
 | `EMINIAR_DEBUG` | Prints stack traces from the CLI |
@@ -280,4 +305,5 @@ only:
 | `EMINIAR_ADJUDICATOR_MODE` | Overrides `adjudicator.mode` (`advise` or `apply`) |
 | `EMINIAR_ADJUDICATOR_REMOTE=0` | Withdraws remote consent. `=1` does nothing: no environment variable can grant consent, because a project's `.claude/settings.json` can set them |
 | `EMINIAR_ADJUDICATOR_CAPTURE=0` | Turns Jev request capture off (`=1` does nothing) |
+| `EMINIAR_ADJUDICATOR_SECURITY=0` / `=1` | Turns the security advice off (the kill switch; routing is untouched) or on, over every config file. It never sets `security.model` |
 | `EMINIAR_ADJUDICATOR_KEY` | Adjudicator provider key, checked after `keyEnv` and the provider's own variable (`TYPESAFE_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`) and before `~/.eminiar/adjudicator.key` |

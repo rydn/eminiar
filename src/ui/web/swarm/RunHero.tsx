@@ -5,6 +5,7 @@ import { toast } from "../components.js";
 import { Badge, Gauge, Hero, Pill, SegBar, Sparkline, Stat, StatRow } from "../ds.js";
 import { ago, cls, fmt } from "../util.js";
 import { State, useNow } from "./bits.js";
+import { RunRiskMark } from "./RunRiskMark.js";
 import { activityPerMinute, progress } from "./run-helpers.js";
 import { dur, GLYPH, STATE_TONE, TOPOLOGY_GLYPH } from "./style.js";
 
@@ -337,6 +338,14 @@ export function RunHero({
           }
         />
         <ElapsedStat run={run} skew={skew} />
+        {detail.risk ? (
+          <Stat
+            label="risk"
+            value={<RunRiskMark risk={detail.risk} />}
+            tone="muted"
+            sub="worst of the latest assessment per task"
+          />
+        ) : null}
       </StatRow>
     </div>
   );

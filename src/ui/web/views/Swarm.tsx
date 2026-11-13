@@ -19,11 +19,13 @@ import {
 import { ErrorBox, toast, useAsync } from "../components.js";
 import { Badge, Card, EmptyState, SegBar, Segmented, Skeleton } from "../ds.js";
 import { navigate } from "../router.js";
+import { RiskBadge } from "../security.js";
 import { Blackboard } from "../swarm/Blackboard.js";
 import { RoleChip, State } from "../swarm/bits.js";
 import { ConfigTopology } from "../swarm/ConfigTopology.js";
 import { Feed } from "../swarm/Feed.js";
 import { type Finished, RunHero } from "../swarm/RunHero.js";
+import { RunRiskMark } from "../swarm/RunRiskMark.js";
 import {
   capacity,
   filterRuns,
@@ -34,6 +36,7 @@ import {
   startCommand,
 } from "../swarm/run-helpers.js";
 import { SwarmNav } from "../swarm/SwarmNav.js";
+import { atLeastRail } from "../swarm/security-helpers.js";
 import { FILE_STATE, GLYPH, STATE_TONE, shortAgent, TOPOLOGY_GLYPH } from "../swarm/style.js";
 import { TaskBoard } from "../swarm/TaskBoard.js";
 import { Timeline } from "../swarm/Timeline.js";
@@ -43,6 +46,7 @@ import { Workers } from "../swarm/Workers.js";
 import { Yaml } from "../swarm/Yaml.js";
 import { ago, cls } from "../util.js";
 import { SwarmConfig } from "./SwarmConfig.js";
+import { badgeLabel } from "./security-helpers.js";
 
 const LIST_POLL_MS = 15_000;
 const EVENTS_POLL_MS = 2_000;
@@ -238,6 +242,16 @@ function SwarmRow({ s }: { s: SwarmDefUi }): JSX.Element {
               title={`${r.description}\n${r.agentType} · ${FILE_STATE[r.file.action].word}`}
             >
               {r.count > 1 ? <span class="n">×{r.count}</span> : null}
+              {r.risk && atLeastRail(r.risk.level) ? (
+                <RiskBadge
+                  level={r.risk.level}
+                  score={r.risk.score}
+                  compact
+                  title={`${badgeLabel(r.risk.level, r.risk.score)} at default autonomy${
+                    r.risk.reasons.length ? `\n${r.risk.reasons.join("\n")}` : ""
+                  }`}
+                />
+              ) : null}
             </RoleChip>
           ))}
         </span>
@@ -362,6 +376,7 @@ function RunItem({ r, selected }: { r: SwarmRunSummary; selected: boolean }): JS
             {GLYPH.failed} {bad}
           </span>
         ) : null}
+        {r.risk ? <RunRiskMark risk={r.risk} compact /> : null}
         {t.total ? <span class="spacer" /> : null}
         {t.total ? <span class="ds-num">{Math.round(p * 100)}%</span> : null}
       </div>

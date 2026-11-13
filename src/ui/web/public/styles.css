@@ -6824,3 +6824,405 @@ table.adj-eval {
     max-width: none;
   }
 }
+
+/* --- security panel and shared risk components (sec-*) -----------------------------------
+   Used by the Adjudicator tab and the swarm views. Existing tokens only. A level is always a
+   glyph and a word too (○ low · ◐ medium · ▲ high · ⬢ critical), so colour is never the only
+   signal; critical is also filled, high is outlined. */
+.sec-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.sec-title {
+  margin: 4px 0 0;
+  font-size: 15px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sec-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.sec-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+  background: transparent;
+}
+.sec-badge.compact {
+  padding: 0 6px;
+  font-size: 11.5px;
+}
+.sec-badge .sec-score {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+.sec-badge.sec-l-low {
+  color: var(--ink-ok);
+  border-style: dashed;
+}
+.sec-badge.sec-l-medium {
+  color: var(--ink-warn);
+  background: var(--warn-soft);
+}
+.sec-badge.sec-l-high {
+  color: var(--ink-bad);
+  background: var(--bad-soft);
+}
+.sec-badge.sec-l-critical {
+  color: #fff;
+  background: var(--bad);
+  border-color: var(--bad);
+}
+:root[data-theme="dark"] .sec-badge.sec-l-critical {
+  color: #1b0b0d;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .sec-badge.sec-l-critical {
+    color: #1b0b0d;
+  }
+}
+/* legs U S E */
+.sec-legs {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.sec-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--code);
+  font: 11.5px / 1.7 var(--mono);
+  color: var(--muted);
+}
+.sec-leg b {
+  color: inherit;
+}
+.sec-leg-n {
+  font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+  text-align: right;
+}
+.sec-leg-bar {
+  display: inline-block;
+  width: 22px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.sec-leg-bar > i {
+  display: block;
+  height: 100%;
+  background: currentColor;
+}
+.sec-leg-weak {
+  color: var(--ink-muted);
+}
+.sec-leg-mid {
+  color: var(--ink-warn);
+  border-color: var(--warn);
+}
+.sec-leg-strong {
+  color: var(--ink-bad);
+  border-color: var(--bad);
+  font-weight: 700;
+}
+/* rule chips */
+.sec-rules {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.sec-rule {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--code);
+  font: 11.5px / 1.7 var(--mono);
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+.sec-rule.floor {
+  border-color: var(--ink-accent);
+  color: var(--ink-accent);
+  font-weight: 600;
+}
+.sec-rule.more {
+  border-style: dashed;
+}
+.sec-raised {
+  font-size: 11.5px;
+  color: var(--ink-accent);
+  border: 1px solid var(--ink-accent);
+  border-radius: 4px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+/* remedy and reasons */
+.sec-remedy {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 6px 0 0;
+  padding: 4px 8px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 6px 6px 0;
+  font-size: 12.5px;
+  color: var(--fg, inherit);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.sec-remedy b {
+  flex: none;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-accent);
+}
+.sec-reasons {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+  text-align: left;
+}
+.sec-reasons li {
+  overflow-wrap: anywhere;
+}
+.sec-summary {
+  min-width: 0;
+}
+/* distribution bars */
+.sec-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sec-bar-row {
+  display: grid;
+  grid-template-columns: 92px minmax(40px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12.5px;
+}
+.sec-bar-row .sec-rule-label {
+  grid-column: 2 / -1;
+  margin-top: -4px;
+}
+.sec-track {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--code);
+  overflow: hidden;
+}
+.sec-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  min-width: 2px;
+}
+.sec-fill.sec-l-low {
+  background: var(--ok);
+}
+.sec-fill.sec-l-medium {
+  background: var(--warn);
+}
+.sec-fill.sec-l-high {
+  background: var(--bad);
+  opacity: 0.7;
+}
+.sec-fill.sec-l-critical {
+  background: var(--bad);
+}
+.sec-fill-rule {
+  background: var(--accent);
+}
+.sec-n {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+.sec-surfaces,
+.sec-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 10px;
+}
+.sec-chips {
+  margin-top: 6px;
+}
+/* per-day columns */
+.sec-days {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 140px;
+  padding-bottom: 18px;
+  overflow-x: auto;
+}
+.sec-day {
+  flex: 1 0 14px;
+  max-width: 36px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  position: relative;
+}
+.sec-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 1px;
+  height: 100%;
+}
+.sec-seg {
+  display: block;
+  border-radius: 2px;
+}
+.sec-seg.sec-l-low {
+  background: var(--ok);
+  opacity: 0.55;
+}
+.sec-seg.sec-l-medium {
+  background: var(--warn);
+}
+.sec-seg.sec-l-high {
+  background: var(--bad);
+  opacity: 0.7;
+}
+.sec-seg.sec-l-critical {
+  background: var(--bad);
+}
+.sec-day-l {
+  position: absolute;
+  bottom: -16px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9.5px;
+  color: var(--muted);
+}
+/* matrix, tables, notes */
+table.sec-matrix td.sec-up {
+  font-weight: 600;
+}
+.sec-note {
+  margin-top: 6px;
+}
+table.sec-table {
+  width: 100%;
+  font-size: 12.5px;
+  border-collapse: collapse;
+}
+table.sec-table th,
+table.sec-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+table.sec-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+table.sec-table td.sec-max {
+  font-weight: 700;
+  color: var(--ink-accent);
+}
+.sec-rulelist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+.sec-pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+}
+/* item lists */
+.sec-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sec-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+  text-align: left;
+  padding: 8px 10px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+.sec-item:hover {
+  border-color: var(--accent);
+}
+.sec-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.sec-head {
+  font: 12px / 1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+.sec-meta {
+  overflow-wrap: anywhere;
+}
+.sec-tools {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.sec-eval div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+@media (max-width: 520px) {
+  .sec-bar-row {
+    grid-template-columns: 80px minmax(30px, 1fr) auto;
+  }
+  .sec-leg-bar {
+    display: none;
+  }
+}

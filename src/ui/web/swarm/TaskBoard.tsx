@@ -1,7 +1,9 @@
 import type { JSX } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { api, type SwarmTask, type SwarmTaskFull, type SwarmWorkerUi } from "../api.js";
+import { RiskBadge, RiskSummary } from "../security.js";
 import { cls } from "../util.js";
+import { badgeLabel } from "../views/security-helpers.js";
 import { Head, pure, RoleChip, State, useNow } from "./bits.js";
 import { GLYPH, rel, shortAgent } from "./style.js";
 
@@ -114,6 +116,16 @@ function Card({
               after {t.deps.map((d) => `#${d}`).join(", ")}
             </span>
           ) : null}
+          {t.risk ? (
+            <RiskBadge
+              level={t.risk.level}
+              score={t.risk.score}
+              compact
+              title={`${badgeLabel(t.risk.level, t.risk.score)} (${t.risk.surface} assessment)${
+                t.risk.reasons[0] ? `: ${t.risk.reasons[0]}` : ""
+              }`}
+            />
+          ) : null}
           <span class="age">{rel(t.updated_at, now)}</span>
         </div>
       </button>
@@ -128,6 +140,15 @@ function Card({
           ) : (
             <div class="lbl">no result yet</div>
           )}
+          {t.risk ? (
+            <>
+              <div class="lbl">
+                security ({t.risk.surface} assessment
+                {t.risk.modelRaised ? ", raised by the model" : ""})
+              </div>
+              <RiskSummary badge={t.risk} detail />
+            </>
+          ) : null}
           {full.loading ? <div class="lbl">… loading the full text</div> : null}
           {full.error ? (
             <div class="lbl bad">
